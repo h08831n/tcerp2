@@ -1,6 +1,23 @@
-// TCERP — Phase 1+2 foundation schema (Identity & Access, Audit, Settings,
-// Sequences, Files, Queue, Integrations). Domain modules (Party, Sales, …)
-// are added in later migrations. snake_case mapping, UUID PKs, timestamptz.
+// TCERP — schema after Architecture Correction Gate (2026-10-06).
+// Corrections applied vs. previous revision:
+//  * Multi-company readiness from day one (Company, UserCompany, company scoping).
+//  * No standalone BankTransaction source of truth — treasury sources are
+//    Receipt / Payment / BankTransfer / Check clearing / Bank Adjustment;
+//    BankStatementLine is a non-source ledger for ordering/running balance.
+//  * OperationalSettlementClaim (direction-aware) replaces sale-only claim.
+//  * Explicit SalesTaxInvoiceOrderAllocation / PurchaseTaxInvoiceOrderAllocation
+//    (no generic polymorphic allocation table).
+//  * Loading is header + LoadingLine + LoadingAllocation.
+//  * SupplierProduct mapping is genuinely three-level with a CHECK.
+//  * WorkflowTimer runtime entity (owner: Workflow engine, executor: queue).
+//  * NotificationRule gained company scope + conditions.
+//  * Queue: BullMQ/Redis = runtime, QueueJob/JobExecution = durable history.
+//  * Sequence engine: company scope + reset_cycle + concurrency-safe allocation.
+//  * TaxDefinition: company scoped, immutable after first use, snapshot on lines.
+//
+// Bare Uuid columns marked "Phase N FK" reference tables that land with their own
+// phase (Party/Product/Sales/Purchase). FK constraints are added by those phases'
+// migrations — the columns exist now so corrected relations never need renumbering.
 
 generator client {
   provider = "prisma-client-js"
@@ -9,6 +26,47 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Company ─────────────────────────────
+
+enum CompanyStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model Company {
+  id           String        @id @default(uuid()) @db.Uuid
+  nameFa       String        @map("name_fa")
+  nameEn       String?       @map("name_en")
+  nationalId   String?       @map("national_id")
+  economicCode String?       @map("economic_code")
+  status       CompanyStatus @default(ACTIVE)
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users              UserCompany[]
+  teams              Team[]
+  settings           Setting[]
+  sequences          Sequence[]
+  integrationConfigs IntegrationConfig[]
+  notificationRules  NotificationRule[]
+  queueJobs          QueueJob[]
+  bankAccounts       BankAccount[]
+  chartOfAccounts    ChartOfAccount[]
+  journalEntries     JournalEntry[]
+  receipts           Receipt[]
+  payments           Payment[]
+  bankTransfers      BankTransfer[]
+  checks             Check[]
+  taxDefinitions     TaxDefinition[]
+  claims             OperationalSettlementClaim[]
+  loadings           Loading[]
+  workflowDefinitions WorkflowDefinition[]
+  portalAccounts     PortalAccount[]
+  defaultUsers       User[]
+
+  @@map("companies")
 }
 
 // ───────────────────────── Identity & Access ─────────────────────────
@@ -30,6 +88,7 @@ model User {
   status             UserStatus @default(ACTIVE)
   language           String     @default("fa")
   timezone           String     @default("Asia/Tehran")
+  defaultCompanyId   String?    @map("default_company_id") @db.Uuid
   version            Int        @default(1) // optimistic locking
   failedLoginCount   Int        @default(0) @map("failed_login_count")
   lockedUntil        DateTime?  @map("locked_until") @db.Timestamptz(6)
@@ -39,6 +98,8 @@ model User {
   updatedAt          DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   createdBy          String?    @map("created_by") @db.Uuid
 
+  defaultCompany  Company?                 @relation(fields: [defaultCompanyId], references: [id])
+  companies       UserCompany[]
   roles           UserRole[]
   overrides       UserPermissionOverride[]
   refreshTokens   RefreshToken[]
@@ -46,6 +107,22 @@ model User {
 
   @@index([status])
   @@map("users")
+}
+
+// Membership of a user in a company; roles may later be granted per company
+// (company-specific roles) — permission checks resolve scopes through this table.
+model UserCompany {
+  userId    String   @map("user_id") @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([userId, companyId])
+  @@index([companyId])
+  @@map("user_companies")
 }
 
 model RefreshToken {
@@ -66,9 +143,11 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
+// Roles & permissions are system-level; company-specific role bindings are
+// resolved through UserCompany + future role-scope columns (ERD §Identity).
 model Role {
   id        String   @id @default(uuid()) @db.Uuid
-  code      String   @unique // e.g. salesperson
+  code      String   @unique
   nameFa    String   @map("name_fa")
   nameEn    String   @map("name_en")
   isSystem  Boolean  @default(false) @map("is_system")
@@ -83,9 +162,9 @@ model Role {
 
 model Permission {
   id          String  @id @default(uuid()) @db.Uuid
-  code        String  @unique // e.g. users.view
-  module      String // e.g. users
-  action      String // e.g. view | create | edit | delete | confirm | export
+  code        String  @unique
+  module      String
+  action      String
   description String?
 
   roles     RolePermission[]
@@ -140,13 +219,16 @@ model UserPermissionOverride {
 
 model Team {
   id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
   name      String
   managerId String?  @map("manager_id") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company Company      @relation(fields: [companyId], references: [id])
   members TeamMember[]
 
+  @@index([companyId])
   @@map("teams")
 }
 
@@ -166,9 +248,10 @@ model TeamMember {
 
 model AuditLog {
   id         String  @id @default(uuid()) @db.Uuid
+  companyId  String? @map("company_id") @db.Uuid // null = platform-level event
   entityType String  @map("entity_type")
   entityId   String  @map("entity_id")
-  action     String // CREATE | UPDATE | DELETE | ARCHIVE | LOGIN | LOGIN_FAILED | OVERRIDE | EXPORT | IMPORT | ...
+  action     String
   actorId    String? @map("actor_id") @db.Uuid
   actorName  String? @map("actor_name") // snapshot, survives user deletion
   oldValues  Json?   @map("old_values")
@@ -180,6 +263,7 @@ model AuditLog {
 
   @@index([entityType, entityId])
   @@index([actorId])
+  @@index([companyId])
   @@index([createdAt])
   @@map("audit_logs")
 }
@@ -188,7 +272,8 @@ model AuditLog {
 
 model Setting {
   id          String   @id @default(uuid()) @db.Uuid
-  key         String   @unique
+  companyId   String   @map("company_id") @db.Uuid
+  key         String
   value       Json
   category    String   @default("general")
   description String?
@@ -196,25 +281,40 @@ model Setting {
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, key])
   @@index([category])
   @@map("settings")
 }
 
 // ─────────────────────────── Sequences ───────────────────────────
+// Company-scoped, concurrency-safe, cycle-resettable numbering.
+// Existing documents are NEVER renumbered after a format change.
+
+enum SequenceResetCycle {
+  NEVER
+  FISCAL_YEAR
+  JALALI_YEAR
+  MONTHLY
+}
 
 model Sequence {
-  id                String   @id @default(uuid()) @db.Uuid
-  code              String   @unique // e.g. SALES_DOCUMENT
-  name              String
-  prefix            String // e.g. SD
-  padding           Int      @default(5)
-  includeJalaliYear Boolean  @default(false) @map("include_jalali_year")
-  resetYearly       Boolean  @default(false) @map("reset_yearly")
-  currentNumber     Int      @default(0) @map("current_number")
-  lastResetYear     Int?     @map("last_reset_year")
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String             @id @default(uuid()) @db.Uuid
+  companyId       String             @map("company_id") @db.Uuid
+  documentType    String             @map("document_type") // e.g. SALES_DOCUMENT
+  name            String
+  prefix          String
+  padding         Int                @default(5)
+  resetCycle      SequenceResetCycle @default(NEVER) @map("reset_cycle")
+  currentNumber   Int                @default(0) @map("current_number")
+  lastResetMarker String?            @map("last_reset_marker") // e.g. 1405 for JALALI_YEAR, 1405-07 for MONTHLY
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, documentType])
   @@map("sequences")
 }
 
@@ -240,7 +340,7 @@ model FileAttachment {
   fileBlobId String   @map("file_blob_id") @db.Uuid
   entityType String   @map("entity_type")
   entityId   String   @map("entity_id")
-  category   String? // e.g. weighbridge_image, bill_of_lading
+  category   String?
   createdBy  String?  @map("created_by") @db.Uuid
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -252,6 +352,8 @@ model FileAttachment {
 }
 
 // ───────────────────────────── Queue ─────────────────────────────
+// BullMQ/Redis owns runtime execution/scheduling/retry; QueueJob +
+// JobExecution own durable business history, status and idempotency.
 
 enum QueuePriority {
   CRITICAL
@@ -272,6 +374,7 @@ enum QueueJobStatus {
 
 model QueueJob {
   id             String         @id @default(uuid()) @db.Uuid
+  companyId      String?        @map("company_id") @db.Uuid // null = platform-level job
   queueName      String         @default("default") @map("queue_name")
   jobType        String         @map("job_type")
   payload        Json
@@ -287,32 +390,53 @@ model QueueJob {
   createdBy      String?        @map("created_by") @db.Uuid
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  company   Company?       @relation(fields: [companyId], references: [id])
+  executions JobExecution[]
+
   @@index([status, priority, scheduledAt])
   @@index([jobType, status])
   @@map("queue_jobs")
 }
 
+// Append-only per-attempt history (REQUIREMENTS §70/§71: history retained).
+model JobExecution {
+  id         String         @id @default(uuid()) @db.Uuid
+  jobId      String         @map("job_id") @db.Uuid
+  attemptNo  Int            @map("attempt_no")
+  status     QueueJobStatus
+  startedAt  DateTime       @map("started_at") @db.Timestamptz(6)
+  finishedAt DateTime?      @map("finished_at") @db.Timestamptz(6)
+  error      String?
+
+  job QueueJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, attemptNo])
+  @@map("job_executions")
+}
+
 // ──────────────────────── Integrations ────────────────────────
 
-// Secrets are NOT stored here; adapter-specific secret columns are added
-// encrypted by the owning module (e.g. Moadian keys in its own table).
 model IntegrationConfig {
   id        String   @id @default(uuid()) @db.Uuid
-  code      String   @unique // e.g. sms.kavenegar, moadian.main, telegram.prices
+  companyId String   @map("company_id") @db.Uuid
+  code      String
   name      String
   type      String // SMS | TELEGRAM | WHATSAPP | EITAA | BALE | RUBIKA | WEBSITE | MOADIAN | EMAIL
   isActive  Boolean  @default(false) @map("is_active")
   isPrimary Boolean  @default(false) @map("is_primary")
-  config    Json // non-secret adapter settings
+  config    Json // non-secret adapter settings; secrets stay in encrypted columns owned by the module
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   updatedBy String?  @map("updated_by") @db.Uuid
 
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, code])
   @@index([type])
   @@map("integration_configs")
 }
 
-// ─────────────────────── Notifications (in-app) ───────────────────────
+// ─────────────────────── Notifications ───────────────────────
 
 enum NotificationStatus {
   UNREAD
@@ -321,33 +445,576 @@ enum NotificationStatus {
 }
 
 model Notification {
-  id            String             @id @default(uuid()) @db.Uuid
-  userId        String             @map("user_id") @db.Uuid
-  title         String
-  body          String?
-  relatedEntityType String?        @map("related_entity_type")
-  relatedEntityId   String?        @map("related_entity_id") // deep-link target
-  priority      QueuePriority      @default(NORMAL)
-  status        NotificationStatus @default(UNREAD)
-  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  readAt        DateTime?          @map("read_at") @db.Timestamptz(6)
+  id                String             @id @default(uuid()) @db.Uuid
+  userId            String             @map("user_id") @db.Uuid
+  title             String
+  body              String?
+  relatedEntityType String?            @map("related_entity_type")
+  relatedEntityId   String?            @map("related_entity_id")
+  priority          QueuePriority      @default(NORMAL)
+  status            NotificationStatus @default(UNREAD)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  readAt            DateTime?          @map("read_at") @db.Timestamptz(6)
 
   @@index([userId, status, createdAt])
   @@map("notifications")
 }
 
 model NotificationRule {
-  id         String   @id @default(uuid()) @db.Uuid
-  code       String   @unique
-  event      String // e.g. payment.rejected, quotation.followup
-  recipients Json // [{type: RECORD_OWNER|ROLE|USER, value}]
-  channels   Json // [IN_APP, SMS]
-  delayMinutes Int    @default(0) @map("delay_minutes")
-  priority   QueuePriority @default(NORMAL)
-  enabled    Boolean  @default(true)
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String        @id @default(uuid()) @db.Uuid
+  companyId       String        @map("company_id") @db.Uuid
+  code            String
+  event           String // e.g. payment.rejected, quotation.followup
+  conditions      Json? // e.g. {"all":[{"field":"claimDirection","equals":"CUSTOMER_RECEIPT"}]}
+  recipientConfig Json          @map("recipient_config") // [{type: RECORD_OWNER|ROLE|USER, value}]
+  channels        Json // [IN_APP, SMS]
+  delayConfig     Json?         @map("delay_config") // {"delayMinutes":0,"jitter":...}
+  priority        QueuePriority @default(NORMAL)
+  enabled         Boolean       @default(true)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, code])
   @@index([event, enabled])
   @@map("notification_rules")
+}
+
+// ─────────────────── Workflow (foundation for timers) ───────────────────
+
+model WorkflowDefinition {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String
+  name      String
+  entityType String  @map("entity_type") // SALES_DOCUMENT | PURCHASE | LOADING | ...
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company   Company            @relation(fields: [companyId], references: [id])
+  states    WorkflowState[]
+  instances WorkflowInstance[]
+
+  @@unique([companyId, code])
+  @@map("workflow_definitions")
+}
+
+model WorkflowState {
+  id           String @id @default(uuid()) @db.Uuid
+  definitionId String @map("definition_id") @db.Uuid
+  code         String
+  name         String
+
+  definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  instances  WorkflowInstance[]
+  timers     WorkflowTimer[]
+
+  @@unique([definitionId, code])
+  @@map("workflow_states")
+}
+
+model WorkflowInstance {
+  id             String   @id @default(uuid()) @db.Uuid
+  definitionId   String   @map("definition_id") @db.Uuid
+  currentStateId String?  @map("current_state_id") @db.Uuid
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  status         String   @default("ACTIVE") // ACTIVE | COMPLETED | CANCELLED
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  definition WorkflowDefinition @relation(fields: [definitionId], references: [id])
+  currentState WorkflowState?   @relation(fields: [currentStateId], references: [id])
+  timers WorkflowTimer[]
+
+  @@unique([definitionId, entityType, entityId])
+  @@index([entityType, entityId])
+  @@map("workflow_instances")
+}
+
+model WorkflowTimer {
+  id                 String       @id @default(uuid()) @db.Uuid
+  workflowInstanceId String       @map("workflow_instance_id") @db.Uuid
+  stateId            String       @map("state_id") @db.Uuid
+  timerType          String       @map("timer_type") // ESCALATION | REMINDER | TIMEOUT
+  dueAt              DateTime     @map("due_at") @db.Timestamptz(6)
+  status             TimerStatus  @default(SCHEDULED)
+  actionConfig       Json         @map("action_config")
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  executedAt         DateTime?    @map("executed_at") @db.Timestamptz(6)
+
+  instance WorkflowInstance @relation(fields: [workflowInstanceId], references: [id], onDelete: Cascade)
+  state    WorkflowState    @relation(fields: [stateId], references: [id])
+
+  @@index([status, dueAt])
+  @@map("workflow_timers")
+}
+
+enum TimerStatus {
+  SCHEDULED
+  EXECUTED
+  CANCELLED
+  FAILED
+}
+
+// ─────────────────────── Tax definitions ───────────────────────
+// Company-scoped, append-only after first use: rate change = new row.
+// Documents keep tax_rate_snapshot and never change retroactively.
+
+model TaxDefinition {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String // e.g. VAT_9
+  name      String // e.g. ارزش افزوده ۹٪
+  rate      Decimal  @db.Decimal(9, 4) // percent, e.g. 9.0000
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, code])
+  @@map("tax_definitions")
+}
+
+// ─────────────── Operational settlement claims ───────────────
+// Salesperson-declared settlements; operational balance effect is temporary
+// until the accountant matches it to a treasury document. Rejecting restores
+// the operational balance and emits audit + timeline + notification.
+
+enum ClaimDirection {
+  CUSTOMER_RECEIPT
+  SUPPLIER_PAYMENT
+}
+
+enum ClaimStatus {
+  UNMATCHED
+  MATCHED
+  REJECTED
+}
+
+model OperationalSettlementClaim {
+  id                  String        @id @default(uuid()) @db.Uuid
+  companyId           String        @map("company_id") @db.Uuid
+  direction           ClaimDirection
+  partyId             String        @map("party_id") @db.Uuid // Party FK lands in Phase 3
+  salesDocumentId     String?       @map("sales_document_id") @db.Uuid // Phase 4 FK
+  purchaseDocumentId  String?       @map("purchase_document_id") @db.Uuid // Phase 4 FK
+  amount              Decimal       @db.Decimal(20, 4)
+  currency            String        @default("IRR")
+  status              ClaimStatus   @default(UNMATCHED)
+  declaredAt          DateTime      @default(now()) @map("declared_at") @db.Timestamptz(6)
+  declaredBy          String?       @map("declared_by") @db.Uuid
+  matchedReceiptId    String?       @map("matched_receipt_id") @db.Uuid
+  matchedPaymentId    String?       @map("matched_payment_id") @db.Uuid
+  rejectionReason     String?       @map("rejection_reason")
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, status])
+  @@index([partyId, status])
+  @@map("operational_settlement_claims")
+}
+
+// Cached operational (non-accounting) balance per party. UNMATCHED claims move
+// it temporarily; REJECTED restores it. Phase 4/7 will keep this in sync with
+// real order/invoice/receipt postings (optimistic version for concurrent edits).
+model PartyOperationalBalance {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  partyId   String   @map("party_id") @db.Uuid // Party FK lands in Phase 3
+  balance   Decimal  @default(0) @db.Decimal(20, 4) // positive = party owes the company
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([companyId, partyId])
+  @@map("party_operational_balances")
+}
+
+// ─────────────── Tax invoice ↔ order allocations (M:N) ───────────────
+// Two explicit tables; no generic polymorphic allocation.
+
+model SalesTaxInvoiceOrderAllocation {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  salesTaxInvoiceId String  @map("sales_tax_invoice_id") @db.Uuid // Phase 8 FK
+  salesDocumentId  String   @map("sales_document_id") @db.Uuid // Phase 4 FK
+  allocatedAmount  Decimal  @map("allocated_amount") @db.Decimal(20, 4)
+  allocatedQuantity Decimal? @map("allocated_quantity") @db.Decimal(18, 4)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([salesTaxInvoiceId, salesDocumentId])
+  @@index([salesDocumentId])
+  @@map("sales_tax_invoice_order_allocations")
+}
+
+model PurchaseTaxInvoiceOrderAllocation {
+  id                 String   @id @default(uuid()) @db.Uuid
+  companyId          String   @map("company_id") @db.Uuid
+  purchaseTaxInvoiceId String @map("purchase_tax_invoice_id") @db.Uuid // Phase 8 FK
+  purchaseDocumentId String   @map("purchase_document_id") @db.Uuid // Phase 4 FK
+  allocatedAmount    Decimal  @map("allocated_amount") @db.Decimal(20, 4)
+  allocatedQuantity  Decimal? @map("allocated_quantity") @db.Decimal(18, 4)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([purchaseTaxInvoiceId, purchaseDocumentId])
+  @@index([purchaseDocumentId])
+  @@map("purchase_tax_invoice_order_allocations")
+}
+
+// ───────────────── Supplier ↔ product mapping ─────────────────
+// Genuinely three-level: exactly one of variant/template/category is set
+// (enforced by CHECK constraint added in migration).
+
+enum SupplierMappingLevel {
+  VARIANT
+  TEMPLATE
+  CATEGORY
+}
+
+model SupplierProduct {
+  id                String              @id @default(uuid()) @db.Uuid
+  companyId         String              @map("company_id") @db.Uuid
+  supplierPartyId   String              @map("supplier_party_id") @db.Uuid // Party FK lands in Phase 3
+  mappingLevel      SupplierMappingLevel @map("mapping_level")
+  productVariantId  String?             @map("product_variant_id") @db.Uuid // Phase 3 FK
+  productTemplateId String?             @map("product_template_id") @db.Uuid // Phase 3 FK
+  categoryId        String?             @map("category_id") @db.Uuid // Phase 3 FK
+  supplierProductCode String?           @map("supplier_product_code")
+  isActive          Boolean             @default(true) @map("is_active")
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([companyId, supplierPartyId])
+  @@map("supplier_products")
+}
+
+// ───────────────────────── Loading ─────────────────────────
+// Header + lines: one bill of lading may carry several products; each line
+// records the explicit product and actual quantity. Allocations link lines
+// to sales/purchase lines; a loading is registered ONCE and shown on both sides.
+
+model Loading {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  loadingDate    DateTime @map("loading_date") @db.Timestamptz(6)
+  driverPartyId  String?  @map("driver_party_id") @db.Uuid // Phase 3 FK (Party role DRIVER)
+  carrierPartyId String?  @map("carrier_party_id") @db.Uuid // Phase 3 FK (Party role CARRIER)
+  notes          String?
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company       @relation(fields: [companyId], references: [id])
+  lines   LoadingLine[]
+
+  @@index([companyId, loadingDate])
+  @@map("loadings")
+}
+
+model LoadingLine {
+  id              String  @id @default(uuid()) @db.Uuid
+  loadingId       String  @map("loading_id") @db.Uuid
+  productVariantId String @map("product_variant_id") @db.Uuid // Phase 3 FK
+  actualQuantity  Decimal @map("actual_quantity") @db.Decimal(18, 4)
+  uomId           String? @map("uom_id") @db.Uuid // Phase 3 FK
+  notes           String?
+
+  loading Loading           @relation(fields: [loadingId], references: [id], onDelete: Cascade)
+  allocations LoadingAllocation[]
+
+  @@index([loadingId])
+  @@map("loading_lines")
+}
+
+model LoadingAllocation {
+  id                String  @id @default(uuid()) @db.Uuid
+  loadingLineId     String  @map("loading_line_id") @db.Uuid
+  salesLineId       String? @map("sales_line_id") @db.Uuid // Phase 4 FK
+  purchaseLineId    String? @map("purchase_line_id") @db.Uuid // Phase 4 FK
+  allocatedQuantity Decimal @map("allocated_quantity") @db.Decimal(18, 4)
+
+  loadingLine LoadingLine @relation(fields: [loadingLineId], references: [id], onDelete: Cascade)
+
+  @@index([loadingLineId])
+  @@map("loading_allocations")
+}
+
+// ───────────────────── Accounting foundation ─────────────────────
+
+model ChartOfAccount {
+  id        String  @id @default(uuid()) @db.Uuid
+  companyId String  @map("company_id") @db.Uuid
+  code      String
+  name      String
+  type      AccountType
+  parentId  String? @map("parent_id") @db.Uuid
+
+  company  Company          @relation(fields: [companyId], references: [id])
+  parent   ChartOfAccount?  @relation("AccountTree", fields: [parentId], references: [id])
+  children ChartOfAccount[] @relation("AccountTree")
+  lines    JournalLine[]
+
+  @@unique([companyId, code])
+  @@map("chart_of_accounts")
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum JournalEntryStatus {
+  DRAFT
+  POSTED
+  REVERSED
+  CANCELLED
+}
+
+model JournalEntry {
+  id             String             @id @default(uuid()) @db.Uuid
+  companyId      String             @map("company_id") @db.Uuid
+  entryNumber    String             @map("entry_number")
+  entryDate      DateTime           @map("entry_date") @db.Timestamptz(6)
+  journalCode    String             @default("GENERAL") @map("journal_code")
+  documentType   String?            @map("document_type") // BANK_TRANSFER | RECEIPT | PAYMENT | CHECK_CLEAR ...
+  description    String?
+  status         JournalEntryStatus @default(DRAFT)
+  postedAt       DateTime?          @map("posted_at") @db.Timestamptz(6)
+  reversedByEntryId String?         @map("reversed_by_entry_id") @db.Uuid
+  version        Int                @default(1)
+  createdBy      String?            @map("created_by") @db.Uuid
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company    Company       @relation(fields: [companyId], references: [id])
+  lines      JournalLine[]
+  statementLines BankStatementLine[]
+
+  @@unique([companyId, entryNumber])
+  @@index([companyId, entryDate])
+  @@map("journal_entries")
+}
+
+// Invariants enforced in DB (migration CHECKs) and in JournalService:
+//   debit >= 0, credit >= 0, never both positive on one line,
+//   SUM(debit) == SUM(credit) enforced inside the POST transaction,
+//   posted entries are never edited/deleted — corrected via REVERSED.
+model JournalLine {
+  id             String  @id @default(uuid()) @db.Uuid
+  companyId      String  @map("company_id") @db.Uuid
+  journalEntryId String  @map("journal_entry_id") @db.Uuid
+  accountId      String  @map("account_id") @db.Uuid
+  partyId        String? @map("party_id") @db.Uuid // subsidiary ledger detail; Phase 3 FK
+  description    String?
+  debit          Decimal @default(0) @db.Decimal(20, 4)
+  credit         Decimal @default(0) @db.Decimal(20, 4)
+
+  entry   JournalEntry   @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account ChartOfAccount @relation(fields: [accountId], references: [id])
+
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_lines")
+}
+
+model BankAccount {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  name          String
+  bankName      String   @map("bank_name")
+  accountNumber String?  @map("account_number")
+  iban          String?
+  currency      String   @default("IRR")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company        Company             @relation(fields: [companyId], references: [id])
+  statementLines BankStatementLine[]
+  receipts       Receipt[]
+  payments       Payment[]
+  sourceTransfers      BankTransfer[] @relation("TransferSource")
+  destinationTransfers BankTransfer[] @relation("TransferDestination")
+  checks         Check[]
+
+  @@index([companyId])
+  @@map("bank_accounts")
+}
+
+// NOT a source of accounting truth. Ledger/ordering projection of treasury
+// documents (Receipt, Payment, BankTransfer, Check clearing, Bank Adjustment):
+// deterministic daily ordering + running balance + reconciliation links.
+enum BankLineDirection {
+  DEPOSIT
+  WITHDRAWAL
+}
+
+model BankStatementLine {
+  id              String            @id @default(uuid()) @db.Uuid
+  companyId       String            @map("company_id") @db.Uuid
+  bankAccountId   String            @map("bank_account_id") @db.Uuid
+  entryDate       DateTime          @map("entry_date") @db.Date
+  sequenceNo      Int               @map("sequence_no")
+  direction       BankLineDirection
+  amount          Decimal           @db.Decimal(20, 4)
+  runningBalance  Decimal           @map("running_balance") @db.Decimal(20, 4)
+  referenceNumber String?           @map("reference_number")
+  description     String?
+  sourceEntityType String?          @map("source_entity_type") // RECEIPT | PAYMENT | BANK_TRANSFER | CHECK
+  sourceEntityId  String?           @map("source_entity_id") @db.Uuid
+  journalEntryId  String?           @map("journal_entry_id") @db.Uuid
+  isReconciled    Boolean           @default(false) @map("is_reconciled")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  bankAccount BankAccount    @relation(fields: [bankAccountId], references: [id])
+  journalEntry JournalEntry? @relation(fields: [journalEntryId], references: [id])
+
+  @@unique([companyId, bankAccountId, entryDate, sequenceNo])
+  @@index([bankAccountId, entryDate])
+  @@map("bank_statement_lines")
+}
+
+model Receipt {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  receiptNumber  String   @map("receipt_number")
+  bankAccountId  String   @map("bank_account_id") @db.Uuid
+  partyId        String?  @map("party_id") @db.Uuid // Phase 3 FK
+  amount         Decimal  @db.Decimal(20, 4)
+  receiptDate    DateTime @map("receipt_date") @db.Timestamptz(6)
+  description    String?
+  journalEntryId String?  @map("journal_entry_id") @db.Uuid
+  settlementClaimId String? @map("settlement_claim_id") @db.Uuid
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company     Company     @relation(fields: [companyId], references: [id])
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@unique([companyId, receiptNumber])
+  @@map("receipts")
+}
+
+model Payment {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  paymentNumber  String   @map("payment_number")
+  bankAccountId  String   @map("bank_account_id") @db.Uuid
+  partyId        String?  @map("party_id") @db.Uuid // Phase 3 FK
+  amount         Decimal  @db.Decimal(20, 4)
+  paymentDate    DateTime @map("payment_date") @db.Timestamptz(6)
+  description    String?
+  journalEntryId String?  @map("journal_entry_id") @db.Uuid
+  settlementClaimId String? @map("settlement_claim_id") @db.Uuid
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company     Company     @relation(fields: [companyId], references: [id])
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@unique([companyId, paymentNumber])
+  @@map("payments")
+}
+
+// Transfer X with fee F:
+//   Dr Destination Bank X, Dr Bank Fee Expense F, Cr Source Bank X+F
+//   Statement lines: source WITHDRAWAL X+F, destination DEPOSIT X.
+model BankTransfer {
+  id                      String   @id @default(uuid()) @db.Uuid
+  companyId               String   @map("company_id") @db.Uuid
+  transferNumber          String   @map("transfer_number")
+  sourceBankAccountId     String   @map("source_bank_account_id") @db.Uuid
+  destinationBankAccountId String  @map("destination_bank_account_id") @db.Uuid
+  amount                  Decimal  @db.Decimal(20, 4)
+  fee                     Decimal  @default(0) @db.Decimal(20, 4)
+  transferDate            DateTime @map("transfer_date") @db.Timestamptz(6)
+  description             String?
+  journalEntryId          String?  @map("journal_entry_id") @db.Uuid
+  createdBy               String?  @map("created_by") @db.Uuid
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sourceBankAccount      BankAccount @relation("TransferSource", fields: [sourceBankAccountId], references: [id])
+  destinationBankAccount BankAccount @relation("TransferDestination", fields: [destinationBankAccountId], references: [id])
+  company                Company     @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, transferNumber])
+  @@map("bank_transfers")
+}
+
+// Bank effect happens ONLY on Incoming CLEARED / Outgoing PAID.
+enum CheckDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum CheckStatus {
+  REGISTERED
+  PENDING
+  DEPOSITED
+  CLEARED // incoming only
+  PAID // outgoing only
+  BOUNCED
+  CANCELLED
+}
+
+model Check {
+  id             String        @id @default(uuid()) @db.Uuid
+  companyId      String        @map("company_id") @db.Uuid
+  direction      CheckDirection
+  checkNumber    String        @map("check_number")
+  bankName       String?       @map("bank_name")
+  partyId        String?       @map("party_id") @db.Uuid // Phase 3 FK
+  amount         Decimal       @db.Decimal(20, 4)
+  issueDate      DateTime?     @map("issue_date") @db.Timestamptz(6)
+  dueDate        DateTime      @map("due_date") @db.Timestamptz(6)
+  status         CheckStatus   @default(REGISTERED)
+  bankAccountId  String?       @map("bank_account_id") @db.Uuid // required before CLEARED/PAID
+  journalEntryId String?       @map("journal_entry_id") @db.Uuid
+  description    String?
+  createdBy      String?       @map("created_by") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company     Company      @relation(fields: [companyId], references: [id])
+  bankAccount BankAccount? @relation(fields: [bankAccountId], references: [id])
+
+  @@index([companyId, status, dueDate])
+  @@map("checks")
+}
+
+// ───────────────────── Customer portal ─────────────────────
+// verified_mobile is used ONLY for initial linking; after linking, lookups go
+// through portalAccountId. Ambiguous mobile → nothing exposed automatically.
+
+enum PortalAccountStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+model PortalAccount {
+  id             String             @id @default(uuid()) @db.Uuid
+  companyId      String             @map("company_id") @db.Uuid
+  partyId        String             @map("party_id") @db.Uuid // Phase 3 FK
+  websiteUserId  String?            @map("website_user_id")
+  verifiedMobile String             @map("verified_mobile")
+  status         PortalAccountStatus @default(PENDING)
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, verifiedMobile])
+  @@index([partyId])
+  @@map("portal_accounts")
 }
