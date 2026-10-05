@@ -1,0 +1,15 @@
+{
+  "name": "tcerp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TCERP — Steel & Iron B2B Trading ERP (CRM + ERP + Accounting)",
+  "scripts": {
+    "dev:backend": "npm --prefix apps/backend run start:dev",
+    "dev:frontend": "npm --prefix apps/frontend run dev",
+    "build": "npm --prefix apps/backend run build && npm --prefix apps/frontend run build",
+    "test:backend": "npm --prefix apps/backend run test",
+    "db:up": "docker compose up -d postgres redis minio",
+    "db:migrate": "npm --prefix apps/backend run prisma:migrate",
+    "db:seed": "npm --prefix apps/backend run db:seed"
+  }
+}

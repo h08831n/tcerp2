@@ -1,0 +1,353 @@
+// TCERP — Phase 1+2 foundation schema (Identity & Access, Audit, Settings,
+// Sequences, Files, Queue, Integrations). Domain modules (Party, Sales, …)
+// are added in later migrations. snake_case mapping, UUID PKs, timestamptz.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Identity & Access ─────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  LOCKED
+}
+
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  username           String     @unique
+  email              String?    @unique
+  passwordHash       String     @map("password_hash")
+  firstName          String?    @map("first_name")
+  lastName           String?    @map("last_name")
+  mobile             String?
+  status             UserStatus @default(ACTIVE)
+  language           String     @default("fa")
+  timezone           String     @default("Asia/Tehran")
+  version            Int        @default(1) // optimistic locking
+  failedLoginCount   Int        @default(0) @map("failed_login_count")
+  lockedUntil        DateTime?  @map("locked_until") @db.Timestamptz(6)
+  mustChangePassword Boolean    @default(false) @map("must_change_password")
+  lastLoginAt        DateTime?  @map("last_login_at") @db.Timestamptz(6)
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdBy          String?    @map("created_by") @db.Uuid
+
+  roles           UserRole[]
+  overrides       UserPermissionOverride[]
+  refreshTokens   RefreshToken[]
+  teamMemberships TeamMember[]
+
+  @@index([status])
+  @@map("users")
+}
+
+model RefreshToken {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  tokenHash         String    @unique @map("token_hash") // sha256 of the raw token
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  replacedByTokenId String?   @map("replaced_by_token_id") @db.Uuid
+  ip                String?
+  userAgent         String?   @map("user_agent")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Role {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique // e.g. salesperson
+  nameFa    String   @map("name_fa")
+  nameEn    String   @map("name_en")
+  isSystem  Boolean  @default(false) @map("is_system")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique // e.g. users.view
+  module      String // e.g. users
+  action      String // e.g. view | create | edit | delete | confirm | export
+  description String?
+
+  roles     RolePermission[]
+  overrides UserPermissionOverride[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId     String   @map("user_id") @db.Uuid
+  roleId     String   @map("role_id") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+enum OverrideMode {
+  GRANT
+  REVOKE
+}
+
+model UserPermissionOverride {
+  userId       String       @map("user_id") @db.Uuid
+  permissionId String       @map("permission_id") @db.Uuid
+  mode         OverrideMode
+  reason       String?
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdBy    String?      @map("created_by") @db.Uuid
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permission_overrides")
+}
+
+model Team {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  managerId String?  @map("manager_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  members TeamMember[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  teamId   String   @map("team_id") @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  joinedAt DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@map("team_members")
+}
+
+// ───────────────────────────── Audit ─────────────────────────────
+
+model AuditLog {
+  id         String  @id @default(uuid()) @db.Uuid
+  entityType String  @map("entity_type")
+  entityId   String  @map("entity_id")
+  action     String // CREATE | UPDATE | DELETE | ARCHIVE | LOGIN | LOGIN_FAILED | OVERRIDE | EXPORT | IMPORT | ...
+  actorId    String? @map("actor_id") @db.Uuid
+  actorName  String? @map("actor_name") // snapshot, survives user deletion
+  oldValues  Json?   @map("old_values")
+  newValues  Json?   @map("new_values")
+  reason     String?
+  ip         String?
+  userAgent  String? @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────── Settings ───────────────────────────
+
+model Setting {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique
+  value       Json
+  category    String   @default("general")
+  description String?
+  updatedBy   String?  @map("updated_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([category])
+  @@map("settings")
+}
+
+// ─────────────────────────── Sequences ───────────────────────────
+
+model Sequence {
+  id                String   @id @default(uuid()) @db.Uuid
+  code              String   @unique // e.g. SALES_DOCUMENT
+  name              String
+  prefix            String // e.g. SD
+  padding           Int      @default(5)
+  includeJalaliYear Boolean  @default(false) @map("include_jalali_year")
+  resetYearly       Boolean  @default(false) @map("reset_yearly")
+  currentNumber     Int      @default(0) @map("current_number")
+  lastResetYear     Int?     @map("last_reset_year")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("sequences")
+}
+
+// ───────────────────────────── Files ─────────────────────────────
+
+model FileBlob {
+  id         String   @id @default(uuid()) @db.Uuid
+  sha256     String   @unique
+  filename   String
+  mimeType   String   @map("mime_type")
+  size       BigInt
+  storageKey String   @map("storage_key")
+  createdBy  String?  @map("created_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  attachments FileAttachment[]
+
+  @@map("file_blobs")
+}
+
+model FileAttachment {
+  id         String   @id @default(uuid()) @db.Uuid
+  fileBlobId String   @map("file_blob_id") @db.Uuid
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  category   String? // e.g. weighbridge_image, bill_of_lading
+  createdBy  String?  @map("created_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  fileBlob FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)
+
+  @@index([entityType, entityId])
+  @@index([fileBlobId])
+  @@map("file_attachments")
+}
+
+// ───────────────────────────── Queue ─────────────────────────────
+
+enum QueuePriority {
+  CRITICAL
+  HIGH
+  NORMAL
+  LOW
+}
+
+enum QueueJobStatus {
+  PENDING
+  SCHEDULED
+  PROCESSING
+  RETRYING
+  FAILED
+  SUCCEEDED
+  CANCELLED
+}
+
+model QueueJob {
+  id             String         @id @default(uuid()) @db.Uuid
+  queueName      String         @default("default") @map("queue_name")
+  jobType        String         @map("job_type")
+  payload        Json
+  priority       QueuePriority  @default(NORMAL)
+  status         QueueJobStatus @default(PENDING)
+  attemptCount   Int            @default(0) @map("attempt_count")
+  maxAttempts    Int            @default(5) @map("max_attempts")
+  scheduledAt    DateTime       @default(now()) @map("scheduled_at") @db.Timestamptz(6)
+  startedAt      DateTime?      @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime?      @map("finished_at") @db.Timestamptz(6)
+  lastError      String?        @map("last_error")
+  idempotencyKey String?        @unique @map("idempotency_key")
+  createdBy      String?        @map("created_by") @db.Uuid
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([status, priority, scheduledAt])
+  @@index([jobType, status])
+  @@map("queue_jobs")
+}
+
+// ──────────────────────── Integrations ────────────────────────
+
+// Secrets are NOT stored here; adapter-specific secret columns are added
+// encrypted by the owning module (e.g. Moadian keys in its own table).
+model IntegrationConfig {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique // e.g. sms.kavenegar, moadian.main, telegram.prices
+  name      String
+  type      String // SMS | TELEGRAM | WHATSAPP | EITAA | BALE | RUBIKA | WEBSITE | MOADIAN | EMAIL
+  isActive  Boolean  @default(false) @map("is_active")
+  isPrimary Boolean  @default(false) @map("is_primary")
+  config    Json // non-secret adapter settings
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([type])
+  @@map("integration_configs")
+}
+
+// ─────────────────────── Notifications (in-app) ───────────────────────
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  ARCHIVED
+}
+
+model Notification {
+  id            String             @id @default(uuid()) @db.Uuid
+  userId        String             @map("user_id") @db.Uuid
+  title         String
+  body          String?
+  relatedEntityType String?        @map("related_entity_type")
+  relatedEntityId   String?        @map("related_entity_id") // deep-link target
+  priority      QueuePriority      @default(NORMAL)
+  status        NotificationStatus @default(UNREAD)
+  createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  readAt        DateTime?          @map("read_at") @db.Timestamptz(6)
+
+  @@index([userId, status, createdAt])
+  @@map("notifications")
+}
+
+model NotificationRule {
+  id         String   @id @default(uuid()) @db.Uuid
+  code       String   @unique
+  event      String // e.g. payment.rejected, quotation.followup
+  recipients Json // [{type: RECORD_OWNER|ROLE|USER, value}]
+  channels   Json // [IN_APP, SMS]
+  delayMinutes Int    @default(0) @map("delay_minutes")
+  priority   QueuePriority @default(NORMAL)
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([event, enabled])
+  @@map("notification_rules")
+}
