@@ -8,7 +8,7 @@
 | Backend | NestJS 10 + TypeScript, modular monolith (extractable services later) |
 | Database | PostgreSQL 16 + Prisma ORM (migrations versioned in repo) |
 | Cache / Lock | Redis 7 |
-| Background jobs | Central DB-backed queue (`QueueJob` table, `SELECT … FOR UPDATE SKIP LOCKED`) + Redis/BullMQ for fan-out/scheduling where beneficial |
+| Background jobs | BullMQ + Redis = runtime execution (queueing, scheduling, retries); PostgreSQL `QueueJob` + `JobExecution` = durable business history, status, audit, idempotency. `QUEUE_DRIVER=auto` falls back to DB polling (`FOR UPDATE SKIP LOCKED`) when Redis is unavailable |
 | Files | S3-compatible (MinIO locally) |
 | Realtime | WebSocket/SSE push (list refresh, notifications, queue/import progress) |
 | Auth | JWT access token (short-lived) + rotating refresh token (hashed in DB), HttpOnly cookies; 2FA-ready |
@@ -26,12 +26,16 @@ tcerp/
 │   │       ├── config/       # env validation (zod)
 │   │       ├── prisma/       # PrismaService (global)
 │   │       ├── audit/        # AuditService + API
-│   │       ├── auth/         # login/refresh/logout/me, lockout
+│   │       ├── auth/         # login/refresh/logout/me, lockout, company context
 │   │       ├── users/ roles/ teams/ settings/ sequences/
 │   │       ├── files/        # S3 upload/download, dedupe, attachments
-│   │       ├── queue/        # enqueue + worker (SKIP LOCKED, retries, DLQ)
+│   │       ├── queue/        # BullMQ workers (Redis) + DB job history, retries, DLQ
 │   │       └── health/
 │   └── frontend/             # Next.js (port 3000)
+├── graphify-out/             # LOCAL ONLY (git-ignored): code knowledge graph artifacts
+│                             # (graph.html/graph.json/GRAPH_REPORT.md), rebuilt by a git
+│                             # post-commit hook (AST-only). Navigation aid — never a
+│                             # substitute for tests or architecture review.
 ├── docker-compose.yml        # postgres + redis + minio
 └── PROJECT_PROGRESS.md
 ```
@@ -61,8 +65,42 @@ tcerp/
   domain errors raise typed exceptions (ValidationError 422, NotFoundError 404, ForbiddenError 403,
   ConflictError 409, UnauthorizedError 401).
 - **Validation**: DTO class-validator on every write endpoint (`ValidationPipe`, whitelist, forbidNonWhitelisted).
-- **Sequences**: atomic `UPDATE … RETURNING` allocation; format `PREFIX-[JY-]NNNNN`; history never renumbered.
+- **Sequences v2**: company-scoped `sequences` row per `(company_id, document_type)` with
+  `prefix`, `padding`, `reset_cycle` (`NEVER | FISCAL_YEAR | JALALI_YEAR | MONTHLY`),
+  `current_number`, `last_reset_marker`; allocation is concurrency-safe (`SELECT … FOR UPDATE`
+  in the allocation transaction); history is never renumbered after a format change.
 - **Jalali**: DB stores ISO dates; `common/utils/jalali.ts` converts for display/export.
+
+## Multi-company (Correction Gate #1)
+
+- **From day one**: `companies` + `user_companies` (M:N membership, `is_default`) exist in the
+  schema; `users.default_company_id` resolves the user's active company.
+- **Company context per request**: client sends `X-Company-Id`; the backend validates it
+  against the authenticated user's `UserCompany` membership (403 when not a member, 422 when
+  unknown/suspended) and falls back to `default_company_id` when the header is absent.
+- **Mandatory company scope** (`company_id NOT NULL`): `teams`, `settings`
+  (`UNIQUE(company_id, key)`), `sequences` (`UNIQUE(company_id, document_type)`),
+  `integration_configs` (`UNIQUE(company_id, code)`), `notification_rules`
+  (`UNIQUE(company_id, code)`), and all Phase 3+ domain tables.
+- **Nullable company scope** (null = platform-level): `queue_jobs`, `audit_logs`.
+- **System-level**: `roles` / `permissions` (and user overrides) are not company-scoped;
+  company-specific role bindings are supported through `user_companies` (future role-scope
+  columns on membership).
+
+## Seed credentials & security
+
+- The seed admin is created **only** from `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD`
+  environment variables; there are **no default credentials** in code, README or seed.
+  In development, if no password is provided, the seed generates one and prints it **once**.
+- Production startup **rejects** known default/weak passwords (the seed refuses to run with
+  e.g. `Admin@12345`-style defaults and the app fails fast when `NODE_ENV=production` sees one).
+
+## Graphify (option B)
+
+`graphify-out/` is git-ignored; graph artifacts (`graph.html`, `graph.json`, `GRAPH_REPORT.md`)
+are local-only and auto-rebuilt by a git post-commit hook (AST-only, no API cost). The graph
+supports navigation only — it never replaces tests or architecture review (rules live in
+`AGENTS.md`).
 
 ## Phase plan
 

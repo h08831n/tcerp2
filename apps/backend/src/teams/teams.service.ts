@@ -10,6 +10,7 @@ import { Paginated } from '../common/dto/pagination.dto';
 
 const TEAM_SELECT = {
   id: true,
+  companyId: true,
   name: true,
   managerId: true,
   createdAt: true,
@@ -30,6 +31,7 @@ function toDto(team: TeamWithMembers): Record<string, unknown> {
   return { ...rest, memberIds: members.map((m) => m.userId) };
 }
 
+/** Company-scoped teams. */
 @Injectable()
 export class TeamsService {
   constructor(
@@ -37,10 +39,13 @@ export class TeamsService {
     private readonly auditService: AuditService,
   ) {}
 
-  async list(query: TeamQueryDto): Promise<Paginated<TeamWithMembers>> {
-    const where: Prisma.TeamWhereInput = query.search
-      ? { name: { contains: query.search, mode: 'insensitive' } }
-      : {};
+  async list(companyId: string, query: TeamQueryDto): Promise<Paginated<TeamWithMembers>> {
+    const where: Prisma.TeamWhereInput = {
+      companyId,
+      ...(query.search
+        ? { name: { contains: query.search, mode: 'insensitive' as const } }
+        : {}),
+    };
     const [items, total] = await Promise.all([
       this.prisma.team.findMany({
         where,
@@ -54,18 +59,23 @@ export class TeamsService {
     return { items, total, page: query.page, pageSize: query.pageSize };
   }
 
-  async getById(id: string): Promise<TeamWithMembers> {
+  async getById(companyId: string, id: string): Promise<TeamWithMembers> {
     const team = await this.prisma.team.findUnique({ where: { id }, select: TEAM_SELECT });
-    if (!team) throw new NotFoundError('Team not found', { id });
+    if (!team || team.companyId !== companyId) {
+      throw new NotFoundError('Team not found', { id });
+    }
     return team;
   }
 
   async create(
+    companyId: string,
     dto: CreateTeamDto,
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<TeamWithMembers> {
-    const duplicate = await this.prisma.team.findFirst({ where: { name: dto.name } });
+    const duplicate = await this.prisma.team.findFirst({
+      where: { companyId, name: dto.name },
+    });
     if (duplicate) throw new ConflictError('Team name already exists', { name: dto.name });
 
     const memberIds = dto.memberIds ?? [];
@@ -74,6 +84,7 @@ export class TeamsService {
 
     const team = await this.prisma.team.create({
       data: {
+        companyId,
         name: dto.name,
         managerId: dto.managerId,
         members: { create: [...new Set(memberIds)].map((userId) => ({ userId })) },
@@ -85,6 +96,7 @@ export class TeamsService {
       entityId: team.id,
       action: AuditAction.CREATE,
       actor,
+      companyId,
       newValues: toDto(team),
       ip: ctx.ip,
       userAgent: ctx.userAgent,
@@ -93,6 +105,7 @@ export class TeamsService {
   }
 
   async update(
+    companyId: string,
     id: string,
     dto: UpdateTeamDto,
     actor: { id: string; username: string },
@@ -102,7 +115,9 @@ export class TeamsService {
       where: { id },
       include: { members: { select: { userId: true } } },
     });
-    if (!existing) throw new NotFoundError('Team not found', { id });
+    if (!existing || existing.companyId !== companyId) {
+      throw new NotFoundError('Team not found', { id });
+    }
 
     if (dto.managerId) await this.assertUsersExist([dto.managerId]);
 
@@ -136,6 +151,7 @@ export class TeamsService {
       entityId: id,
       action: AuditAction.UPDATE,
       actor,
+      companyId,
       oldValues: { name: existing.name, managerId: existing.managerId, memberIds: oldMemberIds },
       newValues: toDto(team),
       ip: ctx.ip,
@@ -144,15 +160,23 @@ export class TeamsService {
     return team;
   }
 
-  async remove(id: string, actor: { id: string; username: string }, ctx: RequestContext): Promise<void> {
+  async remove(
+    companyId: string,
+    id: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<void> {
     const existing = await this.prisma.team.findUnique({ where: { id } });
-    if (!existing) throw new NotFoundError('Team not found', { id });
+    if (!existing || existing.companyId !== companyId) {
+      throw new NotFoundError('Team not found', { id });
+    }
     await this.prisma.team.delete({ where: { id } }); // members cascade (schema)
     await this.auditService.record({
       entityType: 'team',
       entityId: id,
       action: AuditAction.DELETE,
       actor,
+      companyId,
       oldValues: { name: existing.name, managerId: existing.managerId },
       ip: ctx.ip,
       userAgent: ctx.userAgent,

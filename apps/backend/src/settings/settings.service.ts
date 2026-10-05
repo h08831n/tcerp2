@@ -13,6 +13,7 @@ function toJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
+/** Company-scoped settings (REQUIREMENTS §67: every change audited). */
 @Injectable()
 export class SettingsService {
   constructor(
@@ -20,8 +21,11 @@ export class SettingsService {
     private readonly auditService: AuditService,
   ) {}
 
-  async list(query: SettingQueryDto): Promise<Paginated<Setting>> {
-    const where: Prisma.SettingWhereInput = { category: query.category };
+  async list(companyId: string, query: SettingQueryDto): Promise<Paginated<Setting>> {
+    const where: Prisma.SettingWhereInput = {
+      companyId,
+      category: query.category,
+    };
     const [items, total] = await Promise.all([
       this.prisma.setting.findMany({
         where,
@@ -34,22 +38,28 @@ export class SettingsService {
     return { items, total, page: query.page, pageSize: query.pageSize };
   }
 
-  /** Convenience accessor for other services (e.g. adapters, notifications). */
-  async get<T = unknown>(key: string): Promise<T | null> {
-    const setting = await this.prisma.setting.findUnique({ where: { key } });
+  /** Convenience accessor for other services (company-scoped). */
+  async get<T = unknown>(companyId: string, key: string): Promise<T | null> {
+    const setting = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key } },
+    });
     return (setting?.value as T) ?? null;
   }
 
   async upsert(
+    companyId: string,
     dto: UpsertSettingDto,
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<Setting> {
-    const existing = await this.prisma.setting.findUnique({ where: { key: dto.key } });
+    const existing = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key: dto.key } },
+    });
 
     const setting = await this.prisma.setting.upsert({
-      where: { key: dto.key },
+      where: { companyId_key: { companyId, key: dto.key } },
       create: {
+        companyId,
         key: dto.key,
         value: toJson(dto.value),
         category: dto.category ?? existing?.category ?? 'general',
@@ -70,6 +80,7 @@ export class SettingsService {
       entityId: setting.id,
       action: existing ? AuditAction.UPDATE : AuditAction.CREATE,
       actor,
+      companyId,
       oldValues: existing ? { key: existing.key, value: existing.value, category: existing.category } : undefined,
       newValues: { key: setting.key, value: setting.value, category: setting.category },
       ip: ctx.ip,

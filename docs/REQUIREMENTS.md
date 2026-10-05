@@ -4405,3 +4405,91 @@ Domain Map
 → repository architecture
 → database foundations
 → actual implementation.
+==================================================
+116. CORRECTION LOG (2026-10-06) — Architecture Correction Gate
+==================================================
+
+The following 15 corrections were ratified at the Architecture Correction Gate and are
+ALREADY IMPLEMENTED in `apps/backend/prisma/schema.prisma` and migrations
+`20241006000000_correction_gate` + `20241006120000_party_operational_balance`.
+They SUPERSEDE any conflicting statement elsewhere in this specification
+(e.g. the original BankTransaction naming, the generic tax-invoice allocation table,
+the single-company deferral, and the BullMQ-vs-PostgreSQL queue clarification).
+
+1. MULTI-COMPANY FROM DAY ONE: new `Company` entity (id, name_fa, name_en, national_id,
+   economic_code, status) + `UserCompany` membership (user<->company M:N with is_default).
+   Users carry `default_company_id`. Mandatory company scope on: Team, Setting
+   (UNIQUE(company_id, key)), Sequence (UNIQUE(company_id, document_type)),
+   IntegrationConfig (UNIQUE(company_id, code)), NotificationRule (UNIQUE(company_id, code));
+   nullable scope (null = platform-level) on QueueJob and AuditLog. Roles/Permissions remain
+   system-level; company-specific role bindings are supported through UserCompany. All
+   natural unique constraints are company-scoped.
+
+2. NO standalone BankTransaction source of truth. Treasury sources: Receipt, Payment,
+   BankTransfer, Incoming Check Clearing, Outgoing Check Payment, and Bank Adjustment
+   (later, permission-sensitive). `BankStatementLine` is a NON-source ledger for daily
+   ordering / sequence_no / running_balance / reconciliation / source links with fields:
+   company_id, bank_account_id, entry_date, sequence_no, direction (DEPOSIT/WITHDRAWAL),
+   amount, running_balance, reference_number, description, source_entity_type,
+   source_entity_id, journal_entry_id, is_reconciled. UNIQUE(company_id, bank_account_id,
+   entry_date, sequence_no). Gapless numbering is NOT required; deterministic ordering is.
+
+3. `OperationalSettlementClaim` replaces the sale-only OperationalPaymentClaim:
+   direction CUSTOMER_RECEIPT (requires sales_document_id) / SUPPLIER_PAYMENT (requires
+   purchase_document_id); party always set; statuses UNMATCHED/MATCHED/REJECTED; no bank
+   effect until matched; REJECTED restores the operational balance (new
+   `PartyOperationalBalance` table with optimistic version) + audit + timeline + notification.
+
+4. Split tax allocation tables: `SalesTaxInvoiceOrderAllocation` (sales_tax_invoice_id,
+   sales_document_id, allocated_amount, allocated_quantity?, UNIQUE pair) and
+   `PurchaseTaxInvoiceOrderAllocation` (same pattern). No generic polymorphic allocation.
+
+5. Loading = header + `LoadingLine` (product_variant_id, actual_quantity, uom_id, notes) +
+   `LoadingAllocation` (loading_line_id, sales_line_id?/purchase_line_id?,
+   allocated_quantity). One loading is registered once and shown on both sale and
+   purchase sides.
+
+6. SupplierProduct is genuinely three-level: mapping_level VARIANT|TEMPLATE|CATEGORY with
+   exactly one FK set (enforced by a DB CHECK constraint).
+
+7. `WorkflowTimer` runtime entity: workflow_instance_id, state_id, timer_type
+   (ESCALATION/REMINDER/TIMEOUT), due_at, status (SCHEDULED/EXECUTED/CANCELLED/FAILED),
+   action_config, executed_at. Owned by the Workflow engine; executed via the queue.
+   Minimal WorkflowDefinition/WorkflowState/WorkflowInstance tables exist now.
+
+8. NotificationRule completed: company_id, code, event, conditions (JSON, nested all/any),
+   recipient_config, channels, delay_config, priority, enabled.
+
+9. Queue architecture clarified: BullMQ/Redis = runtime queue/scheduling/retry execution;
+   PostgreSQL QueueJob + JobExecution = durable business history, status, audit,
+   idempotency. QUEUE_DRIVER=auto falls back to DB polling when Redis is unavailable.
+
+10. Sequence engine v2: company_id, document_type, prefix, padding, reset_cycle
+    (NEVER|FISCAL_YEAR|JALALI_YEAR|MONTHLY), current_number, last_reset_marker;
+    concurrency-safe FOR UPDATE allocation; history is never renumbered.
+
+11. TaxDefinition: company-scoped, immutable after first use (a rate change creates a new
+    row); invoice lines carry tax_definition_id + tax_rate_snapshot (Phase 8 columns on
+    invoice lines).
+
+12. Accounting foundation: ChartOfAccount, JournalEntry (DRAFT/POSTED/REVERSED/CANCELLED;
+    posted entries are never edited or deleted — reverse instead), JournalLine (debit >= 0,
+    credit >= 0, never both positive — DB CHECK; SUM(debit) == SUM(credit) enforced inside
+    the POST transaction), BankAccount, Check (direction-specific lifecycle: incoming
+    REGISTERED -> PENDING -> DEPOSITED -> CLEARED/BOUNCED/CANCELLED, outgoing
+    REGISTERED -> PENDING -> PAID/BOUNCED/CANCELLED; bank effect ONLY on CLEARED/PAID),
+    BankTransfer rule: Dr Destination X, Dr Bank Fee Expense F, Cr Source X+F; statement
+    lines: source WITHDRAWAL X+F + destination DEPOSIT X. Invoices NEVER touch bank directly.
+
+13. PortalAccount: company_id, party_id, website_user_id, verified_mobile, status — the
+    verified mobile is used ONLY for initial linking; an ambiguous mobile exposes nothing
+    automatically.
+
+14. Security: the seed admin password comes only from SEED_ADMIN_USERNAME /
+    SEED_ADMIN_PASSWORD environment variables; no default credentials in the README;
+    production startup rejects known default passwords.
+
+15. GRAPHIFY (option B): `graphify-out/` is git-ignored; graph artifacts (graph.html,
+    graph.json, GRAPH_REPORT.md) are local-only and auto-rebuilt by a git post-commit hook
+    (AST-only). Graphify supports navigation but never replaces tests or architecture
+    review. The rules live in AGENTS.md.

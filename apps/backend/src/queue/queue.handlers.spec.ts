@@ -1,4 +1,4 @@
-import { calcBackoffDelay } from './queue.handlers';
+import { bullmqBackoffStrategy, calcBackoffDelay, priorityToBull } from './queue.handlers';
 
 describe('calcBackoffDelay', () => {
   it('starts at 60 seconds for the first failure', () => {
@@ -21,5 +21,22 @@ describe('calcBackoffDelay', () => {
   it('treats non-positive attempts as the first failure', () => {
     expect(calcBackoffDelay(0)).toBe(60);
     expect(calcBackoffDelay(-3)).toBe(60);
+  });
+});
+
+describe('priorityToBull', () => {
+  it('maps CRITICAL..LOW onto 1..4 (lower runs sooner)', () => {
+    expect(priorityToBull('CRITICAL')).toBe(1);
+    expect(priorityToBull('HIGH')).toBe(2);
+    expect(priorityToBull('NORMAL')).toBe(3);
+    expect(priorityToBull('LOW')).toBe(4);
+  });
+});
+
+describe('bullmqBackoffStrategy', () => {
+  it('matches the DB-polling curve expressed in milliseconds', () => {
+    expect(bullmqBackoffStrategy(1)).toBe(60_000);
+    expect(bullmqBackoffStrategy(2)).toBe(240_000);
+    expect(bullmqBackoffStrategy(6)).toBe(21_600_000); // 6h cap
   });
 });

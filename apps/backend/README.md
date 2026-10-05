@@ -1,27 +1,49 @@
 # TCERP Backend
 
-NestJS 10 + Prisma 5 + PostgreSQL foundation for the TCERP steel-trading ERP
+NestJS 10 + Prisma 5 + PostgreSQL backend for the TCERP steel-trading ERP
 (modular monolith, port **3001**, global prefix **/api**).
 
-Covers: auth (JWT access + rotating refresh in HttpOnly cookies, failed-login
+Foundation: auth (JWT access + rotating refresh in HttpOnly cookies, failed-login
 lockout), users/roles/permissions (effective = roles − REVOKE + GRANT
-overrides), audit trail, settings, Jalali-aware document sequences, S3/MinIO
-files with content-addressed dedupe, DB-backed queue (SKIP LOCKED, retry with
-exponential backoff, dead-letter), and health check.
+overrides), audit trail, S3/MinIO files with content-addressed dedupe, health
+check. Multi-company (Architecture Correction Gate): companies, company context
+per request, company-scoped settings/teams/sequences/integrations/notification
+rules, sequences v2 (Jalali reset cycles), hybrid BullMQ queue, treasury
+(bank accounts / transfers / receipts / payments / checks / statement ledger),
+operational settlement claims, tax definitions + invoice↔order allocations,
+supplier product mappings, loadings, workflow timers, notification rules.
 
 ## Setup
 
 ```bash
 npm install
-cp ../../.env.example .env        # adjust DATABASE_URL / JWT secrets
+cp .env.example .env               # adjust DATABASE_URL / JWT secrets / SEED_*
 npx prisma generate
-npx prisma migrate deploy         # needs a running Postgres
-npm run db:seed                   # permissions, system roles, admin user, sequences
+npx prisma migrate deploy          # needs a running Postgres
+npm run db:seed                    # permissions, roles, admin, COA, sequences
 npm run start:dev
 ```
 
-The seed creates an admin user from `ADMIN_USERNAME` / `ADMIN_PASSWORD`
-(default `admin` / `Admin@12345`, `mustChangePassword=true`).
+### Credentials (no defaults)
+
+- `SEED_ADMIN_USERNAME` (default `admin`) and `SEED_ADMIN_PASSWORD` configure
+  the seeded admin. There is **no default password**. In development, if
+  `SEED_ADMIN_PASSWORD` is unset the seed generates a random one and prints it
+  **once**. In production an unset password aborts the seed.
+- **Startup guard**: with `NODE_ENV=production` the backend refuses to boot
+  when `SEED_ADMIN_PASSWORD` (or legacy `ADMIN_PASSWORD`) equals a well-known
+  default (`Admin@12345`, `admin`, `password`, `123456`).
+- `mustChangePassword=true` is set on the seeded admin; re-seeding never
+  resets an existing admin's password.
+
+### Queue driver (`QUEUE_DRIVER`)
+
+`auto` (default) uses BullMQ/Redis for runtime execution and falls back to
+DB polling (one-time warning) when Redis is unreachable; `bullmq` is
+Redis-only; `db` is polling-only. PostgreSQL (`queue_jobs` + `job_executions`)
+always stays the durable source of truth for history, status, retries and
+idempotency; BullMQ jobs use `jobId = queue_jobs.id` and a custom backoff
+(60s ×4^n capped at 6h, same curve as the DB fallback).
 
 ## Scripts
 
@@ -29,7 +51,8 @@ The seed creates an admin user from `ADMIN_USERNAME` / `ADMIN_PASSWORD`
 | --- | --- |
 | `npm run build` | Compile (nest build) |
 | `npm run start:dev` | Dev server with watch |
-| `npm test` | Jest unit tests (no DB required — Prisma is mocked) |
+| `npm test` | Jest unit tests (no DB/Redis required — Prisma/BullMQ mocked) |
+| `TEST_INTEGRATION=1 npm test` | Also run integration tests against the live DB |
 | `npm run prisma:generate` | Generate the Prisma client |
 | `npm run prisma:migrate` | `prisma migrate deploy` |
 | `npm run db:seed` | Idempotent seed (ts-node prisma/seed.ts) |
@@ -40,126 +63,115 @@ The seed creates an admin user from `ADMIN_USERNAME` / `ADMIN_PASSWORD`
 prisma/            schema.prisma, migrations/, seed.ts
 src/
   common/          errors, exception filter, guards, decorators, DTOs, utils (jalali, phone)
-  config/          zod-validated env (CONFIG token, global)
+  config/          zod-validated env (CONFIG token, global) + production password guard
   prisma/          PrismaService (global)
   permissions/     effective-permission resolution (global)
-  audit/           audit trail service + GET /api/audit
-  auth/            login/refresh/logout/me, lockout
-  users/ roles/ teams/ settings/ sequences/ queue/ files/ health/
+  audit/           audit trail (company-scoped) + GET /api/audit
+  companies/       Company CRUD + CompanyContextService (x-company-id resolution)  [global]
+  queue/           hybrid queue: QueueService, BullMQ producer/worker, DB-polling fallback  [global]
+  auth/            login/refresh/logout/me (me returns companies[]), lockout
+  users/ roles/ teams/ settings/ sequences/ files/ health/
+  accounting/      JournalService (balanced posting, reversal)
+  treasury/        bank accounts, transfers, receipts, payments, checks, statement ledger
+  claims/          operational settlement claims + party operational balance
+  tax/             tax definitions (immutable after first use) + M:N allocations
+  supplierproduct/ supplier ↔ product 3-level mapping (exactly-one CHECK)
+  loading/         loading header + lines + allocations
+  workflow-timer/  durable timers executed by the queue (action registry)
+  notifications/   notification rules (condition engine) + dispatch service
+  integrations/    integration adapter configs (SMS/…)
 ```
+
+Company context: scoped controllers resolve the active company via
+`CompanyContextService.requireCompanyId(user, headers)` — the `x-company-id`
+header when the user is a member (else 403), else the default membership.
+`GET /api/auth/me` returns `companies[]` (`id`, `nameFa`, `isDefault`).
 
 Conventions: typed `AppError` subclasses → `{ statusCode, code, message, details, path, timestamp }`
 error envelope; `@RequirePermissions(...)` enforced server-side by
-`PermissionsGuard`; every write audited via `AuditService.record`; optimistic
-locking (`version`) on users; settings/sequences config changes never rewrite
-history.
+`PermissionsGuard`; every write audited via `AuditService.record` (with
+company scope); optimistic locking (`version`) where history matters; sequence
+counters and posted journal entries are never rewritten.
 
 ## API endpoints
 
 All routes require a valid access token (Bearer header or `access_token`
-cookie) except `POST /api/auth/*` and `GET /api/health`.
-
-### Auth (public)
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| POST | `/api/auth/login` | public |
-| POST | `/api/auth/refresh` | public (refresh cookie) |
-| POST | `/api/auth/logout` | public |
-| GET | `/api/auth/me` | authenticated |
-
-### Health (public)
+cookie) except `POST /api/auth/*` and `GET /api/health`. Company-scoped
+routes accept `x-company-id`.
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| GET | `/api/health` | public (503 when the DB is down) |
-
-### Users
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/users` (`?page,&pageSize,&search,&status`) | `users.view` |
-| POST | `/api/users` | `users.create` |
-| GET | `/api/users/:id` | `users.view` |
-| PATCH | `/api/users/:id` (body includes `version` — optimistic lock, `VERSION_CONFLICT` on mismatch) | `users.edit` |
-| DELETE | `/api/users/:id` (soft → `DISABLED`) | `users.delete` |
-| POST | `/api/users/:id/password` | `users.reset_password` |
-| PUT | `/api/users/:id/roles` `{roleIds}` | `users.edit` |
-
-### Roles & permission catalog
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/roles` | `roles.view` |
-| POST | `/api/roles` | `roles.create` |
-| GET | `/api/roles/:id` | `roles.view` |
-| PATCH | `/api/roles/:id` | `roles.edit` |
-| DELETE | `/api/roles/:id` (system roles protected) | `roles.delete` |
-| PUT | `/api/roles/:id/permissions` `{permissionIds}` | `roles.edit` |
-| GET | `/api/permissions` (catalog) | `roles.view` |
-
-### Teams
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/teams` | `teams.view` |
-| POST | `/api/teams` | `teams.create` |
-| GET | `/api/teams/:id` | `teams.view` |
-| PATCH | `/api/teams/:id` | `teams.edit` |
-| DELETE | `/api/teams/:id` | `teams.delete` |
-
-### Settings
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/settings` (`?category=`) | `settings.view` |
+| GET | `/api/auth/me` (now incl. `companies[]`, `defaultCompanyId`) | authenticated |
+| GET | `/api/companies` | `companies.view` |
+| POST | `/api/companies` (grants creator membership + default) | `companies.create` |
+| GET/PATCH/DELETE | `/api/companies/:id` | `companies.view` / `edit` / `delete` |
+| GET | `/api/settings` (`?category=`) — company scoped | `settings.view` |
 | PUT | `/api/settings` `{key, value, category?}` (upsert, audited old/new) | `settings.edit` |
-
-### Sequences (`SD-1405-00125` format)
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/sequences` | `sequences.view` |
-| POST | `/api/sequences/:code/allocate` (admin/testing) | `sequences.edit` |
+| GET | `/api/sequences` — company scoped | `sequences.view` |
+| POST | `/api/sequences` (create config) | `sequences.edit` |
+| POST | `/api/sequences/allocate` `{documentType}` | `sequences.edit` |
 | PUT | `/api/sequences/:id` (prospective config only; counters never rewritten) | `sequences.edit` |
+| GET | `/api/queue/jobs` (`?status=&jobType=`; incl. `executionsCount`) | `queue.view` |
+| POST | `/api/queue/jobs` (companyId from context; null = platform job) | `queue.enqueue` |
+| POST | `/api/queue/jobs/:id/retry` / `:id/cancel` | `queue.retry` |
+| GET | `/api/treasury/bank-accounts` | `treasury.view` |
+| POST | `/api/treasury/bank-accounts` | `treasury.create` |
+| GET/PATCH/DELETE | `/api/treasury/bank-accounts/:id` | `treasury.view` / `edit` / `delete` |
+| GET | `/api/treasury/bank-accounts/:id/statement?from&to` (ordered, running balance) | `treasury.view` |
+| POST | `/api/treasury/transfers` `{sourceBankAccountId, destinationBankAccountId, amount, fee?}` | `treasury.create` |
+| POST | `/api/treasury/receipts` `{bankAccountId, partyId?, amount, date?}` | `treasury.create` |
+| POST | `/api/treasury/payments` | `treasury.create` |
+| GET | `/api/treasury/checks?status&direction` | `treasury.view` |
+| POST | `/api/treasury/checks/incoming` / `outgoing` (no bank effect) | `treasury.create` |
+| POST | `/api/treasury/checks/:id/pending` / `:id/deposit` / `:id/bounce` / `:id/cancel` | `treasury.edit` |
+| POST | `/api/treasury/checks/:id/clear` `{bankAccountId}` (incoming; bank effect) | `treasury.edit` |
+| POST | `/api/treasury/checks/:id/pay` `{bankAccountId}` (outgoing; bank effect) | `treasury.edit` |
+| GET | `/api/claims?status&partyId` | `claims.view` |
+| POST | `/api/claims` `{direction, partyId, salesDocumentId?, purchaseDocumentId?, amount}` | `claims.create` |
+| POST | `/api/claims/:id/reject` `{reason}` (restores balance, audits, notifies) | `claims.edit` |
+| POST | `/api/claims/:id/match` `{receiptId?|paymentId?}` | `claims.edit` |
+| GET/POST/PATCH | `/api/tax/definitions`, `PATCH /api/tax/definitions/:id` | `tax.view` / `create` / `edit` |
+| POST | `/api/tax/definitions/:id/mark-used` (one-way) | `tax.edit` |
+| GET/POST | `/api/tax/allocations/sales`, `/api/tax/allocations/purchase` | `tax.view` / `edit` |
+| GET/POST/PATCH | `/api/supplier-products` | `supplierproduct.view` / `create` / `edit` |
+| GET/POST | `/api/loadings`, `GET /api/loadings/:id` (lines + allocations) | `loading.view` / `create` |
+| GET/POST | `/api/workflow-timers`, `POST /api/workflow-timers/:id/cancel` | `workflowtimer.view` / `edit` |
+| GET/POST/PATCH/DELETE | `/api/notifications/rules` | `notifications.view` / `edit` |
+| GET/POST/PATCH/DELETE | `/api/integrations` | `integrations.view` / `create` / `edit` / `delete` |
 
-### Files (S3/MinIO, sha256 dedupe)
+Pre-existing groups (users, roles + `GET /api/permissions` catalog, teams,
+files, audit — now with optional `?companyId=`) are unchanged; see git history
+for their full tables.
 
-| Method | Path | Permission |
-| --- | --- | --- |
-| POST | `/api/files` (multipart field `file`) | `files.upload` |
-| POST | `/api/files/:id/attachments` `{entityType, entityId, category?}` | `files.upload` |
-| GET | `/api/files/:id` | `files.view` |
-| GET | `/api/files/:id/download` | `files.download` |
+## Seeded data (idempotent, `npm run db:seed`)
 
-### Queue
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/queue/jobs` (`?status=&jobType=&page=&pageSize=`) | `queue.view` |
-| POST | `/api/queue/jobs/:id/retry` (FAILED/CANCELLED → PENDING) | `queue.retry` |
-| POST | `/api/queue/jobs/:id/cancel` (PENDING/RETRYING → CANCELLED) | `queue.retry` |
-
-### Audit
-
-| Method | Path | Permission |
-| --- | --- | --- |
-| GET | `/api/audit` (`?entityType=&entityId=&actorId=&action=`) | `audit.view` |
-
-## Permission catalog (seeded)
-
-`users.view/create/edit/delete/reset_password`, `roles.view/create/edit/delete`,
-`teams.view/create/edit/delete`, `settings.view/edit`,
-`sequences.view/edit`, `audit.view`, `files.view/upload/download/delete`,
-`queue.view/retry` — 24 rows.
-
-System roles (idempotently seeded): `admin` (all), `salesperson`,
-`sales_manager`, `buyer`, `purchase_manager`, `accountant`,
-`financial_manager`, `pricing_user`.
+- Company `00000000-0000-4000-8000-000000000001` (`SEED_COMPANY_NAME`,
+  default «شرکت پیش‌فرض»).
+- 53-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
+  `sequences.*`, `audit.view`, `files.*`, `queue.*`, `companies.*`,
+  `claims.*`, `treasury.*`, `tax.*`, `supplierproduct.*`, `loading.*`,
+  `workflowtimer.*`, `notifications.*`, `integrations.*`.
+- System roles: `admin` (all), `salesperson`, `sales_manager`, `buyer`,
+  `purchase_manager`, `accountant`, `financial_manager`, `pricing_user`.
+- Chart of accounts: `BANK`, `RECEIVABLE`, `CHECKS_IN_TRANSIT`, `PAYABLE`,
+  `VAT_PAYABLE`, `SALES_REVENUE`, `BANK_FEE_EXPENSE`, `PURCHASE_EXPENSE`.
+- Sequences per company (JALALI_YEAR reset, padding 5): `SALES_DOCUMENT(SD)`,
+  `PURCHASE(PO)`, `SALES_TAX_INVOICE(STI)`, `PURCHASE_TAX_INVOICE(PTI)`,
+  `RECEIPT(REC)`, `PAYMENT(PAY)`, `JOURNAL_ENTRY(JE)`, `CHECK(CHK)`,
+  `BANK_TRANSFER(BT)` → e.g. `SD-1405-00001`.
+- One inactive sample `IntegrationConfig` (SMS).
 
 ## Tests
 
-`npm test` — 60 unit tests, no database needed: Jalali conversion (incl. leap
-years 1403/1399 and round-trips), Iranian mobile normalization, login lockout,
-sequence format/yearly-reset/increment (mocked transaction), effective
-permissions (roles − REVOKE + GRANT), queue backoff curve.
+`npm test` — 142 tests across 22 suites (4 integration tests auto-skip without
+`TEST_INTEGRATION=1`). Coverage includes the 15 architecture-gate scenarios
+(greppable as `01 company-scoped-sequence-uniqueness` …
+`15 outgoing-check-paid-bank-effect`) plus Jalali conversion, phone
+normalization, login lockout, permissions, sequence v2 format/reset/allocate,
+queue backoff/priority/idempotency. Integration tests clean up after
+themselves; unit tests need neither Postgres nor Redis.
+
+Known schema-vs-code note: the frozen schema has no `usedAt` column on
+`tax_definitions`; first-use immutability is tracked in a company-scoped
+Setting (`tax.definition.used`). Adding the real column is recommended for the
+next schema change.

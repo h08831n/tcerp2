@@ -16,10 +16,14 @@ import { CreateTeamDto, TeamQueryDto, UpdateTeamDto } from './teams.dto';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequestContext } from '../auth/auth.service';
+import { CompanyContextService } from '../companies/company-context.service';
 
 @Controller('teams')
 export class TeamsController {
-  constructor(private readonly teamsService: TeamsService) {}
+  constructor(
+    private readonly teamsService: TeamsService,
+    private readonly companyContext: CompanyContextService,
+  ) {}
 
   private ctx(request: Request): RequestContext {
     return { ip: request.ip, userAgent: request.headers['user-agent'] };
@@ -27,44 +31,57 @@ export class TeamsController {
 
   @Get()
   @RequirePermissions('teams.view')
-  list(@Query() query: TeamQueryDto) {
-    return this.teamsService.list(query);
+  async list(
+    @Query() query: TeamQueryDto,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.teamsService.list(companyId, query);
   }
 
   @Post()
   @RequirePermissions('teams.create')
-  create(
+  async create(
     @Body() dto: CreateTeamDto,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
-    return this.teamsService.create(dto, actor, this.ctx(request));
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.teamsService.create(companyId, dto, actor, this.ctx(request));
   }
 
   @Get(':id')
   @RequirePermissions('teams.view')
-  getById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.teamsService.getById(id);
+  async getById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.teamsService.getById(companyId, id);
   }
 
   @Patch(':id')
   @RequirePermissions('teams.edit')
-  update(
+  async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateTeamDto,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
-    return this.teamsService.update(id, dto, actor, this.ctx(request));
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.teamsService.update(companyId, id, dto, actor, this.ctx(request));
   }
 
   @Delete(':id')
   @RequirePermissions('teams.delete')
-  remove(
+  async remove(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
-    return this.teamsService.remove(id, actor, this.ctx(request));
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.teamsService.remove(companyId, id, actor, this.ctx(request));
   }
 }

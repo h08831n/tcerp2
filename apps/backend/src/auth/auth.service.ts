@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PermissionsService } from '../permissions/permissions.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
+import { CompanyContextService } from '../companies/company-context.service';
 import {
   ForbiddenError,
   NotFoundError,
@@ -51,6 +52,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly permissionsService: PermissionsService,
     private readonly auditService: AuditService,
+    private readonly companyContext: CompanyContextService,
     @Inject(CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -224,13 +226,23 @@ export class AuthService {
     }
   }
 
-  async me(userId: string): Promise<UserProfile & { roles: { code: string; nameFa: string; nameEn: string }[]; permissions: string[] }> {
+  async me(userId: string): Promise<
+    UserProfile & {
+      roles: { code: string; nameFa: string; nameEn: string }[];
+      permissions: string[];
+      companies: { id: string; nameFa: string; isDefault: boolean }[];
+      defaultCompanyId: string | null;
+    }
+  > {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: { roles: { include: { role: true } } },
     });
     if (!user) throw new NotFoundError('User not found');
-    const permissions = await this.permissionsService.getEffectivePermissions(userId);
+    const [permissions, companies] = await Promise.all([
+      this.permissionsService.getEffectivePermissions(userId),
+      this.companyContext.memberships(userId),
+    ]);
     return {
       ...this.toProfile(user),
       roles: user.roles.map(({ role }) => ({
@@ -239,6 +251,12 @@ export class AuthService {
         nameEn: role.nameEn,
       })),
       permissions: [...permissions].sort(),
+      companies: companies.map((c) => ({
+        id: c.companyId,
+        nameFa: c.nameFa,
+        isDefault: c.isDefault,
+      })),
+      defaultCompanyId: user.defaultCompanyId,
     };
   }
 

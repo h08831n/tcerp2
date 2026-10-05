@@ -17,6 +17,10 @@ export class AuditQueryDto extends PaginationDto {
   @IsOptional()
   @IsString()
   action?: string;
+
+  @IsOptional()
+  @IsUUID()
+  companyId?: string;
 }
 
 /** Well-known audit actions used across the foundation modules. */

@@ -2,6 +2,11 @@
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
+Storage model (Correction Gate decision, option B): `graphify-out/` is **git-ignored** —
+graph artifacts (`graph.html`, `graph.json`, `GRAPH_REPORT.md`) are local-only, never
+committed, and auto-rebuilt by the git post-commit hook (AST-only, no API cost). The graph
+supports navigation only; it is **not a substitute for tests or architecture review**.
+
 When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
 
 Rules:

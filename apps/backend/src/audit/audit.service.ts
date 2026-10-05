@@ -8,6 +8,8 @@ export interface AuditEntry {
   entityType: string;
   entityId: string;
   action: string;
+  /** Company scope of the event; null/undefined = platform-level event. */
+  companyId?: string | null;
   actor?: { id?: string; username?: string };
   oldValues?: unknown;
   newValues?: unknown;
@@ -39,6 +41,7 @@ export class AuditService {
           entityType: entry.entityType,
           entityId: entry.entityId,
           action: entry.action,
+          companyId: entry.companyId ?? null,
           actorId: entry.actor?.id ?? null,
           actorName: entry.actor?.username ?? null,
           oldValues: toJson(entry.oldValues),
@@ -63,6 +66,7 @@ export class AuditService {
       entityId: query.entityId,
       actorId: query.actorId,
       action: query.action,
+      companyId: query.companyId,
     };
 
     const [items, total] = await Promise.all([

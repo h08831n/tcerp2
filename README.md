@@ -29,7 +29,27 @@ npm install
 npm run dev                            # http://localhost:3000
 ```
 
-Default admin: `admin` / `Admin@12345` (must change password on first login).
+## First admin user (no default credentials)
+
+The seed never ships default credentials. Before seeding, set:
+
+```bash
+SEED_ADMIN_USERNAME=admin
+SEED_ADMIN_PASSWORD=<choose-a-strong-password>
+```
+
+- In **development**, if `SEED_ADMIN_PASSWORD` is unset, the seed auto-generates a strong
+  password and prints it **once** to the terminal.
+- In **production**, startup rejects known default/weak passwords —
+  `SEED_ADMIN_PASSWORD` is required.
+
+Change the password after first login (`must_change_password` is enforced for the seeded admin).
+
+## Local port notes
+
+- PostgreSQL is exposed on host port **5433** (5432 is occupied by a local service) —
+  `docker-compose.yml` and `.env.example` already reflect this.
+- MinIO is exposed on host port **9100** (9000 is occupied locally).
 
 ## Documentation
 

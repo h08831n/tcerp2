@@ -1,14 +1,15 @@
-import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { QueueJob } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueueService } from './queue.service';
-import { calcBackoffDelay, QueueHandler, QUEUE_HANDLERS } from './queue.handlers';
-import { AppConfig, CONFIG } from '../config/configuration';
+import { calcBackoffDelay, QueueHandlerRegistry } from './queue.handlers';
 
 const POLL_INTERVAL_MS = 2_000;
 
 /**
- * Central queue worker (REQUIREMENTS §70–71).
+ * DB-polling queue worker (REQUIREMENTS §70–71) — the fallback runtime when
+ * BullMQ/Redis is unavailable or QUEUE_DRIVER=db. Started/stopped by the
+ * QueueWorkerManager, never self-starting.
  *
  * Every POLL_INTERVAL_MS it claims exactly one due job (PENDING/RETRYING,
  * scheduled_at <= now) using `SELECT … FOR UPDATE SKIP LOCKED` so multiple
@@ -16,7 +17,7 @@ const POLL_INTERVAL_MS = 2_000;
  * NORMAL > LOW, oldest scheduled first.
  */
 @Injectable()
-export class WorkerService implements OnApplicationBootstrap {
+export class WorkerService implements OnModuleDestroy {
   private readonly logger = new Logger('QueueWorker');
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -25,22 +26,28 @@ export class WorkerService implements OnApplicationBootstrap {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
-    @Inject(QUEUE_HANDLERS) private readonly handlers: QueueHandler[],
-    @Inject(CONFIG) private readonly config: AppConfig,
+    private readonly registry: QueueHandlerRegistry,
   ) {}
 
-  onApplicationBootstrap(): void {
-    if (this.config.NODE_ENV === 'test') {
-      this.logger.log('Worker disabled (NODE_ENV=test)');
-      return;
-    }
+  start(): void {
+    if (this.timer) return;
+    this.stopped = false;
     this.timer = setInterval(() => void this.tick(), POLL_INTERVAL_MS);
-    this.logger.log(`Queue worker started (interval=${POLL_INTERVAL_MS}ms, handlers=${this.handlers.map((h) => h.type).join(',')})`);
+    this.logger.log(
+      `Queue DB-polling worker started (interval=${POLL_INTERVAL_MS}ms, handlers=${this.registry.types().join(',')})`,
+    );
   }
 
   onModuleDestroy(): void {
+    this.stop();
+  }
+
+  stop(): void {
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
   }
 
   private async tick(): Promise<void> {
