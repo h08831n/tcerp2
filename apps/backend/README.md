@@ -12,6 +12,11 @@ rules, sequences v2 (Jalali reset cycles), hybrid BullMQ queue, treasury
 (bank accounts / transfers / receipts / payments / checks / statement ledger),
 operational settlement claims, tax definitions + invoice↔order allocations,
 supplier product mappings, loadings, workflow timers, notification rules.
+Phase 3: parties/CRM core + product catalog. Phase 4: CRM funnel
+(leads/opportunities/lost reasons/payment terms), sales documents
+(quotation = sales order — ONE id, ONE number), purchase documents,
+M:N line allocations, price requests + supplier offers (daily-lowest
+intelligence), document-flow relations.
 
 ## Setup
 
@@ -83,6 +88,14 @@ src/
   workflow-timer/  durable timers executed by the queue (action registry)
   notifications/   notification rules (condition engine) + dispatch service
   integrations/    integration adapter configs (SMS/…)
+  crm/             Phase 4 CRM funnel: leads, opportunities, lost reasons, payment terms
+  sales/           Phase 4 sales documents (quotation=order), lines + matrix,
+                   confirmation lock/override, OWN/TEAM/ALL scope
+  purchase/        Phase 4 purchase documents (independent) + create-purchase-from-sale
+  allocations/     Phase 4 sales ↔ purchase line-level M:N allocations (row-locked)
+  price-request/   Phase 4 price requests, supplier offers, worklist,
+                   daily-lowest intelligence, create sale/purchase from request
+  document-flow/   Phase 4 DocumentRelation service + related-documents endpoint
 ```
 
 Company context: scoped controllers resolve the active company via
@@ -204,6 +217,66 @@ Pre-existing groups (users, roles + `GET /api/permissions` catalog, teams,
 files, audit — now with optional `?companyId=`) are unchanged; see git history
 for their full tables.
 
+### Sales · Purchase · Price requests · Document flow (Phase 4)
+
+All rows are company-scoped and audited atomically (`AuditService.recordTx`
+inside the mutation transaction). Document totals are **server-authoritative**
+(exact `Prisma.Decimal` math, `common/utils/money`). Quotation and sales order
+share ONE `SalesDocument` — the id and `documentNumber` (e.g. `SD-1405-00001`)
+are allocated once at creation and never regenerated. After
+`CUSTOMER_CONFIRMED` the line fields (variant/quantity/uom/price/discount) are
+locked; users holding `sales.override_confirmed_order` may still edit them but
+MUST pass a `reason` (422 `OVERRIDE_REASON_REQUIRED` otherwise), which lands in
+an `OVERRIDE_CONFIRMED_ORDER` audit row (old/new values + reason, same tx) plus
+a party timeline event. Without the permission: 403 `ORDER_LOCKED`.
+
+Sales record scope (OWN/TEAM/ALL) mirrors the party precedent, keyed on the
+document's salesperson: `sales.scope.all` (or `sales.view_all`) → ALL,
+`sales.scope.team` → TEAM, neither → OWN. Out-of-scope reads/writes → 403;
+cross-company rows are 404. The list endpoint is a lightweight projection
+served with exactly 3 queries per page (findMany + count + one grouped
+line count — no N+1).
+
+| Method | Path | Notes | Permission |
+| --- | --- | --- | --- |
+| POST/GET/PATCH | `/api/leads` (+ GET/DELETE `:id`) — status chain NEW→CONTACTED→QUALIFIED/LOST enforced | party FK same-company; assigned salesperson must be an active company member | `crm.view` / `crm.manage` |
+| POST/GET/PATCH | `/api/opportunities` (+ GET `:id`) — OPEN→QUALIFIED→QUOTED→WON/LOST | customer MUST hold the CUSTOMER role (422 `NOT_A_CUSTOMER`); `lostReasonId` REQUIRED when LOST (422 `LOST_REASON_REQUIRED`) | `crm.view` / `crm.manage` |
+| POST/GET/PATCH | `/api/lost-reasons` (+ GET `:id`) — configurable, reportable | unique `code` per company; 6 Persian defaults seeded | `crm.view` / `crm.manage` |
+| POST/GET/PATCH | `/api/payment-terms` (+ GET `:id`) | unique `code` per company; 4 Persian defaults seeded (`CASH`, `PRE_LOADING`, `7DAYS`, `30DAYS`) | `crm.view` read / `paymentterm.manage` write |
+| POST | `/api/sales` `{customerPartyId, lines?[], status? DRAFT\|QUOTATION, …}` → full detail; default expiration from Setting `sales.quotation_expiration_days` (14) | `priceRequestId` reference only — never required (§16) | `sales.create` |
+| GET | `/api/sales` `?page&pageSize&search&status&customerPartyId&salespersonUserId&expired&dateFrom&dateTo` | `expired=true` = expirationDate < now AND status ∈ (QUOTATION, SENT) | `sales.view` |
+| GET | `/api/sales/export` | same projection | `sales.export` |
+| GET | `/api/sales/:id` | lines with variant (sku/nameFa/template), uom symbol, printable description, tax snapshot | `sales.view` |
+| PATCH | `/api/sales/:id` (optimistic; 409 `VERSION_CONFLICT`) | header fields (expiration/paymentTerm/notes/shippingAddress) stay editable on confirmed orders | `sales.edit` |
+| POST | `/api/sales/:id/send` · `/:id/confirm` · `/:id/activate` · `/:id/lost` · `/:id/cancel` | send DRAFT/QUOTATION→SENT; confirm →CUSTOMER_CONFIRMED; activate →SALES_ORDER (same id+number); lost requires the reason per Setting `sales.lost_reason_required` (default true) | `sales.edit` / `sales.confirm` / `sales.edit` / `sales.cancel` |
+| POST | `/api/sales/:id/lines` · PATCH/DELETE `:id/lines/:lineId` | server-side totals; locked fields need override (above) | `sales.edit` |
+| POST | `/api/sales/:id/lines/matrix` `{cells:[{productVariantId, quantity, …}]}` | ONE line per NON-EMPTY cell (quantity absent/≤0 skipped); `printableDescription` defaults to «template nameFa + attribute values ' / '» | `sales.edit` |
+| POST | `/api/sales/:id/create-purchase` `{supplierPartyId, …}` | copies lines 1:1 (unitPrice 0 for the buyer), status ORDER_PLACED, CREATED_FROM relations both ways | `purchase.create` |
+| POST/GET/GET :id/PATCH/POST lines/PATCH/DELETE | `/api/purchase` — mirror of sales (no matrix); transitions `/:id/place`, `/:id/complete`, `/:id/cancel` | supplier must hold SUPPLIER role (422 `NOT_A_SUPPLIER`); buyer must be an active company member (`BUYER_NOT_COMPANY_MEMBER`); company-wide visibility (no record scope) | `purchase.view` / `create` / `edit` / `cancel` |
+| POST | `/api/purchase/:id/create-sale` `{customerPartyId, …}` | copies lines into a QUOTATION (unitPrice 0), CREATED_FROM relations both ways | `sales.create` |
+| POST/GET/PATCH/DELETE | `/api/allocations` `{salesLineId, purchaseLineId, allocatedQuantity}` | same company + same variant on BOTH lines (422 `ALLOCATION_VARIANT_MISMATCH`); over-allocation → 409 `ALLOCATION_EXCEEDS_QUANTITY`; SERIALIZABLE tx + `FOR UPDATE` on both lines (consistent id order) → concurrent over-allocation: exactly one wins | `allocations.manage` |
+| POST | `/api/price-requests` `{customerPartyId?, lines[]}` → `PRQ-1405-00001` | customer optional (must hold CUSTOMER role when given) | `price_request.create` |
+| GET | `/api/price-requests` `?status&customerPartyId&requesterUserId&search` | paginated | `price_request.view` |
+| GET | `/api/price-requests/worklist?date=` → `{today, previousDays}` | previous-day OPEN requests appear as the SAME records under `previousDays` (never copied/deleted); date-only params are local-midnight windows | `price_request.view` |
+| POST/PATCH/DELETE | `/api/price-requests/:id/lines(+:id/lines/:lineId)` | request lines; editable while OPEN/OFFERED | `price_request.create` |
+| POST | `/api/price-requests/:id/convert` · `/:id/close` | OPEN|OFFERED → CONVERTED / CLOSED (the create-sale/purchase flows CONVERT automatically) | `price_request.create` |
+| POST | `/api/price-requests/:id/create-sale` `{customerPartyId?, lineSelections?}` | QUOTATION with `priceRequestId` + GENERATED_FROM relations both ways → CONVERTED | `sales.create` |
+| POST | `/api/price-requests/:id/create-purchase` `{supplierPartyId, lineSelections? {offerId}}` | ORDER_PLACED copy; a selected offer's price becomes the unit price | `purchase.create` |
+| POST/GET/PATCH/DELETE | `/api/price-requests/lines/:lineId/offers` | several offers per line; first offer moves the request OPEN→OFFERED; supplier must hold SUPPLIER role (422 `NOT_A_SUPPLIER`); update/delete own offer only (403 `NOT_OFFER_OWNER`), blocked after conversion (409 `PRICE_REQUEST_CONVERTED`) | `price_request.manage_offers` / `price_request.view` read |
+| GET | `/api/price-requests/daily-lowest?date&variantId` | MIN(offeredPrice) per (day, variant, uom) — ALL co-lowest offers on ties; comparison within the same uom group (cross-uom normalization lands with Phase 5) | `price_request.view` |
+| GET | `/api/price-requests/suppliers/lowest-report?days=60` | per (supplier, product, uom) count of daily-lowest wins — "supplier X was daily lowest K times in N days" | `price_request.view` |
+| GET | `/api/documents/:type/:id/relations` | grouped counts + labelled items, both directions, reciprocal pairs deduped; types: `sales_document`, `purchase_document`, `price_request`, `lead`, `opportunity` | authenticated (company-scoped) |
+
+Phase 4 party timeline events (written in the same tx): `QUOTATION_CREATED`,
+`QUOTATION_SENT`, `SALE_CONFIRMED`, `SALE_LOST`, `ORDER_OVERRIDDEN`,
+`PURCHASE_CREATED`, `PRICE_REQUEST_CREATED`.
+
+**Schema mismatch (reported, not worked around silently)**: REQUIREMENTS §9
+lists `notes` among the quotation header fields, but the frozen Phase 4 schema
+has no `sales_documents.notes` / `purchase_documents.notes` column. The DTOs
+accept `notes` for forward-compatibility but it is not persisted; adding the
+column is recommended for the next schema change.
+
 ### Parties — corrective pass notes (corr-01…corr-06)
 
 - **Search (`?search=`)** ORs every identifier: `nameFa` (ilike over the
@@ -315,7 +388,7 @@ for their full tables.
   `LENGTH` (طول) — `m` base, `cm`; `UNIT` (شمارش) — `pcs` base, `dozen`. The
   `WEIGHT` category code is the canonical contract for the variant
   `weightUomId` validation.
-- 70-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
+- 99-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
   `sequences.*`, `audit.view`, `files.*`, `queue.*`, `companies.*`,
   `claims.*`, `treasury.*`, `tax.*`, `supplierproduct.*`, `loading.*`,
   `workflowtimer.*`, `notifications.*`, `integrations.*`, `parties.*`
@@ -323,21 +396,31 @@ for their full tables.
   `financialresponsibility.manage`, `timeline.view`,
   `products.*` (view / create / edit / archive / attributes.manage /
   variants.manage / uom.manage / supplier_mapping.manage; `salesperson` and
-  `buyer` get `products.view`).
-- System roles: `admin` (all), `salesperson`, `sales_manager`, `buyer`,
-  `purchase_manager`, `accountant`, `financial_manager`, `pricing_user`.
+  `buyer` get `products.view`), plus Phase 4: `sales.*` (view / create / edit /
+  confirm / cancel / override_confirmed_order / view_all / export +
+  `sales.scope.team` / `sales.scope.all`), `purchase.*` (view / create / edit /
+  cancel), `price_request.*` (view / create / manage_offers),
+  `allocations.manage`, `crm.view` / `crm.manage`, `paymentterm.manage`.
+- System roles: `admin` (all), `salesperson` (OWN sales scope),
+  `sales_manager` (`sales.scope.team`), `buyer`, `purchase_manager`,
+  `accountant`, `financial_manager`, `pricing_user`.
 - Chart of accounts: `BANK`, `RECEIVABLE`, `CHECKS_IN_TRANSIT`, `PAYABLE`,
   `VAT_PAYABLE`, `SALES_REVENUE`, `BANK_FEE_EXPENSE`, `PURCHASE_EXPENSE`.
 - Sequences per company (JALALI_YEAR reset, padding 5): `SALES_DOCUMENT(SD)`,
-  `PURCHASE(PO)`, `SALES_TAX_INVOICE(STI)`, `PURCHASE_TAX_INVOICE(PTI)`,
-  `RECEIPT(REC)`, `PAYMENT(PAY)`, `JOURNAL_ENTRY(JE)`, `CHECK(CHK)`,
-  `BANK_TRANSFER(BT)` → e.g. `SD-1405-00001`.
+  `PURCHASE(PO)`, `PRICE_REQUEST(PRQ)`, `SALES_TAX_INVOICE(STI)`,
+  `PURCHASE_TAX_INVOICE(PTI)`, `RECEIPT(REC)`, `PAYMENT(PAY)`,
+  `JOURNAL_ENTRY(JE)`, `CHECK(CHK)`, `BANK_TRANSFER(BT)` → e.g. `SD-1405-00001`.
+- Lost reasons (Phase 4, per company): `PRICE_HIGH` قیمت بالا, `COMPETITOR`
+  خرید از رقیب, `NO_NEED` عدم نیاز, `DELAY` تاخیر, `PAYMENT_TERMS` عدم توافق
+  شرایط پرداخت, `OTHER` سایر.
+- Payment terms (Phase 4, per company): `CASH` نقدی, `PRE_LOADING` تسویه قبل
+  از بارگیری, `7DAYS` تسویه ۷ روزه, `30DAYS` تسویه ۳۰ روزه.
 - One inactive sample `IntegrationConfig` (SMS).
 
 ## Tests
 
-`npm test` — 421 tests across 80 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, all 421 run against Postgres
+`npm test` — 484 tests across 103 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, all 484 run against Postgres
 and clean up after themselves). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
@@ -345,7 +428,12 @@ tests (`p3a-01` duplicate normalized phone … `p3a-12` score rules from
 settings), the Phase 3B product-catalog acceptance tests (`p3b-01` category
 hierarchy … `p3b-20` restart persistence), the Phase 3B correction-pass
 tests (`c3b-01` trgm index restored … `c3b-14` file metadata company
-isolation) plus Jalali conversion, phone
+isolation) plus the Phase 4 acceptance tests (`p4-01` quotation→order same
+id/number … `p4-34` grid without N+1 — numbering, role requirements, exact
+Decimal totals, matrix cells, confirmation lock/override/audit atomicity,
+version conflicts, M:N allocations incl. the concurrent over-allocation race,
+price-request worklist/lowest-supplier intelligence, company isolation,
+restart persistence) and Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

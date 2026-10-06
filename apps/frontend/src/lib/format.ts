@@ -189,6 +189,16 @@ export function faMoney(value: number | null | undefined): string {
   return `${faDigits(thousandSeparate(value))} ریال`;
 }
 
+/**
+ * Backend decimal columns (Prisma Decimal) arrive serialized as STRINGS.
+ * This normalizes any money/quantity wire value to a JS number for display.
+ */
+export function toNum(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 /** Normalizes a mobile number to 09xxxxxxxxx (accepts +98 / 0098 / 9…). */
 export function normalizeMobile(raw: string): string {
   let value = enDigits(raw).replace(/[\s()-]/g, "");

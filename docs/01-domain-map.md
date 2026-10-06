@@ -36,11 +36,16 @@ Party/CRM tables landed in **Phase 3A** (commit `1f57758`); the corrective pass 
 added pg_trgm-accelerated search + a ≤2-query grid projection for lists, company-member
 owners, company-scoped team record scopes and **transactional audit atomicity**
 (`AuditService.recordTx(tx)` — audit rows are written inside the mutation transaction;
-failure propagates and rolls back both).
+failure propagates and rolls back both). The **CRM funnel is implemented in Phase 4**:
+`Lead` / `Opportunity` / `LostReason` / `PaymentTerm` are live (see §4); `Activity` stays
+Phase 9.
 
 ## 3. Product & Pricing
 
-**Implemented in Phase 3B** (commit `2989f4f`, migration `20241007100000_phase3b_product_catalog`):
+**Implemented in Phase 3B** (commit `2989f4f`, migration `20241007100000_phase3b_product_catalog`)
+plus the **3B correction pass** (commits `e24fb73`/`2b64b81`, migration `20241008000000_p3b_corrections`:
+selected template values, DB-unique variant combination keys, explicit weight UOM, at-most-one
+UOM base semantics, cross-company FK integrity, file isolation):
 categories/brands/UOM engine/attributes/templates/variants/variant matrix/supplier mappings
 are live in `apps/backend/src/products/*`. Daily Pricing, Publishing and Tax Product remain
 future phases.
@@ -54,23 +59,25 @@ future phases.
 | Publishing | **Phase 5 (future)**: publish price batches to Website/Telegram/WhatsApp/Eitaa/Bale/Rubika; per-channel job isolation | `PublishBatch`, `PublishBatchItem` (not in schema yet) |
 | Tax Product | **Phase 8 (future)**: separate catalog used only by tax invoices/Moadian | `TaxProduct` (not in schema yet) |
 
-## 4. Sales
+## 4. Sales — implemented in Phase 4 (`apps/backend/src/crm`, `apps/backend/src/sales`)
 
 | Module | Responsibility | Key entities |
 |---|---|---|
-| Lead / Opportunity | CRM funnel; a returning customer gets a new Opportunity | `Lead`, `Opportunity` |
-| Sales Document | Shared Quotation→SalesOrder entity (same number, status progression), line lock after confirm, manager override with audit | `SalesDocument`, `SalesLine` |
-| Lost Quotes | Lost reasons (configurable) + aggregate report | `LostReason` config |
-| Sales Pricing follow-up | Quotation follow-up automations | via Automation |
+| Lead / Opportunity | CRM funnel — **implemented**: Lead `NEW→CONTACTED→QUALIFIED/LOST`; Opportunity `OPEN→QUALIFIED→QUOTED→WON/LOST`; a returning customer gets a NEW Opportunity per buying intent (the Party master never changes); customer must hold the CUSTOMER role (422 `NOT_A_CUSTOMER`); LostReason required when LOST | `Lead`, `Opportunity`, `LostReason` |
+| Sales Document | Shared Quotation→SalesOrder entity — **implemented**: ONE `SalesDocument` with ONE id + ONE document_number allocated once at creation from the `SD` sequence and never regenerated (REQUIREMENTS §9); statuses `DRAFT→QUOTATION→SENT→CUSTOMER_CONFIRMED→SALES_ORDER→PARTIALLY_LOADED→COMPLETED` (+`CANCELLED`/`LOST`); line fields locked after confirmation — override only with `sales.override_confirmed_order` + a mandatory reason (422 `OVERRIDE_REASON_REQUIRED`, audited `OVERRIDE_CONFIRMED_ORDER` + timeline event in the same tx, else 403 `ORDER_LOCKED`); server-authoritative exact Decimal totals; variant-matrix line entry (one line per non-empty cell, `printableDescription` default); OWN/TEAM/ALL record scope keyed on the salesperson | `SalesDocument`, `SalesLine` |
+| Lost Quotes | Configurable per-company lost reasons (reportable, 6 Persian defaults seeded); reason required when marking a document/opportunity LOST | `LostReason` |
+| Payment Terms | Configurable per-company terms attached to sales/purchase documents (4 Persian defaults seeded) | `PaymentTerm` |
+| Sales Pricing follow-up | Quotation follow-up automations — Phase 9 | via Automation |
 
-## 5. Procurement
+## 5. Procurement — implemented in Phase 4 (`apps/backend/src/{purchase,price-request,allocations,document-flow}`)
 
 | Module | Responsibility | Key entities |
 |---|---|---|
-| Purchase | Independent purchase documents; linked M:N with sales | `PurchaseDocument`, `PurchaseLine` |
-| Price Request | Independent; optional customer; lines with today's known price | `PriceRequest`, `PriceRequestLine` |
-| Supplier Offers | Multiple offers per request line; daily-lowest tracking & supplier intelligence | `SupplierOffer` |
-| Sales↔Purchase Allocation | M:N, preferably line-level allocation of tonnage | `SalesPurchaseAllocation` |
+| Purchase | Independent purchase documents (no price request or sale required): `DRAFT→ORDER_PLACED→PARTIALLY_LOADED→COMPLETED` (+`CANCELLED`); supplier must hold the SUPPLIER role (422 `NOT_A_SUPPLIER`), buyer must be an active company member; `create-purchase`-from-sale / `create-sale`-from-purchase copy lines and write reciprocal `CREATED_FROM` relations | `PurchaseDocument`, `PurchaseLine` |
+| Price Request | Independent (customer optional, must hold CUSTOMER role when given): `OPEN→OFFERED→CONVERTED/CLOSED`; company-scoped `PRQ` numbering; lines carry variant/quantity/uom; worklist `{today, previousDays}` shows still-OPEN previous-day requests as the SAME records (never copied or deleted); "today's price" comes through the `TodayPriceProvider` interface (`NullTodayPriceProvider` until Phase 5) | `PriceRequest`, `PriceRequestLine` |
+| Supplier Offers | Several offers per request line (first offer moves OPEN→OFFERED); owner-only edit/delete, blocked after conversion; supplier must hold the SUPPLIER role; **daily-lowest derived via `RANK()`** per (day, variant, uom) — ties mean ALL co-lowest offers (no stored boolean); supplier lowest-report per (supplier, product, uom) | `SupplierOffer` |
+| Sales↔Purchase Allocation | Line-level M:N (`UNIQUE(sales_line_id, purchase_line_id)`, same variant on both sides); over-allocation guarded by a SERIALIZABLE transaction + `SELECT … FOR UPDATE` on both lines in consistent id order — under concurrency exactly one writer wins (409 `ALLOCATION_EXCEEDS_QUANTITY`) | `SalesPurchaseAllocation` |
+| Document Flow | Navigation infrastructure over the documents: polymorphic relations `CREATED_FROM / GENERATED_FROM / RELATED / BASED_ON` between `sales_document` / `purchase_document` / `price_request` / `lead` / `opportunity` (unique tuple, no hard FKs); related-documents endpoint returns both directions with reciprocal pairs deduped | `DocumentRelation` |
 
 ## 6. Logistics & Inventory
 

@@ -123,6 +123,35 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'products.variants.manage', module: 'products', action: 'variants.manage', description: 'Manage template attributes and generate variants' },
   { code: 'products.uom.manage', module: 'products', action: 'uom.manage', description: 'Manage UOM categories and units' },
   { code: 'products.supplier_mapping.manage', module: 'products', action: 'supplier_mapping.manage', description: 'Manage supplier ↔ product mappings' },
+  // sales (Phase 4). Record scope: sales.scope.all / sales.scope.team /
+  // neither → OWN, keyed on the document's salesperson. sales.view_all also
+  // implies ALL visibility (read-everything without the scope grant).
+  { code: 'sales.view', module: 'sales', action: 'view', description: 'View sales documents (within record scope)' },
+  { code: 'sales.create', module: 'sales', action: 'create', description: 'Create sales documents' },
+  { code: 'sales.edit', module: 'sales', action: 'edit', description: 'Edit sales documents and lines (within record scope)' },
+  { code: 'sales.confirm', module: 'sales', action: 'confirm', description: 'Confirm quotations / activate sales orders' },
+  { code: 'sales.cancel', module: 'sales', action: 'cancel', description: 'Cancel sales documents' },
+  { code: 'sales.override_confirmed_order', module: 'sales', action: 'override_confirmed_order', description: 'Override locked fields of a confirmed order (reason REQUIRED, audited)' },
+  { code: 'sales.view_all', module: 'sales', action: 'view_all', description: 'View all sales documents regardless of record scope' },
+  { code: 'sales.export', module: 'sales', action: 'export', description: 'Export sales documents' },
+  { code: 'sales.scope.team', module: 'sales', action: 'scope.team', description: 'Record scope: see documents of the whole team' },
+  { code: 'sales.scope.all', module: 'sales', action: 'scope.all', description: 'Record scope: see all sales documents' },
+  // purchase (Phase 4) — company-wide for buyers, no record scope
+  { code: 'purchase.view', module: 'purchase', action: 'view', description: 'View purchase documents' },
+  { code: 'purchase.create', module: 'purchase', action: 'create', description: 'Create purchase documents' },
+  { code: 'purchase.edit', module: 'purchase', action: 'edit', description: 'Edit purchase documents, lines and transitions' },
+  { code: 'purchase.cancel', module: 'purchase', action: 'cancel', description: 'Cancel purchase documents' },
+  // price requests + supplier offers (Phase 4)
+  { code: 'price_request.view', module: 'price_request', action: 'view', description: 'View price requests, worklist and daily-lowest reports' },
+  { code: 'price_request.create', module: 'price_request', action: 'create', description: 'Create/edit price requests and convert/close them' },
+  { code: 'price_request.manage_offers', module: 'price_request', action: 'manage_offers', description: 'Add/update/delete supplier offers' },
+  // sales ↔ purchase allocations (Phase 4)
+  { code: 'allocations.manage', module: 'allocations', action: 'manage', description: 'Manage sales ↔ purchase line allocations' },
+  // CRM funnel (Phase 4): leads, opportunities, lost reasons
+  { code: 'crm.view', module: 'crm', action: 'view', description: 'View leads, opportunities, lost reasons and payment terms' },
+  { code: 'crm.manage', module: 'crm', action: 'manage', description: 'Manage leads, opportunities and lost reasons' },
+  // payment terms (Phase 4)
+  { code: 'paymentterm.manage', module: 'paymentterm', action: 'manage', description: 'Manage payment terms' },
 ];
 
 const ROLE_DEFS: {
@@ -136,45 +165,59 @@ const ROLE_DEFS: {
     code: 'salesperson',
     nameFa: 'کارمند فروش',
     nameEn: 'Salesperson',
-    // Record scope: OWN implied (no parties.scope.* held).
+    // Record scope: OWN implied (no parties.scope.* / sales.scope.* held).
     permissions: [
       'files.view', 'files.upload', 'files.download', 'queue.view',
       'claims.view', 'claims.create', 'loading.view',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
       'products.view',
+      'crm.view', 'crm.manage',
+      'sales.view', 'sales.create', 'sales.edit',
+      'price_request.view', 'price_request.create',
     ],
   },
   {
     code: 'sales_manager',
     nameFa: 'مدیر فروش',
     nameEn: 'Sales Manager',
-    // Record scope: TEAM via parties.scope.team.
+    // Record scope: TEAM via sales.scope.team.
     permissions: [
       'teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view',
       'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
       'parties.archive', 'parties.owner.change', 'parties.score.compute', 'parties.scope.team',
+      'crm.view', 'crm.manage',
+      'sales.view', 'sales.create', 'sales.edit', 'sales.confirm', 'sales.cancel',
+      'sales.override_confirmed_order', 'sales.scope.team', 'sales.export',
+      'price_request.view', 'price_request.create', 'price_request.manage_offers',
+      'allocations.manage', 'paymentterm.manage',
     ],
   },
   {
     code: 'buyer',
     nameFa: 'کارمند خرید',
     nameEn: 'Buyer',
-    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'products.view'],
+    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'products.view',
+      'purchase.view', 'purchase.create', 'purchase.edit',
+      'price_request.view', 'price_request.create'],
   },
   {
     code: 'purchase_manager',
     nameFa: 'مدیر خرید',
     nameEn: 'Purchase Manager',
-    permissions: ['teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view', 'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create'],
+    permissions: ['teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view', 'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create',
+      'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.cancel',
+      'price_request.view', 'price_request.create', 'price_request.manage_offers',
+      'allocations.manage'],
   },
   {
     code: 'accountant',
     nameFa: 'حسابدار',
     nameEn: 'Accountant',
-    permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit'],
+    permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit',
+      'sales.view', 'purchase.view'],
   },
   {
     code: 'financial_manager',
@@ -186,13 +229,15 @@ const ROLE_DEFS: {
     code: 'pricing_user',
     nameFa: 'کارمند قیمت‌گذاری',
     nameEn: 'Pricing User',
-    permissions: ['files.view', 'files.download', 'queue.view'],
+    permissions: ['files.view', 'files.download', 'queue.view',
+      'price_request.view', 'price_request.create', 'price_request.manage_offers'],
   },
 ];
 
 const SEQUENCE_DEFS = [
   { documentType: 'SALES_DOCUMENT', name: 'Sales document', prefix: 'SD' },
   { documentType: 'PURCHASE', name: 'Purchase', prefix: 'PO' },
+  { documentType: 'PRICE_REQUEST', name: 'Price request', prefix: 'PRQ' },
   { documentType: 'SALES_TAX_INVOICE', name: 'Sales tax invoice', prefix: 'STI' },
   { documentType: 'PURCHASE_TAX_INVOICE', name: 'Purchase tax invoice', prefix: 'PTI' },
   { documentType: 'RECEIPT', name: 'Receipt', prefix: 'REC' },
@@ -429,6 +474,49 @@ async function seedIntegrationConfig(companyId: string): Promise<void> {
   });
 }
 
+/**
+ * Lost reasons (REQUIREMENTS §10) — configurable, reportable; never
+ * hard-coded strings. Persian defaults per company.
+ */
+const LOST_REASON_SEEDS = [
+  { code: 'PRICE_HIGH', nameFa: 'قیمت بالا', nameEn: 'Price too high', sortOrder: 1 },
+  { code: 'COMPETITOR', nameFa: 'خرید از رقیب', nameEn: 'Bought from competitor', sortOrder: 2 },
+  { code: 'NO_NEED', nameFa: 'عدم نیاز', nameEn: 'No longer needed', sortOrder: 3 },
+  { code: 'DELAY', nameFa: 'تاخیر', nameEn: 'Delay', sortOrder: 4 },
+  { code: 'PAYMENT_TERMS', nameFa: 'عدم توافق شرایط پرداخت', nameEn: 'Payment terms disagreement', sortOrder: 5 },
+  { code: 'OTHER', nameFa: 'سایر', nameEn: 'Other', sortOrder: 6 },
+];
+
+async function seedLostReasons(companyId: string): Promise<void> {
+  for (const reason of LOST_REASON_SEEDS) {
+    await prisma.lostReason.upsert({
+      where: { companyId_code: { companyId, code: reason.code } },
+      create: { companyId, ...reason },
+      update: {},
+    });
+  }
+}
+
+/**
+ * Payment terms (REQUIREMENTS §9 field list) — Persian defaults per company.
+ */
+const PAYMENT_TERM_SEEDS = [
+  { code: 'CASH', nameFa: 'نقدی', nameEn: 'Cash', daysOffset: 0 },
+  { code: 'PRE_LOADING', nameFa: 'تسویه قبل از بارگیری', nameEn: 'Settled before loading', daysOffset: 0 },
+  { code: '7DAYS', nameFa: 'تسویه ۷ روزه', nameEn: '7 days', daysOffset: 7 },
+  { code: '30DAYS', nameFa: 'تسویه ۳۰ روزه', nameEn: '30 days', daysOffset: 30 },
+];
+
+async function seedPaymentTerms(companyId: string): Promise<void> {
+  for (const term of PAYMENT_TERM_SEEDS) {
+    await prisma.paymentTerm.upsert({
+      where: { companyId_code: { companyId, code: term.code } },
+      create: { companyId, ...term },
+      update: {},
+    });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('Seeding company…');
   const companyId = await seedCompany();
@@ -459,6 +547,14 @@ async function main(): Promise<void> {
 
   console.log('Seeding reference UOM categories (WEIGHT/LENGTH/UNIT + bases)…');
   await seedUomCategories(companyId);
+
+  console.log('Seeding lost reasons (Phase 4)…');
+  await seedLostReasons(companyId);
+  console.log(`  ${LOST_REASON_SEEDS.length} lost reasons`);
+
+  console.log('Seeding payment terms (Phase 4)…');
+  await seedPaymentTerms(companyId);
+  console.log(`  ${PAYMENT_TERM_SEEDS.length} payment terms`);
 }
 
 main()

@@ -1,4 +1,4 @@
-# TCERP — ERD (after the Architecture Correction Gate, 2026-10-06)
+# TCERP — ERD (after the Architecture Correction Gate; Phase 3A/3B, 3B corrections and Phase 4 landed — 2026-10-06)
 
 Conventions (apply to every table, including Phase-2 modules):
 
@@ -17,14 +17,23 @@ Conventions (apply to every table, including Phase-2 modules):
 - **Optimistic locking**: `version INT` on concurrently-edited documents (e.g. `journal_entries`,
   `party_operational_balances`) and on the Phase 3B product catalog entities
   (`product_categories`, `brands`, `product_templates`, `product_variants`).
-- **Phase-N FKs**: columns whose target tables land with their own phase (Party → Phase 3,
-  Product → Phase 3, Sales/Purchase documents & lines → Phase 4, Tax invoices → Phase 8) exist
-  now as bare UUIDs so corrected relations never need renumbering. They are marked
-  **"FK in Phase N"** below; the FK constraints are added by those phases' migrations.
+- **Phase-N FKs**: columns whose target tables land with their own phase exist first as bare
+  UUIDs so corrected relations never need renumbering; the FK constraints are added by those
+  phases' migrations. **Landed so far**: Party → Phase 3A, Product → Phase 3B (+ the 3B
+  corrections), and since **Phase 4** the sales/purchase side is real: `sales_documents`,
+  `sales_lines`, `purchase_documents`, `purchase_lines`, `sales_purchase_allocations`,
+  `price_requests`, `price_request_lines`, `supplier_offers`, `document_relations` all carry
+  real FKs (variants, UOMs, parties, tax definitions). **Still bare UUIDs** (marked
+  "FK in Phase N" below): `loading_lines.product_variant_id`/`uom_id` and
+  `loading_allocations.sales_line_id`/`purchase_line_id` (wired in Phase 6),
+  `operational_settlement_claims.sales_document_id`/`purchase_document_id` (Phase 7),
+  tax-invoice allocation document ids (Phase 8).
   Ground truth for field names: `apps/backend/prisma/schema.prisma`
   (migrations `20241006000000_correction_gate`, `20241006120000_party_operational_balance`,
   `20241006150000_mini_gate`, `20241006170000_phase3a_party_crm`,
-  `20241007000000_p3a_corrections`, `20241007100000_phase3b_product_catalog`).
+  `20241007000000_p3a_corrections`, `20241007100000_phase3b_product_catalog`,
+  `20241008000000_p3b_corrections`, `20241008100000_phase4_sales_purchase`,
+  `20241008110000_restore_raw_indexes`).
 
 ## Diagrams by bounded context
 
@@ -100,11 +109,22 @@ These are service-level concerns: no schema change, but see the p3a-corrections 
 unique indexes in the index table below. `PARTY_OPERATIONAL_BALANCE` exists
 (`UNIQUE(company_id, party_id)`, `balance NUMERIC(20,4)`, optimistic `version`).
 
+The CRM funnel is **real since Phase 4** (migration `20241008100000_phase4_sales_purchase`):
+`Lead` (status `NEW → CONTACTED → QUALIFIED | LOST`, optional prospect `party_id`, assigned
+salesperson must be an active company member), `Opportunity` (status
+`OPEN → QUALIFIED → QUOTED → WON | LOST`; a returning customer gets a **NEW Opportunity per
+buying intent** — the Party master never changes; customer must hold the CUSTOMER role,
+422 `NOT_A_CUSTOMER`; `lost_reason_id` REQUIRED when LOST), configurable `LostReason`
+(`UNIQUE(company_id, code)`, 6 Persian defaults seeded) and `PaymentTerm`
+(`UNIQUE(company_id, code)`, 4 Persian defaults seeded). `Activity`/`ActivityType` remain
+Phase 9.
+
 ### Product & Pricing
 
-Implemented in **Phase 3B** (`20241007100000_phase3b_product_catalog`, commit `2989f4f`);
-ground truth `apps/backend/prisma/schema.prisma` (Product Catalog section) and
-`apps/backend/src/products/*`.
+Implemented in **Phase 3B** (`20241007100000_phase3b_product_catalog`, commit `2989f4f`)
+plus the **3B correction pass** (commits `e24fb73` schema / `2b64b81` backend, migration
+`20241008000000_p3b_corrections`); ground truth `apps/backend/prisma/schema.prisma`
+(Product Catalog section) and `apps/backend/src/products/*`.
 
 ```mermaid
 erDiagram
@@ -117,11 +137,14 @@ erDiagram
     PRODUCT_TEMPLATE ||--o{ PRODUCT_TEMPLATE_ATTRIBUTE : "attribute lines"
     ATTRIBUTE ||--o{ ATTRIBUTE_VALUE : "1:N values"
     PRODUCT_TEMPLATE_ATTRIBUTE }o--|| ATTRIBUTE : uses
+    PRODUCT_TEMPLATE_ATTRIBUTE ||--o{ PRODUCT_TEMPLATE_ATTRIBUTE_VALUE : "selected values (3B corr.)"
+    ATTRIBUTE_VALUE ||--o{ PRODUCT_TEMPLATE_ATTRIBUTE_VALUE : "curated per template attribute"
     PRODUCT_TEMPLATE ||--o{ PRODUCT_VARIANT : "1:N variants"
     PRODUCT_VARIANT ||--o{ VARIANT_ATTRIBUTE_VALUE : "combination map"
     VARIANT_ATTRIBUTE_VALUE }o--|| ATTRIBUTE : attribute
     VARIANT_ATTRIBUTE_VALUE }o--|| ATTRIBUTE_VALUE : value
     PRODUCT_VARIANT }o--o| UOM : "default_uom_id"
+    PRODUCT_VARIANT }o--o| UOM : "weight_uom_id (required with weight_per_unit, WEIGHT category)"
     PRODUCT_TEMPLATE }o--o| UOM : "default sales/purchase uom"
     PRODUCT_TEMPLATE }o--o| TAX_DEFINITION : "default_tax_definition_id"
     PARTY ||--o{ SUPPLIER_PRODUCT : "supplier_party_id (real FK, SUPPLIER role)"
@@ -139,13 +162,18 @@ erDiagram
   `UNIQUE(company_id, code)`; bilingual `name_fa`/`name_en`; optimistic `version`.
 - **Brand**: `logo_attachment_id` → `file_attachments` (validated same-company via the files
   module); `UNIQUE(company_id, code)`; GIN trgm index on `name_fa`; optimistic `version`.
-- **UOM engine** (3B): `UomCategory` + `Uom` with `conversion_ratio DECIMAL(20,6)` measured
-  against the category's base unit — **exactly one** `is_base_unit` per category enforced by
-  the partial unique `uoms_base_unit_uniq (category_id) WHERE is_base_unit` plus the service
-  (`UOM_BASE_UNIT_EXISTS`). Cross-category conversion is blocked (422
-  `UOM_CATEGORY_MISMATCH`); `POST /api/products/uom/convert` uses Decimal arithmetic only.
-  `UomConversionService.convertWithProductWeight` handles `weight_per_unit`-carrying variants
-  (used by later phases). No separate `UomConversion` table — ratios live on `uoms`.
+- **UOM engine** (3B + corrections): `UomCategory` + `Uom` with `conversion_ratio
+  DECIMAL(20,6)` measured against the category's base unit — **at most one** `is_base_unit`
+  per category (partial unique `uoms_base_unit_uniq (category_id) WHERE is_base_unit`; a
+  category may transiently have NO base, which blocks conversion with 422
+  `UOM_NO_BASE_UNIT` until one exists). Base ratio must be exactly 1 (422
+  `UOM_BASE_RATIO_ONE`); any `conversion_ratio <= 0` is rejected by the DB CHECK
+  `uoms_conversion_ratio_positive_chk` (mapped to 422 `UOM_RATIO_POSITIVE`). Cross-category
+  conversion is blocked (422 `UOM_CATEGORY_MISMATCH`); `POST /api/products/uom/convert` uses
+  Decimal arithmetic only. `UomConversionService.convertWithProductWeight` handles
+  `weight_per_unit`-carrying variants (quantity × weightPerUnit in the variant's weight UOM,
+  then standard Weight-category conversion — e.g. 100 pcs × 18.7 kg = 1870 kg → 1.87 ton).
+  No separate `UomConversion` table — ratios live on `uoms`.
 - **Attribute / AttributeValue**: fully dynamic (REQUIREMENTS §5); `UNIQUE(company_id, code)`
   on attributes, `UNIQUE(attribute_id, code)` on values; optional `numeric_value
   DECIMAL(20,6)` for numeric attributes.
@@ -156,11 +184,26 @@ erDiagram
   optimistic `version`; `UNIQUE(company_id, internal_code)`.
 - **ProductTemplateAttribute**: `(template_id, attribute_id)` UNIQUE with `display_order`,
   `creates_variants` (defines the variant space), `is_required`.
-- **ProductVariant**: `UNIQUE(company_id, sku)`; `weight_per_unit NUMERIC(18,4)?`,
-  `default_uom_id?`, optimistic `version`. Variants are generated in ONE transaction from the
-  template's `createsVariants` attributes — existing identical combinations are **skipped with
-  a report** (`{created[], skipped[]}`), never duplicated or mutated; SKU collisions are
-  auto-suffixed `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`.
+- **ProductTemplateAttributeValue** (3B correction, `e24fb73`): the SELECTED values allowed
+  for a template attribute — `UNIQUE(template_attribute_id, attribute_value_id)`,
+  `display_order`, `active`; a candidate value must belong to the template attribute's
+  attribute (else 422 `ATTRIBUTE_VALUE_MISMATCH`). Preview / matrix / variant generation
+  build combinations ONLY from these selected active values; while an attribute has none
+  selected yet it falls back to the attribute's GLOBAL active values
+  (`TemplatesService.effectiveUniverse` — transitional rule, disappears once the first value
+  is selected).
+- **ProductVariant**: `UNIQUE(company_id, sku)`; `weight_per_unit NUMERIC(18,4)?` with an
+  **explicit `weight_uom_id`** (3B correction — required whenever `weight_per_unit` is set,
+  422 `WEIGHT_UOM_REQUIRED`; must belong to the company's Weight UOM category, resolved
+  canonically by category `code === 'WEIGHT'`); `default_uom_id?`, optimistic `version`.
+  **`combination_key`** (3B correction): canonical sorted `attribute_id=attribute_value_id`
+  pairs joined with `|` (`buildCombinationKey`, deterministic; existing rows backfilled);
+  `UNIQUE(template_id, combination_key)` is the ONLY duplicate-combination authority at the
+  DB level — a concurrent generate racing past the in-transaction pre-check aborts with P2002
+  → 409 `VARIANT_COMBINATION_EXISTS`. Variants are generated in ONE transaction from the
+  template's selected `createsVariants` values — existing identical combinations are
+  **skipped with a report** (`{created[], skipped[]}`), never duplicated or mutated; SKU
+  collisions are auto-suffixed `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`.
 - **VariantAttributeValue**: explicit relation rows (no JSON) — **one value per attribute per
   variant**: `UNIQUE(variant_id, attribute_id)` and `UNIQUE(variant_id, attribute_value_id)`.
 - **SupplierProduct**: now carries **real FKs** — `supplier_party_id` → `parties`
@@ -178,49 +221,122 @@ rows.
 `supplier_products_exactly_one_level_chk` (mapping_level must match the one non-null FK) and
 again in the service. Indexes: `(company_id, supplier_party_id)` plus per-target indexes.
 
-### Sales / Procurement / Loading
+### Sales / Procurement / Price Requests / Document Flow (Phase 4 — implemented)
+
+Schema landed in **Phase 4** (commit `c467f85`, migration `20241008100000_phase4_sales_purchase`
++ `20241008110000_restore_raw_indexes`); services in
+`apps/backend/src/{crm,sales,purchase,allocations,price-request,document-flow}`.
+**Loading stays Phase 6**: its tables exist since the Correction Gate, but the line FKs
+(`loading_lines.product_variant_id`/`uom_id`, `loading_allocations.sales_line_id`/
+`purchase_line_id`) are still bare UUIDs until the Phase 6 migration wires them.
 
 ```mermaid
 erDiagram
-    PARTY ||--o{ SALES_DOCUMENT : "customer (FK in Phase 3)"
+    PARTY |o--o{ LEAD : "optional prospect party"
+    USER |o--o{ LEAD : "assigned salesperson"
+    LEAD ||--o{ OPPORTUNITY : "1:N funnel"
+    PARTY ||--o{ OPPORTUNITY : "customer (CUSTOMER role required)"
+    USER ||--o{ OPPORTUNITY : "salesperson"
+    OPPORTUNITY |o--o{ SALES_DOCUMENT : "optional source"
+    OPPORTUNITY |o--o{ PRICE_REQUEST : "optional source"
+    LOST_REASON |o--o{ OPPORTUNITY : "required when LOST"
+    LOST_REASON |o--o{ SALES_DOCUMENT : "required when LOST"
+    PAYMENT_TERM |o--o{ SALES_DOCUMENT : "optional term"
+    PAYMENT_TERM |o--o{ PURCHASE_DOCUMENT : "optional term"
+    PARTY ||--o{ SALES_DOCUMENT : "customer"
     USER ||--o{ SALES_DOCUMENT : "salesperson"
-    PAYMENT_TERM }o--|| SALES_DOCUMENT : "optional term"
     SALES_DOCUMENT ||--o{ SALES_LINE : "1:N lines"
-    PRODUCT_VARIANT ||--o{ SALES_LINE : "sold as (FK in Phase 3)"
+    PRODUCT_VARIANT ||--o{ SALES_LINE : "sold as (real FK)"
     UOM ||--o{ SALES_LINE : uom
-    SALES_DOCUMENT ||--o{ LOST_QUOTE : "lost reason (configurable)"
-    PARTY ||--o{ PURCHASE_DOCUMENT : "supplier (FK in Phase 3)"
+    TAX_DEFINITION |o--o{ SALES_LINE : "tax_definition_id + tax_rate_snapshot"
+    PARTY ||--o{ PURCHASE_DOCUMENT : "supplier (SUPPLIER role required)"
+    USER ||--o{ PURCHASE_DOCUMENT : buyer
     PURCHASE_DOCUMENT ||--o{ PURCHASE_LINE : "1:N lines"
-    PRODUCT_VARIANT ||--o{ PURCHASE_LINE : "bought as (FK in Phase 3)"
-    SALES_LINE ||--o{ SALES_PURCHASE_ALLOCATION : "M:N alloc"
-    PURCHASE_LINE ||--o{ SALES_PURCHASE_ALLOCATION : "M:N alloc"
-    PARTY ||--o{ PRICE_REQUEST : "optional customer"
-    USER ||--o{ PRICE_REQUEST : "requester"
+    PRODUCT_VARIANT ||--o{ PURCHASE_LINE : "bought as (real FK)"
+    UOM ||--o{ PURCHASE_LINE : uom
+    SALES_LINE ||--o{ SALES_PURCHASE_ALLOCATION : "line-level M:N (unique pair)"
+    PURCHASE_LINE ||--o{ SALES_PURCHASE_ALLOCATION : "line-level M:N (unique pair)"
+    PARTY |o--o{ PRICE_REQUEST : "optional customer"
+    USER ||--o{ PRICE_REQUEST : requester
     PRICE_REQUEST ||--o{ PRICE_REQUEST_LINE : "1:N"
     PRODUCT_VARIANT ||--o{ PRICE_REQUEST_LINE : requested
-    PRICE_REQUEST_LINE ||--o{ SUPPLIER_OFFER : "N offers"
-    PARTY ||--o{ SUPPLIER_OFFER : "supplier"
-    LOADING ||--o{ LOADING_LINE : "1:N lines"
-    PRODUCT_VARIANT ||--o{ LOADING_LINE : "loaded (FK in Phase 3)"
-    UOM }o--o| LOADING_LINE : "uom_id (FK in Phase 3)"
-    LOADING_LINE ||--o{ LOADING_ALLOCATION : "1:N allocs"
-    SALES_LINE |o--o{ LOADING_ALLOCATION : "sales_line_id (FK in Phase 4)"
-    PURCHASE_LINE |o--o{ LOADING_ALLOCATION : "purchase_line_id (FK in Phase 4)"
-    PARTY ||--o{ LOADING : "driver_party_id / carrier_party_id (FK in Phase 3)"
+    UOM ||--o{ PRICE_REQUEST_LINE : uom
+    PRICE_REQUEST_LINE ||--o{ SUPPLIER_OFFER : "N offers per line"
+    PARTY ||--o{ SUPPLIER_OFFER : "supplier (SUPPLIER role required)"
+    UOM ||--o{ SUPPLIER_OFFER : "offer uom"
+    PRICE_REQUEST |o--o{ SALES_DOCUMENT : "reference only (price_request_id)"
+    PRICE_REQUEST |o--o{ PURCHASE_DOCUMENT : "reference only (price_request_id)"
+    SALES_DOCUMENT |o--o{ DOCUMENT_RELATION : "navigation (polymorphic)"
+    PURCHASE_DOCUMENT |o--o{ DOCUMENT_RELATION : "navigation (polymorphic)"
+    PRICE_REQUEST |o--o{ DOCUMENT_RELATION : "navigation (polymorphic)"
+    LEAD |o--o{ DOCUMENT_RELATION : "navigation (polymorphic)"
+    OPPORTUNITY |o--o{ DOCUMENT_RELATION : "navigation (polymorphic)"
+    LOADING ||--o{ LOADING_LINE : "Phase 6 (tables exist, not wired)"
+    LOADING_LINE ||--o{ LOADING_ALLOCATION : "Phase 6"
+    SALES_LINE |o--o{ LOADING_ALLOCATION : "bare UUID until Phase 6"
+    PURCHASE_LINE |o--o{ LOADING_ALLOCATION : "bare UUID until Phase 6"
 ```
 
-`SALES_DOCUMENT.status` (workflow): `DRAFT → QUOTATION → QUOTATION_SENT → CUSTOMER_CONFIRMED →
-SALES_ORDER → PARTIALLY_LOADED → COMPLETED → CLOSED` (+ `REOPENED`, `LOST`).
-Three distinct quantities: `ordered_quantity`, `loaded_quantity` (sum of actual loadings),
-`tax_invoiced_quantity` — never forced equal.
+- **SalesDocument = ONE entity for quotation → sales order** (NON-NEGOTIABLE, REQUIREMENTS
+  §9): quotation and sales order share ONE `id` and ONE `document_number`; the number is
+  allocated **once at creation** from the `SALES_DOCUMENT(SD)` sequence and **never
+  regenerated** — only the status moves. `UNIQUE(company_id, document_number)`.
+  Statuses: `DRAFT → QUOTATION → SENT → CUSTOMER_CONFIRMED → SALES_ORDER →
+  PARTIALLY_LOADED → COMPLETED`, with `CANCELLED` and `LOST` as terminal states
+  (`LOST` requires the reason per Setting `sales.lost_reason_required`).
+  **Confirmation lock**: after `CUSTOMER_CONFIRMED` the line fields (variant / quantity /
+  uom / price / discount) are locked — editing without `sales.override_confirmed_order` is
+  403 `ORDER_LOCKED`; a permission holder MAY override but MUST pass a `reason`
+  (422 `OVERRIDE_REASON_REQUIRED`), which lands in an `OVERRIDE_CONFIRMED_ORDER` audit row
+  (old/new + reason) plus a party timeline event, all in the mutation transaction.
+  Header totals (`subtotal/discount_total/tax_total/total`) are **server-authoritative**
+  exact `Decimal(20,4)` math; `SalesLine` carries `printable_description` (matrix default:
+  template nameFa + attribute values joined with ` / `), `ordered_quantity`, `unit_price`,
+  optional `tax_definition_id` + `tax_rate_snapshot`. Sales record scope OWN/TEAM/ALL
+  keyed on the document's salesperson (backend-enforced, mirrors the party precedent).
+  `price_request_id` on the document is **reference only** — never required (purchase/sale
+  independence preserved).
+- **PurchaseDocument is independent** (no PriceRequest or sale required): statuses
+  `DRAFT → ORDER_PLACED → PARTIALLY_LOADED → COMPLETED` (+ `CANCELLED`); supplier must hold
+  the SUPPLIER role (422 `NOT_A_SUPPLIER`), buyer must be an active company member;
+  company-wide visibility (no record scope). `create-purchase-from-sale` /
+  `create-sale-from-purchase` copy lines and write reciprocal `CREATED_FROM` relations.
+- **SalesPurchaseAllocation**: line-level **M:N** between `sales_lines` and `purchase_lines`,
+  `UNIQUE(sales_line_id, purchase_line_id)` (one allocation row per pair, quantity editable)
+  with indexes on both sides; both lines must be same-company and same-variant
+  (422 `ALLOCATION_VARIANT_MISMATCH`). Over-allocation is guarded by a **SERIALIZABLE
+  transaction + `SELECT … FOR UPDATE` on both lines taken in consistent id order** — under
+  concurrent over-allocation exactly one writer wins (409 `ALLOCATION_EXCEEDS_QUANTITY`).
+- **PriceRequest is independent** (customer optional, must hold CUSTOMER role when given):
+  statuses `OPEN → OFFERED → CONVERTED | CLOSED`; `UNIQUE(company_id, request_number)`
+  (`PRQ-…`). Lines carry variant / requested quantity / uom. **SupplierOffer**: several per
+  line; the first offer moves the request OPEN→OFFERED; offers are editable/deletable only
+  by their owner and blocked after conversion. Daily-lowest is **derived, not stored**:
+  `RANK() OVER (PARTITION BY day, product_variant_id, uom_id ORDER BY offered_price ASC)`
+  with `rnk = 1` — ties mean **ALL co-lowest offers** (no stored boolean); comparison is
+  within the same uom group (cross-uom normalization deferred to Phase 5). The worklist
+  `{today, previousDays}` shows a still-OPEN previous-day request under `previousDays` as
+  the **SAME record** (never copied or deleted). `TodayPriceProvider` is a Phase 4
+  **interface** bound to the `TODAY_PRICE_PROVIDER` token with a `NullTodayPriceProvider`
+  default (always null — a pricing outage must never block a request); the concrete daily
+  pricing engine lands in Phase 5.
+- **DocumentRelation** (navigation layer, complements FKs): polymorphic
+  `(from_type, from_id) → (to_type, to_id)` with `relation_type`
+  `CREATED_FROM | GENERATED_FROM | RELATED | BASED_ON` and
+  `UNIQUE(from_type, from_id, to_type, to_id, relation_type)`; no hard FKs — it links any
+  two of `sales_document` / `purchase_document` / `price_request` / `lead` / `opportunity`.
+  `GET /api/documents/:type/:id/relations` returns grouped counts + labelled items in both
+  directions with reciprocal pairs deduped.
 
-**Loading = header + lines + allocations** (Correction Gate #5):
+**Loading = header + lines + allocations (Phase 6 — tables exist, FKs not yet wired)**
+(Correction Gate #5):
 - `LOADING` header: `company_id`, `loading_date`, `driver_party_id`, `carrier_party_id`
-  (driver/carrier are Party roles; both FKs in Phase 3). Index `(company_id, loading_date)`.
-- `LOADING_LINE`: `loading_id`, `product_variant_id` (FK in Phase 3), `actual_quantity`,
-  `uom_id` (FK in Phase 3), `notes`. Index `loading_id`.
+  (driver/carrier are Party roles; both FKs land with Phase 3 parties when wired). Index
+  `(company_id, loading_date)`.
+- `LOADING_LINE`: `loading_id`, `product_variant_id` (bare UUID, Phase 6 FK),
+  `actual_quantity`, `uom_id` (bare UUID, Phase 6 FK), `notes`. Index `loading_id`.
 - `LOADING_ALLOCATION`: `loading_line_id`, `sales_line_id` **or** `purchase_line_id`
-  (FKs in Phase 4), `allocated_quantity`. CHECK `loading_allocations_target_chk`:
+  (bare UUIDs, Phase 6 FKs), `allocated_quantity`. CHECK `loading_allocations_target_chk`:
   `(sales_line_id IS NOT NULL OR purchase_line_id IS NOT NULL) AND allocated_quantity > 0`.
 - A loading is registered **once** and is shown on both the sale and the purchase side.
 
@@ -246,11 +362,11 @@ erDiagram
     TAX_PRODUCT ||--o{ SALES_TAX_INVOICE_LINE : "tax product (separate catalog)"
     TAX_DEFINITION ||--o{ SALES_TAX_INVOICE_LINE : "tax_definition_id + tax_rate_snapshot"
     SALES_TAX_INVOICE ||--o{ SALES_TAX_INVOICE_ORDER_ALLOCATION : "1:N"
-    SALES_DOCUMENT ||--o{ SALES_TAX_INVOICE_ORDER_ALLOCATION : "document_id (FK in Phase 4)"
+    SALES_DOCUMENT ||--o{ SALES_TAX_INVOICE_ORDER_ALLOCATION : "document_id (bare UUID until Phase 8)"
     PARTY ||--o{ PURCHASE_TAX_INVOICE : "seller"
     PURCHASE_TAX_INVOICE ||--o{ PURCHASE_TAX_INVOICE_LINE : "1:N"
     PURCHASE_TAX_INVOICE ||--o{ PURCHASE_TAX_INVOICE_ORDER_ALLOCATION : "1:N"
-    PURCHASE_DOCUMENT ||--o{ PURCHASE_TAX_INVOICE_ORDER_ALLOCATION : "document_id (FK in Phase 4)"
+    PURCHASE_DOCUMENT ||--o{ PURCHASE_TAX_INVOICE_ORDER_ALLOCATION : "document_id (bare UUID until Phase 8)"
     SALES_TAX_INVOICE ||--o{ MOADIAN_SUBMISSION : submitted as
     SALES_TAX_INVOICE ||--o{ SALES_TAX_INVOICE : "corrective/cancellation/return (original_ref)"
     MOADIAN_SUBMISSION ||--o{ MOADIAN_SUBMISSION_ATTEMPT : "1:N attempts (never deleted)"
@@ -259,7 +375,8 @@ erDiagram
 
 **No generic polymorphic allocation** (Correction Gate #4): two explicit tables —
 `SALES_TAX_INVOICE_ORDER_ALLOCATION` (`sales_tax_invoice_id` FK in Phase 8, `sales_document_id`
-FK in Phase 4, `allocated_amount`, optional `allocated_quantity`;
+— target table real since Phase 4, FK constraint lands with the Phase 8 tax invoices,
+`allocated_amount`, optional `allocated_quantity`;
 `UNIQUE(sales_tax_invoice_id, sales_document_id)`, index `sales_document_id`) and
 `PURCHASE_TAX_INVOICE_ORDER_ALLOCATION` (same pattern with `purchase_tax_invoice_id` /
 `purchase_document_id`).
@@ -288,8 +405,8 @@ erDiagram
     PARTY }o--o| PAYMENT : "party_id (FK in Phase 3)"
     PARTY }o--o| CHECK : "party_id (FK in Phase 3)"
     PARTY ||--o{ OPERATIONAL_SETTLEMENT_CLAIM : "party_id (FK in Phase 3)"
-    SALES_DOCUMENT |o--o{ OPERATIONAL_SETTLEMENT_CLAIM : "CUSTOMER_RECEIPT (FK in Phase 4)"
-    PURCHASE_DOCUMENT |o--o{ OPERATIONAL_SETTLEMENT_CLAIM : "SUPPLIER_PAYMENT (FK in Phase 4)"
+    SALES_DOCUMENT |o--o{ OPERATIONAL_SETTLEMENT_CLAIM : "CUSTOMER_RECEIPT (bare UUID until Phase 7)"
+    PURCHASE_DOCUMENT |o--o{ OPERATIONAL_SETTLEMENT_CLAIM : "SUPPLIER_PAYMENT (bare UUID until Phase 7)"
     OPERATIONAL_SETTLEMENT_CLAIM |o--o| RECEIPT : "MATCHED → matched_receipt_id"
     OPERATIONAL_SETTLEMENT_CLAIM |o--o| PAYMENT : "MATCHED → matched_payment_id"
     BANK_ACCOUNT ||--o{ RECEIPT : "credits bank"
@@ -377,12 +494,15 @@ no longer holds (e.g. quotation confirmed before 3-day follow-up).
 | Party → Address / Contact / PartyRole | 1:N |
 | ProductTemplate → ProductVariant | 1:N; variant space = template's `createsVariants` attributes; VariantAttributeValue rows give **one value per attribute per variant** |
 | ProductVariant → Uom (default) / Template → sales/purchase Uom | 0..1 each; conversions only inside one UomCategory (Decimal ratio vs the single base unit) |
-| SalesDocument → SalesLine / PurchaseDocument → PurchaseLine | 1:N |
-| Sales ↔ Purchase | **M:N** (`SalesPurchaseAllocation`, line-level, Phase 4) |
+| Party → Lead → Opportunity | 1:N → 1:N funnel (Phase 4); a returning customer gets a **NEW Opportunity per buying intent**; LostReason required when LOST |
+| ProductTemplateAttribute → ProductTemplateAttributeValue | 1:N selected values (`UNIQUE(template_attribute_id, attribute_value_id)`); global-value fallback only while none selected |
+| SalesDocument → SalesLine / PurchaseDocument → PurchaseLine | 1:N (Phase 4; lines cascade with the document) |
+| Sales ↔ Purchase | **M:N** (line-level `SalesPurchaseAllocation`, `UNIQUE(sales_line_id, purchase_line_id)`, same variant both sides, over-allocation guarded — Phase 4) |
 | SalesOrder ↔ SalesTaxInvoice | **M:N** (`SalesTaxInvoiceOrderAllocation`, `UNIQUE` pair, amounts + optional quantity) |
 | PurchaseOrder ↔ PurchaseTaxInvoice | **M:N** (`PurchaseTaxInvoiceOrderAllocation`, same pattern) |
-| PriceRequestLine → SupplierOffer | 1:N |
-| Loading → LoadingLine → LoadingAllocation → Sales/Purchase lines | 1:N → **M:N** (auto-match in 1:1); registered once, shown on both sides |
+| PriceRequest → PriceRequestLine → SupplierOffer | 1:N → 1:N (several offers per line; supplier must hold the SUPPLIER role) |
+| DocumentRelation (navigation layer) | polymorphic `(from_type, from_id) → (to_type, to_id)`, `UNIQUE` tuple incl. `relation_type`; no hard FKs |
+| Loading → LoadingLine → LoadingAllocation → Sales/Purchase lines | 1:N → **M:N** (**Phase 6** — loading line/allocation FKs still bare UUIDs); registered once, shown on both sides |
 | Supplier ↔ Product | three-level mapping (VARIANT/TEMPLATE/CATEGORY, exactly one FK set — **real FKs since 3B**; supplier must hold the SUPPLIER role) |
 | MoadianSubmission → Attempts | 1:N (append-only) |
 | Party ↔ Role | M:N (`PartyRole`, multiple roles per party) |
@@ -407,13 +527,21 @@ no longer holds (e.g. quotation confirmed before 3-day follow-up).
 | `attributes` / `attribute_values` | UNIQUE `(company_id, code)` / `(attribute_id, code)`; index `(company_id, active)` / `(attribute_id, active)`; optional `numeric_value DECIMAL(20,6)` | dynamic attribute catalog |
 | `product_templates` | UNIQUE `(company_id, internal_code)`; index `(company_id, name_fa)`, `(company_id, active)`, `(company_id, category_id)`, `(company_id, brand_id)`; GIN `product_templates_name_fa_trgm_idx` (`gin_trgm_ops`) | template lists + trgm-accelerated search over name_fa/name_en/internal_code |
 | `product_template_attributes` | UNIQUE `(template_id, attribute_id)`; index `(template_id, display_order)` | ordered variant-defining attribute lines |
-| `product_variants` | UNIQUE `(company_id, sku)`; index `(template_id, active)` | SKU unique per company |
+| `product_template_attribute_values` | UNIQUE `(template_attribute_id, attribute_value_id)`; index `(template_attribute_id, display_order)` (3B corrections) | selected values per template attribute |
+| `product_variants` | UNIQUE `(company_id, sku)`; UNIQUE `(template_id, combination_key)` (3B corrections — DB-level duplicate-combination authority); index `(template_id, active)` | SKU unique per company; concurrent generate can never duplicate a combination |
 | `variant_attribute_values` | UNIQUE `(variant_id, attribute_id)`, `(variant_id, attribute_value_id)`; index `attribute_value_id` | one value per attribute per variant |
 | `supplier_products` | index `(company_id, supplier_party_id)`, `product_variant_id`, `product_template_id`, `category_id`; CHECK `supplier_products_exactly_one_level_chk` (exactly one of `product_variant_id`/`product_template_id`/`category_id`, matching `mapping_level`) — **real FKs since 3B** | genuine three-level mapping; supplier SUPPLIER-role validated in service |
-| `sales_documents` | UNIQUE `(company_id, document_number)`; index `(status, date)`, `customer_id`, `salesperson_id` | company-scoped numbering, lists & reports |
-| `purchase_documents` | UNIQUE `(company_id, document_number)`; index `(supplier_id, date)` | same |
-| `daily_prices` | UNIQUE `(product_variant_id, date)`; index `(product_variant_id, date DESC)` | "today's price" lookup |
-| `supplier_offers` | index `(price_request_line_id)`, `(supplier_id, date)` | supplier intelligence |
+| `leads` / `opportunities` (Phase 4) | index `(company_id, status)` + `(company_id, assigned_salesperson_id)` / `(company_id, customer_party_id, status)` + `(company_id, salesperson_user_id, status)` | CRM funnel lists |
+| `lost_reasons` / `payment_terms` (Phase 4) | UNIQUE `(company_id, code)` each | configurable, reportable catalogs |
+| `sales_documents` (Phase 4) | UNIQUE `(company_id, document_number)`; index `(company_id, status, document_date)`, `(company_id, customer_party_id)`, `(company_id, salesperson_user_id, status)` | number allocated once at creation, never regenerated; status/customer/salesperson lists |
+| `sales_lines` / `purchase_lines` (Phase 4) | index `sales_document_id` / `purchase_document_id`, `product_variant_id` each | document detail + per-variant reports |
+| `purchase_documents` (Phase 4) | UNIQUE `(company_id, document_number)`; index `(company_id, status, document_date)`, `(company_id, supplier_party_id)` | same numbering rule, supplier lists |
+| `sales_purchase_allocations` (Phase 4) | UNIQUE `(sales_line_id, purchase_line_id)`; index `sales_line_id`, `purchase_line_id` | one allocation row per line pair; both-side lookups |
+| `price_requests` (Phase 4) | UNIQUE `(company_id, request_number)`; index `(company_id, status, request_date)` | company-scoped PRQ numbering; worklist queries |
+| `price_request_lines` (Phase 4) | index `price_request_id`, `product_variant_id` | request detail + per-variant intelligence |
+| `supplier_offers` (Phase 4) | index `(price_request_line_id)`, `(company_id, supplier_party_id, offered_at)` | per-line offers; daily-lowest + supplier report |
+| `document_relations` (Phase 4) | UNIQUE `(from_type, from_id, to_type, to_id, relation_type)`; index `(from_type, from_id)`, `(to_type, to_id)` | reciprocal navigation, no duplicate relation rows |
+| `daily_prices` | UNIQUE `(product_variant_id, date)`; index `(product_variant_id, date DESC)` | "today's price" lookup (Phase 5) |
 | `settings` | UNIQUE `(company_id, key)` | per-company typed settings |
 | `sequences` | UNIQUE `(company_id, document_type)`; fields `prefix`, `padding`, `reset_cycle` (`NEVER\|FISCAL_YEAR\|JALALI_YEAR\|MONTHLY`), `current_number`, `last_reset_marker`; `SELECT … FOR UPDATE` allocation | concurrency-safe v2 engine; history never renumbered |
 | `integration_configs` | UNIQUE `(company_id, code)`; index `type` | adapter registry |

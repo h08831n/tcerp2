@@ -141,8 +141,87 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   validation, list projection (no N+1), optimistic locking, permission enforcement,
   audit-rollback atomicity, archive filtering, restart persistence.
 
+### Phase 3B corrections (commits `e24fb73` schema / `2b64b81` backend, migration `20241008000000_p3b_corrections`) — COMPLETED
+- **Selected template values**: `ProductTemplateAttributeValue`
+  (`UNIQUE(template_attribute_id, attribute_value_id)`, `display_order`, `active`) curates
+  each template attribute's value set (`POST/GET /api/products/templates/:id/attributes/:aid/values`,
+  replace-set or add-one); preview/matrix/generation build combinations ONLY from the
+  selected active values, falling back to the attribute's global values while none are
+  selected (`TemplatesService.effectiveUniverse` — transitional rule).
+- **DB-safe combination keys**: `ProductVariant.combination_key` = canonical sorted
+  `attribute_id=attribute_value_id` pairs joined with `|` (deterministic `buildCombinationKey`
+  + backfill); `UNIQUE(template_id, combination_key)` is the ONLY duplicate authority — a
+  concurrent generate that races past the pre-check aborts with P2002 → 409
+  `VARIANT_COMBINATION_EXISTS`.
+- **Explicit weight UOM**: `weight_uom_id` REQUIRED whenever `weight_per_unit` is set
+  (422 `WEIGHT_UOM_REQUIRED`); must sit in the company's Weight UOM category, resolved
+  canonically by category `code === 'WEIGHT'`; piece→kg→ton conversion path
+  (`convertWithProductWeight`: 100 pcs × 18.7 kg = 1870 kg → 1.87 ton).
+- **UOM base semantics**: AT MOST one base unit per category (not exactly one); conversion
+  blocked (422 `UOM_NO_BASE_UNIT`) until a base exists; base ratio exactly 1
+  (422 `UOM_BASE_RATIO_ONE`); `conversion_ratio <= 0` rejected by DB CHECK
+  `uoms_conversion_ratio_positive_chk`.
+- **Cross-company FK integrity**: shared `assertSameCompany` guard for every product FK
+  target (category parent, brand/logo, template FKs, attribute values, variant template/UOMs,
+  supplier mappings, UOM conversion endpoints). **File isolation**: file metadata/download/
+  attachment lists resolve only through the caller's company's attachments.
+- Forward-only migration restored `parties_name_fa_trgm_idx` (dropped by the diff-based 3B
+  migration) + `contact_phones` normalized index; historical migrations untouched.
+- **14 c3b acceptance scenarios** (`c3b-01` trgm index restored … `c3b-14` file metadata
+  company isolation).
+
+### Phase 4 — Sales/Purchase (schema commit `c467f85`, migrations `20241008100000_phase4_sales_purchase` + `20241008110000_restore_raw_indexes`, plus backend/frontend implementation) — COMPLETED
+- **6 new backend modules** (`apps/backend/src/`): `crm` (leads, opportunities, lost reasons,
+  payment terms), `sales` (documents + lines + variant matrix + flow endpoints), `purchase`
+  (documents + lines + flow endpoints), `allocations`, `price-request` (requests, lines,
+  offers, worklist, daily-lowest), `document-flow` (relations + related-documents endpoint).
+- **CRM funnel**: `Lead` (NEW→CONTACTED→QUALIFIED/LOST), `Opportunity`
+  (OPEN→QUALIFIED→QUOTED→WON/LOST; a returning customer gets a NEW opportunity per buying
+  intent; customer must hold the CUSTOMER role), configurable `LostReason` (required when
+  LOST; 6 Persian defaults seeded) and `PaymentTerm` (4 Persian defaults seeded).
+- **Quotation = sales order, ONE document**: `id` + `document_number` allocated once at
+  creation from the `SD` sequence and never regenerated; statuses
+  DRAFT→QUOTATION→SENT→CUSTOMER_CONFIRMED→SALES_ORDER→PARTIALLY_LOADED→COMPLETED
+  (+ CANCELLED/LOST); server-authoritative exact Decimal totals; sales record scope
+  OWN/TEAM/ALL keyed on the salesperson; matrix endpoint creates one line per non-empty cell
+  with `printableDescription`.
+- **Confirmation lock/override**: after CUSTOMER_CONFIRMED the line fields are locked
+  (403 `ORDER_LOCKED`); holders of `sales.override_confirmed_order` may still edit but MUST
+  pass a reason (422 `OVERRIDE_REASON_REQUIRED`) → `OVERRIDE_CONFIRMED_ORDER` audit row +
+  party timeline event, written in the same mutation transaction.
+- **Purchase is independent** (no price request or sale required): DRAFT→ORDER_PLACED→
+  PARTIALLY_LOADED→COMPLETED (+ CANCELLED); SUPPLIER role + active company-member buyer
+  required; `create-purchase`-from-sale / `create-sale`-from-purchase copy lines 1:1 and
+  write reciprocal `CREATED_FROM` relations.
+- **M:N allocation with concurrency guard**: line-level `SalesPurchaseAllocation`
+  (`UNIQUE(sales_line_id, purchase_line_id)`, same variant on both lines); writes run in a
+  **SERIALIZABLE transaction + `SELECT … FOR UPDATE` on both lines in consistent id order** —
+  concurrent over-allocation: exactly one writer wins (409 `ALLOCATION_EXCEEDS_QUANTITY`).
+- **Price-request worklist without duplication**: `GET /api/price-requests/worklist` →
+  `{today, previousDays}`; a still-OPEN previous-day request appears under `previousDays` as
+  the SAME record (never copied or deleted). Supplier offers: several per line (first offer
+  moves OPEN→OFFERED), owner-only edit/delete, blocked after conversion.
+- **Daily-lowest via RANK()**: derived with
+  `RANK() OVER (PARTITION BY day, product_variant_id, uom_id ORDER BY offered_price)` filtered
+  to `rnk = 1` — ties mean ALL co-lowest offers (nothing stored); comparison within one uom
+  group (cross-uom normalization deferred to Phase 5); supplier lowest-report per
+  (supplier, product, uom) over N days.
+- **TodayPriceProvider interface**: `TODAY_PRICE_PROVIDER` token with a `NullTodayPriceProvider`
+  default (always null — a pricing outage must never block a request); the concrete
+  daily-pricing engine lands in Phase 5.
+- **DocumentRelation reciprocal navigation**: polymorphic
+  `(from_type, from_id) → (to_type, to_id)` with CREATED_FROM/GENERATED_FROM/RELATED/BASED_ON
+  and a unique tuple; `GET /api/documents/:type/:id/relations` returns both directions with
+  reciprocal pairs deduped.
+- **p4-01…p4-34 acceptance suite** (23 spec files: numbering, role requirements, exact Decimal
+  totals, matrix cells, lock/override, version conflicts, allocation race, worklist/lowest
+  intelligence, company isolation, audit rollback atomicity, restart persistence, no-N+1
+  grid) + seed/permission extensions (`sales.*`, `purchase.*`, `price_request.*`,
+  `allocations.manage`, `crm.*`, `paymentterm.manage`).
+
 ## Current module
-- **Phase 3 (3A CRM + 3B Product Catalog) is COMPLETE.** Next: **Phase 4 — Sales/Purchase**.
+- **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
+  document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.
   Phase 2 remains verified end-to-end on the live local stack (see Verification below).
 
 ## Verification log (2026-10-05, live local stack)
@@ -171,15 +250,17 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 > Party and the 3B product tables); the remaining bare-UUID columns
 > (`sales_document_id`/`purchase_document_id`, `sales_line_id`/`purchase_line_id`,
 > loading `product_variant_id`/`uom_id`, `sales_tax_invoice_id`/`purchase_tax_invoice_id`)
-> are wired by **Phases 4/6/8** — the columns exist precisely so the corrected relations
-> never need renumbering.
+> are wired by **Phases 6/7/8** — the columns exist precisely so the corrected relations
+> never need renumbering. Phase 4 landed its own tables with **real FKs** (sales/purchase
+> documents & lines, allocations, price requests, offers, document relations).
 
 - Phase 3: ~~CRM (Party/Contacts/Addresses/Customer Score) + Product (templates, variants,
   attributes, UOM, brands, categories, supplier mapping)~~ — **DONE** (3A `1f57758` +
   3A corrective pass `f32fe7f` + 3B `2989f4f`; see Completed above)
-- Phase 4 — **NEXT**: Sales (Lead/Opportunity/SalesDocument), Purchase, Price Request,
-  Supplier Offers, Document Flow, Sales↔Purchase allocation
-- Phase 5: Daily Pricing + Publishing (channel adapters, per-channel jobs) — `DailyPrice` now
+- Phase 4: ~~Sales (Lead/Opportunity/SalesDocument), Purchase, Price Request, Supplier Offers,
+  Document Flow, Sales↔Purchase allocation~~ — **DONE** (3B corrections `e24fb73`/`2b64b81`
+  + Phase 4 `c467f85` + implementation; see Completed above)
+- Phase 5 — **NEXT**: Daily Pricing + Publishing (channel adapters, per-channel jobs) — `DailyPrice` now
   references **real** `ProductVariant` rows (FKs landed with 3B)
 - Phase 6: Loading + allocations + inventory (auto stock movements)
 - Phase 7: Accounting core services (CoA, fiscal years, journals, receipts/payments, settlement
@@ -232,6 +313,23 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 13. **Party grid projection ≤2 queries** (3A corrective pass): the relations a grid row needs
     (primary phone, roles, owner) are fetched in the same `findMany` (no per-row follow-ups,
     no N+1) plus one `count` — exactly 2 queries per page.
+14. **Sales quotation = sales order, single number** (Phase 4): quotation and sales order are
+    ONE `SalesDocument` — `id` + `document_number` are allocated once at creation from the
+    `SD` sequence and NEVER regenerated; the workflow only moves `status`
+    (DRAFT→…→COMPLETED). No separate quotation table, no renumbering on confirmation
+    (REQUIREMENTS §9 enforced by schema + service).
+15. **Daily-lowest is derived via RANK(), not a stored boolean** (Phase 4):
+    `RANK() OVER (PARTITION BY day, product_variant_id, uom_id ORDER BY offered_price)`
+    filtered to `rnk = 1` — ties mean ALL co-lowest offers and nothing can go stale.
+    Cross-uom comparison is deferred to Phase 5 (offers are ranked within one uom group).
+16. **Allocation writes are SERIALIZABLE + row-locked** (Phase 4): `SalesPurchaseAllocation`
+    create/update run in a SERIALIZABLE transaction taking `SELECT … FOR UPDATE` on BOTH
+    lines in consistent id order (deadlock-free); under concurrent over-allocation exactly
+    one writer wins.
+17. **TodayPriceProvider token with a null impl** (Phase 4): price requests get "today's
+    price" through the `TODAY_PRICE_PROVIDER` DI token; Phase 4 ships only
+    `NullTodayPriceProvider` (always null) so requests never depend on pricing data — the
+    concrete daily-pricing engine binds to the token in Phase 5.
 
 ## Known issues
 - Ports: DB exposed on host **5433** and MinIO on **9100** (already reflected in
@@ -242,9 +340,14 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   `docker pull docker.arvancloud.ir/minio/minio:latest && docker tag docker.arvancloud.ir/minio/minio:latest minio/minio:latest`.
 - Frontend dashboard is a shell; widgets arrive in Phase 10. Auth gate is client-side in the
   shell (fine for now; server middleware can be added later).
+- Sales/purchase documents have no `notes` column yet (REQUIREMENTS §9 lists `notes` among
+  the quotation header fields) — the DTOs accept `notes` for forward-compatibility but it is
+  NOT persisted; add the column with the next schema change (same pattern as the
+  `tax_definitions` `used_at` note in `apps/backend/README.md`).
 
 ## Next steps
-1. Phase 4 — Sales/Purchase: SalesDocument/SalesLine (quotation→order workflow), Purchase
-   Document/Line, Price Request + Supplier Offers, Sales↔Purchase allocation (M:N),
-   Document Flow; wire the bare-UUID FK columns listed above (sales/purchase document &
-   line ids, loading product/uom ids).
+1. Phase 5 — Daily Pricing + Publishing: per-variant daily price with full history
+   (`DailyPrice` already references the real `ProductVariant` rows landed in 3B), bulk
+   update engine, publish batches to Website/Telegram/WhatsApp/Eitaa/Bale/Rubika with
+   per-channel job isolation; bind a concrete `TodayPriceProvider` to the
+   `TODAY_PRICE_PROVIDER` token; add cross-uom daily-lowest comparison.

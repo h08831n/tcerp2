@@ -22,6 +22,12 @@ import { PartiesModule } from './parties/parties.module';
 import { ProductsModule } from './products/products.module';
 import { TaxModule } from './tax/tax.module';
 import { SupplierProductModule } from './supplierproduct/supplier-product.module';
+import { CrmModule } from './crm/crm.module';
+import { SalesModule } from './sales/sales.module';
+import { PurchaseModule } from './purchase/purchase.module';
+import { AllocationsModule } from './allocations/allocations.module';
+import { PriceRequestModule } from './price-request/price-request.module';
+import { DocumentFlowModule } from './document-flow/document-flow.module';
 import { LoadingModule } from './loading/loading.module';
 import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -59,6 +65,12 @@ import { HealthModule } from './health/health.module';
     ProductsModule,
     TaxModule,
     SupplierProductModule,
+    CrmModule,
+    SalesModule,
+    PurchaseModule,
+    AllocationsModule,
+    PriceRequestModule,
+    DocumentFlowModule,
     LoadingModule,
     WorkflowTimerModule,
     NotificationsModule,

@@ -32,9 +32,9 @@ const NAV_ITEMS: NavItem[] = [
   { label: "داشبورد", href: "/dashboard", icon: <NavIcon d="M3 12h4l2-7 4 14 2-7h6" /> },
   { label: "مشتریان و تامین‌کنندگان", href: "/parties", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM21 21v-2a4 4 0 00-3-3.87M15 3.13a4 4 0 010 7.75" /> },
   { label: "محصولات", href: "/products", icon: <NavIcon d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16zM3.3 7L12 12l8.7-5M12 22V12" /> },
-  { label: "فروش", href: "#", icon: <NavIcon d="M12 8c-1.66 0-3 .9-3 2s1.34 2 3 2 3 .9 3 2-1.34 2-3 2m0-8V7m0 10v1m9-6a9 9 0 11-18 0 9 9 0 0118 0z" /> },
-  { label: "خرید", href: "#", icon: <NavIcon d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4H6zM3 6h18M16 10a4 4 0 01-8 0" /> },
-  { label: "درخواست قیمت", href: "#", icon: <NavIcon d="M9 14l6-6m-5.5.5l1 1M14 13l1 1M3 3h18v18H3zM8 8h.01M16 16h.01" /> },
+  { label: "فروش", href: "/sales", icon: <NavIcon d="M12 8c-1.66 0-3 .9-3 2s1.34 2 3 2 3 .9 3 2-1.34 2-3 2m0-8V7m0 10v1m9-6a9 9 0 11-18 0 9 9 0 0118 0z" /> },
+  { label: "خرید", href: "/purchases", icon: <NavIcon d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4H6zM3 6h18M16 10a4 4 0 01-8 0" /> },
+  { label: "درخواست قیمت", href: "/price-requests", icon: <NavIcon d="M9 14l6-6m-5.5.5l1 1M14 13l1 1M3 3h18v18H3zM8 8h.01M16 16h.01" /> },
   { label: "قیمت روز", href: "#", icon: <NavIcon d="M3 3v18h18M8 17V9m4 8V5m4 12v-6" /> },
   { label: "بارگیری", href: "#", icon: <NavIcon d="M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 21a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm13 0a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" /> },
   { label: "انبار", href: "#", icon: <NavIcon d="M4 21V8l8-5 8 5v13M9 21v-6h6v6M9 11h.01M15 11h.01" /> },
@@ -57,6 +57,15 @@ const TITLES: Record<string, string> = {
   "/products/uom": "واحدهای اندازه‌گیری",
   "/products/attributes": "ویژگی‌ها",
   "/products/supplier-mappings": "نگاشت تامین‌کنندگان",
+  "/sales": "فروش",
+  "/sales/new": "پیش‌فاکتور جدید",
+  "/sales/follow-up": "پیگیری پیش‌فاکتورها",
+  "/purchases": "خرید",
+  "/purchases/new": "سند خرید جدید",
+  "/price-requests": "درخواست قیمت",
+  "/allocations": "تخصیص بار",
+  "/crm/leads": "سرنخ‌ها",
+  "/crm/opportunities": "فرصت‌های فروش",
 };
 
 /** Blocks rendering until /auth/me resolves; redirects to /login on failure. */
