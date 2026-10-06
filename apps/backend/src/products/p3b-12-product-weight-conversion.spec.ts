@@ -1,10 +1,11 @@
 import { UomConversionService } from './uom-conversion.service';
 
 /**
- * p3b-12 — product-weight-conversion: with variant.weightPerUnit = 18.7 kg,
- * 100 pieces → 1870 kg via the explicit product-specific path
- * (convertWithProductWeight). WITHOUT weightPerUnit, a cross-category
- * conversion stays blocked (UOM_CATEGORY_MISMATCH).
+ * p3b-12 — product-weight-conversion (3B correction #3 contract): with the
+ * variant carrying weightPerUnit = 18.7 AND its weightUomId (kg), 100 pieces
+ * → 1870 kg via the explicit product-specific path
+ * (convertWithProductWeight). WITHOUT a complete weight pair, a
+ * cross-category conversion stays blocked (UOM_CATEGORY_MISMATCH).
  */
 describe('p3b-12 product-weight-conversion', () => {
   const PIECE = { id: 'u-piece', categoryId: 'cat-count', symbol: 'pcs', conversionRatio: '1' };
@@ -18,6 +19,7 @@ describe('p3b-12 product-weight-conversion', () => {
           if (args.where.id === KG.id) return KG;
           return null;
         }),
+        findFirst: jest.fn(async () => ({ id: 'u-base', symbol: 'kg' })),
       },
     };
   }
@@ -26,26 +28,31 @@ describe('p3b-12 product-weight-conversion', () => {
     const service = new UomConversionService(makePrisma() as never);
     const result = await service.convertWithProductWeight('100', PIECE.id, KG.id, {
       weightPerUnit: '18.7',
+      weightUomId: KG.id,
     });
     expect(result.value.toString()).toBe('1870');
     expect(result.fromSymbol).toBe('pcs');
     expect(result.toSymbol).toBe('kg');
   });
 
-  it('without weightPerUnit the cross-category conversion stays blocked', async () => {
+  it('without a complete weight pair the cross-category conversion stays blocked', async () => {
     const service = new UomConversionService(makePrisma() as never);
     await expect(
-      service.convertWithProductWeight('100', PIECE.id, KG.id, { weightPerUnit: null }),
+      service.convertWithProductWeight('100', PIECE.id, KG.id, {
+        weightPerUnit: null,
+        weightUomId: KG.id,
+      }),
     ).rejects.toMatchObject({ message: 'UOM_CATEGORY_MISMATCH' });
     await expect(
       service.convertWithProductWeight('100', PIECE.id, KG.id, null),
     ).rejects.toMatchObject({ message: 'UOM_CATEGORY_MISMATCH' });
   });
 
-  it('with weightPerUnit set, cross-category is allowed (that is the point)', async () => {
+  it('with the weight pair set, cross-category is allowed (that is the point)', async () => {
     const service = new UomConversionService(makePrisma() as never);
     const result = await service.convertWithProductWeight('0.5', PIECE.id, KG.id, {
       weightPerUnit: '18.7',
+      weightUomId: KG.id,
     });
     expect(result.value.toString()).toBe('9.35');
   });

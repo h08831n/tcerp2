@@ -213,6 +213,66 @@ const CHART_OF_ACCOUNTS = [
   { code: 'PURCHASE_EXPENSE', name: 'هزینه خرید', type: 'EXPENSE' as const },
 ];
 
+/**
+ * Reference UOM categories (3B correction #3/#4): the category CODE is the
+ * canonical contract — a product's weight UOM must sit in the company's
+ * `WEIGHT` category. Bases (kg / m / pcs, ratio exactly 1) unblock
+ * conversions per category. Idempotent: upsert on (companyId, code) /
+ * (companyId, symbol); existing rows are never modified on re-seed.
+ */
+const UOM_CATEGORY_SEEDS = [
+  {
+    code: 'WEIGHT',
+    nameFa: 'وزن',
+    nameEn: 'Weight',
+    uoms: [
+      { symbol: 'kg', nameFa: 'کیلوگرم', conversionRatio: '1', isBaseUnit: true },
+      { symbol: 'g', nameFa: 'گرم', conversionRatio: '0.001', isBaseUnit: false },
+      { symbol: 'ton', nameFa: 'تن', conversionRatio: '1000', isBaseUnit: false },
+    ],
+  },
+  {
+    code: 'LENGTH',
+    nameFa: 'طول',
+    nameEn: 'Length',
+    uoms: [
+      { symbol: 'm', nameFa: 'متر', conversionRatio: '1', isBaseUnit: true },
+      { symbol: 'cm', nameFa: 'سانتی‌متر', conversionRatio: '0.01', isBaseUnit: false },
+    ],
+  },
+  {
+    code: 'UNIT',
+    nameFa: 'شمارش',
+    nameEn: 'Count',
+    uoms: [
+      { symbol: 'pcs', nameFa: 'عدد', conversionRatio: '1', isBaseUnit: true },
+      { symbol: 'dozen', nameFa: 'دوجین', conversionRatio: '12', isBaseUnit: false },
+    ],
+  },
+];
+
+async function seedUomCategories(companyId: string): Promise<void> {
+  for (const category of UOM_CATEGORY_SEEDS) {
+    const row = await prisma.uomCategory.upsert({
+      where: { companyId_code: { companyId, code: category.code } },
+      create: {
+        companyId,
+        code: category.code,
+        nameFa: category.nameFa,
+        nameEn: category.nameEn,
+      },
+      update: {},
+    });
+    for (const uom of category.uoms) {
+      await prisma.uom.upsert({
+        where: { companyId_symbol: { companyId, symbol: uom.symbol } },
+        create: { companyId, categoryId: row.id, ...uom },
+        update: {},
+      });
+    }
+  }
+}
+
 async function seedCompany(): Promise<string> {
   const name = process.env.SEED_COMPANY_NAME ?? 'شرکت پیش‌فرض';
   const company = await prisma.company.upsert({
@@ -396,6 +456,9 @@ async function main(): Promise<void> {
 
   console.log('Seeding sample integration config…');
   await seedIntegrationConfig(companyId);
+
+  console.log('Seeding reference UOM categories (WEIGHT/LENGTH/UNIT + bases)…');
+  await seedUomCategories(companyId);
 }
 
 main()

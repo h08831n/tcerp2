@@ -125,7 +125,8 @@ export class UomConversionController {
     @CurrentUser() user: { id: string },
     @Req() request: Request,
   ) {
-    await this.companyContext.requireCompanyId(user, request.headers);
-    return this.conversion.convert(dto.value, dto.fromUomId, dto.toUomId);
+    // 3B correction #5 — both UOMs must belong to the caller's company.
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.conversion.convert(dto.value, dto.fromUomId, dto.toUomId, companyId);
   }
 }

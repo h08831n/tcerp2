@@ -4,7 +4,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
-import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
+import { ConflictError, NotFoundError } from '../common/errors';
+import { assertSameCompany } from '../common/utils/entity-company';
 import { Paginated } from '../common/dto/pagination.dto';
 import { BrandQueryDto, CreateBrandDto, UpdateBrandDto } from './products.dto';
 
@@ -31,11 +32,8 @@ export class BrandsService {
       where: { id: logoAttachmentId },
       select: { id: true, companyId: true },
     });
-    if (!file || file.companyId !== companyId) {
-      throw new ValidationError('Logo attachment not found in this company', {
-        logoAttachmentId,
-      });
-    }
+    // 3B correction #5 — the logo attachment must belong to the same company.
+    assertSameCompany(companyId, file, 'Logo attachment not found in this company');
   }
 
   async create(

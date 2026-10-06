@@ -5,6 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
 import { NotFoundError, ValidationError } from '../common/errors';
+import { assertSameCompany } from '../common/utils/entity-company';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
   CreateSupplierMappingDto,
@@ -86,7 +87,7 @@ export class SupplierMappingsService {
     }
   }
 
-  /** FK targets must belong to the same company. */
+  /** FK targets must belong to the same company (3B correction #5). */
   private async assertTargets(
     companyId: string,
     input: { productVariantId?: string | null; productTemplateId?: string | null; categoryId?: string | null },
@@ -96,33 +97,21 @@ export class SupplierMappingsService {
         where: { id: input.productVariantId },
         select: { companyId: true },
       });
-      if (!row || row.companyId !== companyId) {
-        throw new ValidationError('Product variant not found in this company', {
-          productVariantId: input.productVariantId,
-        });
-      }
+      assertSameCompany(companyId, row, 'Product variant not found in this company');
     }
     if (input.productTemplateId) {
       const row = await this.prisma.productTemplate.findUnique({
         where: { id: input.productTemplateId },
         select: { companyId: true },
       });
-      if (!row || row.companyId !== companyId) {
-        throw new ValidationError('Product template not found in this company', {
-          productTemplateId: input.productTemplateId,
-        });
-      }
+      assertSameCompany(companyId, row, 'Product template not found in this company');
     }
     if (input.categoryId) {
       const row = await this.prisma.productCategory.findUnique({
         where: { id: input.categoryId },
         select: { companyId: true },
       });
-      if (!row || row.companyId !== companyId) {
-        throw new ValidationError('Product category not found in this company', {
-          categoryId: input.categoryId,
-        });
-      }
+      assertSameCompany(companyId, row, 'Product category not found in this company');
     }
   }
 

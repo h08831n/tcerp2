@@ -561,6 +561,16 @@ export class GenerateCombinationDto {
   @ValidateNested({ each: true })
   @Type(() => GenerateSelectionDto)
   selections!: GenerateSelectionDto[];
+
+  /** 3B correction #3 — optional unit weight; REQUIRES weightUomId. */
+  @IsOptional()
+  @IsDecimal({ decimal_digits: '0,4' })
+  weightPerUnit?: string;
+
+  /** 3B correction #3 — UOM of weightPerUnit; must be the company's Weight category. */
+  @IsOptional()
+  @IsUUID()
+  weightUomId?: string;
 }
 
 export class GenerateVariantsDto {
@@ -569,6 +579,64 @@ export class GenerateVariantsDto {
   @ValidateNested({ each: true })
   @Type(() => GenerateCombinationDto)
   combinations!: GenerateCombinationDto[];
+}
+
+// ───────────────── template attribute selected values (3B correction #2) ────────────────
+
+/**
+ * POST /products/templates/:templateId/attributes/:attributeId/values —
+ * exactly one of the two modes: `valueIds` REPLACES the selected set
+ * (empty array clears it), `valueId` adds a single value (idempotent).
+ */
+export class SetTemplateAttributeValuesDto {
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  valueIds?: string[];
+
+  @IsOptional()
+  @IsUUID()
+  valueId?: string;
+}
+
+/** PATCH displayOrder/active on one selected template attribute value. */
+export class UpdateTemplateAttributeValueDto {
+  @IsOptional()
+  @IsInt()
+  displayOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
+}
+
+/** PATCH a variant (weight, default UOM, name, active) with optimistic locking. */
+export class UpdateVariantDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  nameFa?: string;
+
+  @IsOptional()
+  @IsUUID()
+  defaultUomId?: string | null;
+
+  /** 3B correction #3 — required to come with weightUomId when set. */
+  @IsOptional()
+  @IsDecimal({ decimal_digits: '0,4' })
+  weightPerUnit?: string | null;
+
+  @IsOptional()
+  @IsUUID()
+  weightUomId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
+
+  @IsInt()
+  version!: number;
 }
 
 // ───────────────────── supplier mappings ─────────────────────

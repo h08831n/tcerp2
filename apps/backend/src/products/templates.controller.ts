@@ -17,9 +17,12 @@ import {
   CreateTemplateDto,
   GenerateVariantsDto,
   PreviewVariantsDto,
+  SetTemplateAttributeValuesDto,
   TemplateQueryDto,
   UpdateTemplateAttributeDto,
+  UpdateTemplateAttributeValueDto,
   UpdateTemplateDto,
+  UpdateVariantDto,
 } from './products.dto';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -149,6 +152,74 @@ export class TemplatesController {
     );
   }
 
+  // ── template attribute SELECTED values (3B correction #2) ──
+
+  /**
+   * Body `{valueIds: [...]}` replaces the selected set; body `{valueId}`
+   * adds a single value (idempotent).
+   */
+  @Post(':id/attributes/:attributeId/values')
+  @RequirePermissions('products.variants.manage')
+  async setAttributeValues(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attributeId', ParseUUIDPipe) attributeId: string,
+    @Body() dto: SetTemplateAttributeValuesDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.templates.setTemplateAttributeValues(
+      companyId,
+      id,
+      attributeId,
+      dto,
+      actor,
+      this.ctx(request),
+    );
+  }
+
+  @Patch(':id/attributes/:attributeId/values/:valueId')
+  @RequirePermissions('products.variants.manage')
+  async updateAttributeValue(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attributeId', ParseUUIDPipe) attributeId: string,
+    @Param('valueId', ParseUUIDPipe) valueId: string,
+    @Body() dto: UpdateTemplateAttributeValueDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.templates.updateTemplateAttributeValue(
+      companyId,
+      id,
+      attributeId,
+      valueId,
+      dto,
+      actor,
+      this.ctx(request),
+    );
+  }
+
+  @Delete(':id/attributes/:attributeId/values/:valueId')
+  @RequirePermissions('products.variants.manage')
+  async removeAttributeValue(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attributeId', ParseUUIDPipe) attributeId: string,
+    @Param('valueId', ParseUUIDPipe) valueId: string,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.templates.removeTemplateAttributeValue(
+      companyId,
+      id,
+      attributeId,
+      valueId,
+      actor,
+      this.ctx(request),
+    );
+  }
+
   // ── variants ──
 
   @Post(':id/variants/preview')
@@ -173,6 +244,27 @@ export class TemplatesController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     return this.templates.generateVariants(companyId, id, dto, actor, this.ctx(request));
+  }
+
+  /** PATCH one variant (weight per 3B correction #3, default UOM, name, active). */
+  @Patch(':id/variants/:variantId')
+  @RequirePermissions('products.edit')
+  async updateVariant(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Body() dto: UpdateVariantDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.templates.updateVariant(
+      companyId,
+      id,
+      variantId,
+      dto,
+      actor,
+      this.ctx(request),
+    );
   }
 
   @Get(':id/matrix')

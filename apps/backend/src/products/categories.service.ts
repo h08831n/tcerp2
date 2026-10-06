@@ -5,6 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
 import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
+import { assertSameCompany } from '../common/utils/entity-company';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
   CategoryQueryDto,
@@ -63,11 +64,8 @@ export class CategoriesService {
         where: { id: dto.parentId },
         select: { id: true, companyId: true, active: true },
       });
-      if (!parent || parent.companyId !== companyId) {
-        throw new ValidationError('Parent category not found in this company', {
-          parentId: dto.parentId,
-        });
-      }
+      // 3B correction #5 — Category.parent must be same-company.
+      assertSameCompany(companyId, parent, 'Parent category not found in this company');
     }
     try {
       const created = await this.prisma.$transaction(async (tx) => {
@@ -188,11 +186,8 @@ export class CategoriesService {
         where: { id: dto.parentId },
         select: { id: true, companyId: true },
       });
-      if (!parent || parent.companyId !== companyId) {
-        throw new ValidationError('Parent category not found in this company', {
-          parentId: dto.parentId,
-        });
-      }
+      // 3B correction #5 — Category.parent must be same-company.
+      assertSameCompany(companyId, parent, 'Parent category not found in this company');
       // Walk the ancestor chain of the new parent; if we reach the category
       // itself it is one of its own descendants → CATEGORY_CYCLE.
       const ancestors = await this.prisma.productCategory.findMany({

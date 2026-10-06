@@ -29,6 +29,7 @@ describe('p3b-11 cross-category-uom-blocked', () => {
           if (args.where.id === METER.id) return METER;
           return null;
         }),
+        findFirst: jest.fn(async () => ({ id: 'u-base', symbol: 'kg' })),
       },
     };
     const service = new UomConversionService(prisma as never);

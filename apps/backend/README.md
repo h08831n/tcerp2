@@ -183,11 +183,12 @@ paginated with `?page&pageSize&search&active` (`active` ∈
 | POST/GET/GET :id/PATCH/DELETE | `/api/categories` — hierarchical (arbitrary depth `parentId`), unique `code` per company, bilingual `nameFa`/`nameEn`; PATCH moving a category under itself/descendant → 422 `CATEGORY_CYCLE`; DELETE hard-blocks with children/templates (archive via PATCH `active:false`) | `products.create` / `products.view` / `products.edit` / `products.archive` |
 | POST/GET/GET :id/PATCH | `/api/brands` — unique `code`, `logoAttachmentId` optional FK (validated same-company via the files module) | `products.create` / `products.view` / `products.edit` |
 | POST/GET/PATCH | `/api/uoms/categories` — UOM dimension categories | `products.uom.manage` / `products.view` |
-| POST/GET/PATCH | `/api/uoms` — units per category; `symbol` unique per company; exactly one `isBaseUnit` per category (service ConflictError `UOM_BASE_UNIT_EXISTS` + DB partial unique `uoms_base_unit_uniq`); `conversionRatio` Decimal(20,6) vs base | `products.uom.manage` / `products.view` |
+| POST/GET/PATCH | `/api/uoms` — units per category; `symbol` unique per company; AT MOST ONE `isBaseUnit` per category (service ConflictError `UOM_BASE_UNIT_EXISTS` + DB partial unique `uoms_base_unit_uniq`; a category may transiently have NO base, which blocks conversion with `UOM_NO_BASE_UNIT` until one exists); base units must keep `conversionRatio = 1` (422 `UOM_BASE_RATIO_ONE`); any ratio ≤ 0 is rejected by the DB CHECK `uoms_conversion_ratio_positive_chk` (mapped to 422 `UOM_RATIO_POSITIVE`) | `products.uom.manage` / `products.view` |
 | POST | `/api/products/uom/convert` `{value, fromUomId, toUomId}` → `{value, fromSymbol, toSymbol, categoryId}` — Decimal arithmetic; cross-category → 422 `UOM_CATEGORY_MISMATCH` (product-weight path: `UomConversionService.convertWithProductWeight` for `weightPerUnit`-carrying variants, used by later phases) | `products.view` |
 | POST/GET/PATCH | `/api/products/attributes` + `/api/products/attribute-values` — fully dynamic attributes (code unique per company / per attribute, optional Decimal `numericValue`); values belong to their attribute | `products.attributes.manage` / `products.view` |
 | POST/GET/PATCH/DELETE | `/api/products/templates` — Odoo-style template; FKs (category/brand/UOMs/tax definition) validated same-company, category must be active; GET list is a lightweight projection + grouped `variantsCount` (≤ 3 queries/page, trgm-accelerated `search` over `name_fa`/`name_en`/`internal_code`); GET `:id` full detail (ordered attributes+values, variants+values, UOM summaries); PATCH is optimistic (`version` mismatch → 409 `VERSION_CONFLICT`); DELETE = soft archive (`active:false`) | `products.create` / `products.view` / `products.edit` / `products.archive` |
 | POST/PATCH/DELETE | `/api/products/templates/:id/attributes(/:attributeId)` — `{attributeId, displayOrder?, createsVariants?, isRequired?}`; unique per template; `createsVariants` attributes define the variant space | `products.variants.manage` |
+| POST/PATCH/DELETE | `/api/products/templates/:id/attributes/:attributeId/values(/:valueId)` — selected values per template attribute (3B correction pass): POST `{valueIds}` replaces the set / `{valueId}` adds one; PATCH `displayOrder`/`active`; DELETE removes one; value's `attribute_id` must match the template attribute (422 `ATTRIBUTE_VALUE_MISMATCH`) | `products.variants.manage` |
 | POST | `/api/products/templates/:id/variants/preview` — restricted to the template's `createsVariants` attributes; full cartesian product with `skuSuggestion` (`internalCode-valueCode…`) and `existsAlready` markers (deterministic) | `products.variants.manage` |
 | POST | `/api/products/templates/:id/variants/generate` — user-selected subset only; ONE transaction; existing identical combinations are SKIPPED with a report (`{created[], skipped[]}` — skip-with-report, never duplicated); SKU collisions auto-suffix `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`; SKU unique per company; existing variants are never mutated/deleted | `products.variants.manage` |
 | GET | `/api/products/templates/:id/matrix` — `{columns, rows, cells}` for the Phase 4 variant matrix (columns = first createsVariants attribute, rows = the rest, cells = existing variants with their combination map) | `products.view` |
@@ -238,10 +239,82 @@ for their full tables.
   migration's `user_permission_overrides_platform_uniq` enforces a single
   platform-wide (user, permission) override.
 
+### Product catalog — 3B correction pass notes (c3b-01…c3b-14)
+
+- **Selected values per template attribute** (`ProductTemplateAttributeValue`,
+  migration `20241008000000_p3b_corrections`): each template attribute can
+  curate its own value set —
+  `POST /api/products/templates/:templateId/attributes/:attributeId/values`
+  takes either `{valueIds: [...]}` (REPLACE the whole set; `[]` clears it,
+  array order becomes display order) or `{valueId}` (add one, idempotent);
+  `PATCH .../values/:valueId` toggles `displayOrder`/`active`; `DELETE
+  .../values/:valueId` removes one. A candidate value must belong to the
+  template attribute's attribute (`attribute_id` equality) or it is rejected
+  with 422 `ATTRIBUTE_VALUE_MISMATCH`; foreign-company values are invisible
+  (404). All mutations are audited inside the transaction.
+- **Transitional value-universe rule**: preview / generate / matrix build
+  combinations ONLY from the template attribute's SELECTED active values.
+  While a template attribute has NO selected values yet, it falls back to the
+  attribute's GLOBAL active values (`TemplatesService.effectiveUniverse` —
+  documented in code and here). Once the first value is selected, the global
+  fallback disappears for that attribute.
+- **Combination key**: `buildCombinationKey(pairs)` (pure, in
+  `templates.service.ts`) canonically serializes a combination as
+  `attributeId=attributeValueId` segments sorted by attributeId then
+  attributeValueId, joined with `|` — identical to the DB backfill format.
+  Every generated variant persists it in `product_variants.combination_key`
+  and the DB unique `(template_id, combination_key)` is the ONLY duplicate
+  authority: a concurrent generate that races past the in-transaction
+  pre-check aborts with P2002, mapped to 409
+  `VARIANT_COMBINATION_EXISTS` (or `VARIANT_SKU_COLLISION` when only the SKU
+  collided). Sequential duplicates keep the skip-with-report behavior
+  (`skipped[].reason = 'VARIANT_COMBINATION_EXISTS'`).
+- **Explicit weight UOM**: whenever a variant carries `weightPerUnit`
+  (create/generate/PATCH — the PATCH checks the MERGED state),
+  `weightUomId` is REQUIRED (422 `WEIGHT_UOM_REQUIRED`), must belong to the
+  caller's company AND sit in the company's `WEIGHT` UOM category, resolved
+  canonically by category `code === 'WEIGHT'` (422 `WEIGHT_CATEGORY_REQUIRED`
+  / `UOM_NOT_IN_COMPANY`). `UomConversionService.convertWithProductWeight`
+  computes `quantity × weightPerUnit` (in the weight UOM) then the standard
+  Weight-category conversion to the target — e.g. 100 pieces × 18.7 kg/piece
+  = 1870 kg → 1.87 ton. Without a complete `weightPerUnit`+`weightUomId`
+  pair the strict same-category rule stays in force.
+- **UOM base semantics**: a category has AT MOST ONE base unit — never
+  "exactly one". Conversion inside a category with no ACTIVE base is blocked
+  (422 `UOM_NO_BASE_UNIT`) until a base exists; base creation/promotion
+  enforces ratio exactly 1 (422 `UOM_BASE_RATIO_ONE`); promoting a second
+  base is a 409 `UOM_BASE_UNIT_EXISTS` (DB partial unique backstop); ratio
+  ≤ 0 is rejected by the DB CHECK and mapped to 422 `UOM_RATIO_POSITIVE`.
+  Demoting the base is allowed (the category then transiently has none).
+- **Cross-company FK integrity**: one shared guard
+  (`assertSameCompany(companyId, entity)` in
+  `src/common/utils/entity-company.ts`) is used consistently for
+  Category.parent, Brand (+ logo attachment company), Template
+  category/brand/salesUom/purchaseUom/taxDefinition, TemplateAttribute
+  attribute (+ its selected values, via the attribute), Variant
+  template/defaultUom/weightUom, SupplierMapping supplierParty/targets, and
+  the UOM conversion endpoints. A missing or foreign target is 422 — rows of
+  other companies are never addressable.
+- **File access isolation**: `GET /api/files/:id` (metadata), blob download
+  and `GET /api/files/attachments` only resolve through attachments of the
+  caller's company; when the attachment's `entityType` is a company-scoped
+  entity (party / product_template / product_variant / product_category /
+  brand / supplier_product / uom / uom_category / attribute /
+  tax_definition) the target must EXIST in the attachment's company —
+  missing target 404, foreign target 403. The blob itself is globally
+  deduped by sha256, but is unreachable without a company-valid attachment,
+  so metadata/filenames never cross companies.
+
 ## Seeded data (idempotent, `npm run db:seed`)
 
 - Company `00000000-0000-4000-8000-000000000001` (`SEED_COMPANY_NAME`,
   default «شرکت پیش‌فرض»).
+- Reference UOM categories with base units (3B correction pass, upserted on
+  `(companyId, code)` / `(companyId, symbol)` — re-seeding never duplicates
+  or mutates them): `WEIGHT` (وزن) — `kg` base (ratio 1), `g`, `ton`;
+  `LENGTH` (طول) — `m` base, `cm`; `UNIT` (شمارش) — `pcs` base, `dozen`. The
+  `WEIGHT` category code is the canonical contract for the variant
+  `weightUomId` validation.
 - 70-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
   `sequences.*`, `audit.view`, `files.*`, `queue.*`, `companies.*`,
   `claims.*`, `treasury.*`, `tax.*`, `supplierproduct.*`, `loading.*`,
@@ -263,14 +336,16 @@ for their full tables.
 
 ## Tests
 
-`npm test` — 359 tests across 66 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, all 359 run against Postgres
+`npm test` — 421 tests across 80 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, all 421 run against Postgres
 and clean up after themselves). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
 tests (`p3a-01` duplicate normalized phone … `p3a-12` score rules from
 settings), the Phase 3B product-catalog acceptance tests (`p3b-01` category
-hierarchy … `p3b-20` restart persistence) plus Jalali conversion, phone
+hierarchy … `p3b-20` restart persistence), the Phase 3B correction-pass
+tests (`c3b-01` trgm index restored … `c3b-14` file metadata company
+isolation) plus Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

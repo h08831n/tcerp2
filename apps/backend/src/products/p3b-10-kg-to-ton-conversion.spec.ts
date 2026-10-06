@@ -36,6 +36,7 @@ describe('p3b-10 kg-to-ton-conversion', () => {
           if (args.where.id === TON.id) return TON;
           return null;
         }),
+        findFirst: jest.fn(async () => ({ id: 'u-base', symbol: 'kg' })),
       },
     };
     const service = new UomConversionService(prisma as never);

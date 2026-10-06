@@ -5,6 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
 import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
+import { assertSameCompany } from '../common/utils/entity-company';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
   CreateUomCategoryDto,
@@ -13,8 +14,26 @@ import {
   UpdateUomDto,
 } from './products.dto';
 
-/** Stable code for the exactly-one-base-unit-per-category business rule. */
+/**
+ * Stable domain codes for the base-unit rules (3B correction #4):
+ *
+ * - A category has AT MOST ONE base unit (partial unique
+ *   `uoms_base_unit_uniq` is the DB backstop) — never "exactly one": a
+ *   category may transiently have NO base, which blocks conversion inside
+ *   it (UomConversionService → UOM_NO_BASE_UNIT) until a base exists.
+ * - A base unit's ratio must be EXACTLY 1 (service rule +
+ *   `uoms_base_ratio_one_chk` DB CHECK).
+ * - Any UOM ratio must be > 0 (`uoms_conversion_ratio_positive_chk` DB
+ *   CHECK; the service maps the violation onto UOM_RATIO_POSITIVE).
+ * - Demoting the base (true → false) is allowed; promoting a second base
+ *   (false → true while another base exists) → UOM_BASE_UNIT_EXISTS.
+ */
 export const UOM_BASE_UNIT_EXISTS = 'UOM_BASE_UNIT_EXISTS';
+export const UOM_RATIO_POSITIVE = 'UOM_RATIO_POSITIVE';
+export const UOM_BASE_RATIO_ONE = 'UOM_BASE_RATIO_ONE';
+
+const RATIO_CHECK_CONSTRAINT = 'uoms_conversion_ratio_positive_chk';
+const BASE_RATIO_CHECK_CONSTRAINT = 'uoms_base_ratio_one_chk';
 
 @Injectable()
 export class UomsService {
@@ -33,9 +52,20 @@ export class UomsService {
         throw new ConflictError('UOM category code already exists in this company');
       }
       // The DB partial unique uoms_base_unit_uniq is the backstop for the
-      // exactly-one-base rule; map the violation onto the stable domain code.
+      // at-most-one-base rule; map the violation onto the stable domain code.
       if (error.code === 'P2010' || error.message.includes('uoms_base_unit_uniq')) {
         throw new ConflictError(UOM_BASE_UNIT_EXISTS);
+      }
+    }
+    // Postgres CHECK violations surface as PrismaClientUnknownRequestError
+    // (23514) carrying the constraint name — map them onto stable codes
+    // (3B correction #4).
+    if (error instanceof Error) {
+      if (error.message.includes(RATIO_CHECK_CONSTRAINT)) {
+        throw new ValidationError(UOM_RATIO_POSITIVE);
+      }
+      if (error.message.includes(BASE_RATIO_CHECK_CONSTRAINT)) {
+        throw new ValidationError(UOM_BASE_RATIO_ONE);
       }
     }
     throw error as Error;
@@ -151,14 +181,19 @@ export class UomsService {
       where: { id: dto.categoryId },
       select: { id: true, companyId: true },
     });
-    if (!category || category.companyId !== companyId) {
-      throw new ValidationError('UOM category not found in this company', {
-        categoryId: dto.categoryId,
-      });
+    // 3B correction #5 — shared same-company guard.
+    assertSameCompany(companyId, category, 'UOM category not found in this company');
+    // 3B correction #4 — a base unit's ratio must be exactly 1 (ratios are
+    // defined relative to the base, so the base is its own reference).
+    if (dto.isBaseUnit && !new Prisma.Decimal(dto.conversionRatio).eq(1)) {
+      throw new ValidationError(UOM_BASE_RATIO_ONE, { conversionRatio: dto.conversionRatio });
     }
     if (dto.isBaseUnit) {
       await this.assertBaseUnitAvailable(dto.categoryId);
     }
+    // Non-positive ratios are rejected by the DB CHECK
+    // (uoms_conversion_ratio_positive_chk) and mapped by wrapKnown — no
+    // service-side duplicate of the constraint.
     try {
       return await this.prisma.$transaction(async (tx) => {
         const row = await tx.uom.create({
@@ -243,7 +278,20 @@ export class UomsService {
     if (!existing || existing.companyId !== companyId) {
       throw new NotFoundError('UOM not found', { id });
     }
+    // Merged base state after the PATCH (3B correction #4): the ratio of a
+    // unit that IS (or becomes) the base must be exactly 1. Demoting the
+    // base (true → false) is allowed — the category may then transiently
+    // have no base, which blocks conversion until a new one exists.
+    const willBeBase = dto.isBaseUnit ?? existing.isBaseUnit;
+    const newRatio =
+      dto.conversionRatio !== undefined
+        ? new Prisma.Decimal(dto.conversionRatio)
+        : new Prisma.Decimal(existing.conversionRatio);
+    if (willBeBase && !newRatio.eq(1)) {
+      throw new ValidationError(UOM_BASE_RATIO_ONE, { conversionRatio: dto.conversionRatio });
+    }
     if (dto.isBaseUnit) {
+      // Promoting to base: only blocked while ANOTHER base exists.
       await this.assertBaseUnitAvailable(existing.categoryId, id);
     }
     try {
