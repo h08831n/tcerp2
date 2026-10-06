@@ -79,6 +79,16 @@ model Company {
   productTemplates   ProductTemplate[]
   productVariants    ProductVariant[]
   supplierProducts   SupplierProduct[]
+  leads              Lead[]
+  opportunities      Opportunity[]
+  lostReasons        LostReason[]
+  paymentTerms       PaymentTerm[]
+  salesDocuments     SalesDocument[]
+  purchaseDocuments  PurchaseDocument[]
+  salesPurchaseAllocations SalesPurchaseAllocation[]
+  priceRequests      PriceRequest[]
+  supplierOffers     SupplierOffer[]
+  documentRelations  DocumentRelation[]
 
   @@map("companies")
 }
@@ -157,6 +167,12 @@ model Party {
   responsibleFor    FinancialResponsibility[] @relation("ResponsibleParty")
   membershipOf      FinancialResponsibility[] @relation("MemberParty")
   supplierMappings  SupplierProduct[]
+  leads             Lead[]
+  opportunityCustomers Opportunity[] @relation("OpportunityCustomer")
+  salesDocuments    SalesDocument[] @relation("SalesCustomer")
+  purchaseDocuments PurchaseDocument[] @relation("PurchaseSupplier")
+  priceRequests     PriceRequest[] @relation("PriceRequestCustomer")
+  supplierOffers    SupplierOffer[] @relation("OfferSupplier")
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -259,6 +275,7 @@ model Address {
   createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
 
   party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  salesShipping SalesDocument[]
 
   @@index([partyId])
   @@map("addresses")
@@ -370,6 +387,11 @@ model User {
   refreshTokens   RefreshToken[]
   teamMemberships TeamMember[]
   ownedParties    Party[] @relation("PartyOwner")
+  leadsAssigned   Lead[] @relation("LeadSalesperson")
+  opportunities   Opportunity[] @relation("OpportunitySalesperson")
+  salesDocuments  SalesDocument[] @relation("SalesSalesperson")
+  purchaseDocuments PurchaseDocument[] @relation("PurchaseBuyer")
+  priceRequests   PriceRequest[] @relation("PriceRequester")
 
   @@index([status])
   @@map("users")
@@ -866,6 +888,7 @@ model TaxDefinition {
 
   company Company @relation(fields: [companyId], references: [id])
   templates ProductTemplate[]
+  salesLines SalesLine[]
 
   @@unique([companyId, code])
   @@map("tax_definitions")
@@ -1053,6 +1076,10 @@ model Uom {
   purchaseTemplates ProductTemplate[] @relation("TemplatePurchaseUom")
   weightVariants    ProductVariant[]  @relation("VariantWeightUom")
   variants          ProductVariant[]
+  salesLines        SalesLine[]
+  purchaseLines     PurchaseLine[]
+  priceRequestLines PriceRequestLine[]
+  supplierOffers    SupplierOffer[]
 
   @@unique([companyId, symbol])
   @@index([companyId, categoryId])
@@ -1186,6 +1213,9 @@ model ProductVariant {
   weightUom  Uom?            @relation("VariantWeightUom", fields: [weightUomId], references: [id])
   values     VariantAttributeValue[]
   supplierMappings SupplierProduct[]
+  salesLines SalesLine[]
+  purchaseLines PurchaseLine[]
+  priceRequestLines PriceRequestLine[]
 
   @@unique([companyId, sku])
   @@unique([templateId, combinationKey])
@@ -1267,6 +1297,410 @@ model SupplierProduct {
   @@index([productTemplateId])
   @@index([categoryId])
   @@map("supplier_products")
+}
+
+// ─────────────── CRM funnel: Lead → Opportunity ───────────────
+// A returning customer gets a NEW Opportunity per buying intent; the Party
+// master never changes (REQUIREMENTS §8).
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  LOST
+}
+
+model Lead {
+  id            String     @id @default(uuid()) @db.Uuid
+  companyId     String     @map("company_id") @db.Uuid
+  partyId       String?    @map("party_id") @db.Uuid
+  name          String
+  phone         String?
+  source        String?
+  campaign      String?
+  media         String?
+  referrer      String?
+  assignedSalespersonId String? @map("assigned_salesperson_id") @db.Uuid
+  status        LeadStatus @default(NEW)
+  notes         String?
+  createdBy     String?    @map("created_by") @db.Uuid
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version       Int        @default(1)
+
+  company Company @relation(fields: [companyId], references: [id])
+  party   Party?  @relation(fields: [partyId], references: [id])
+  salesperson User? @relation("LeadSalesperson", fields: [assignedSalespersonId], references: [id])
+
+  @@index([companyId, status])
+  @@index([companyId, assignedSalespersonId])
+  @@map("leads")
+}
+
+enum OpportunityStatus {
+  OPEN
+  QUALIFIED
+  QUOTED
+  WON
+  LOST
+}
+
+model Opportunity {
+  id               String            @id @default(uuid()) @db.Uuid
+  companyId        String            @map("company_id") @db.Uuid
+  customerPartyId  String            @map("customer_party_id") @db.Uuid
+  salespersonUserId String           @map("salesperson_user_id") @db.Uuid
+  title            String
+  description      String?
+  estimatedAmount  Decimal?          @map("estimated_amount") @db.Decimal(20, 4)
+  estimatedTonnage Decimal?          @map("estimated_tonnage") @db.Decimal(18, 4)
+  status           OpportunityStatus @default(OPEN)
+  source           String?
+  lostReasonId     String?           @map("lost_reason_id") @db.Uuid
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version          Int               @default(1)
+
+  company    Company     @relation(fields: [companyId], references: [id])
+  customer   Party       @relation("OpportunityCustomer", fields: [customerPartyId], references: [id])
+  salesperson User       @relation("OpportunitySalesperson", fields: [salespersonUserId], references: [id])
+  lostReason LostReason? @relation(fields: [lostReasonId], references: [id])
+  priceRequests PriceRequest[]
+  salesDocuments SalesDocument[]
+
+  @@index([companyId, customerPartyId, status])
+  @@index([companyId, salespersonUserId, status])
+  @@map("opportunities")
+}
+
+// Configurable lost reasons (reportable; never a hard-coded string).
+model LostReason {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String
+  nameFa    String   @map("name_fa")
+  nameEn    String?  @map("name_en")
+  sortOrder Int      @default(0) @map("sort_order")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company       Company       @relation(fields: [companyId], references: [id])
+  opportunities Opportunity[]
+  salesDocuments SalesDocument[]
+
+  @@unique([companyId, code])
+  @@map("lost_reasons")
+}
+
+// Configurable payment terms (basic Phase 4 structure; accounting consumes later).
+model PaymentTerm {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  code        String
+  nameFa      String   @map("name_fa")
+  nameEn      String?  @map("name_en")
+  description String?
+  daysOffset  Int?     @map("days_offset")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company          Company          @relation(fields: [companyId], references: [id])
+  salesDocuments   SalesDocument[]
+  purchaseDocuments PurchaseDocument[]
+
+  @@unique([companyId, code])
+  @@map("payment_terms")
+}
+
+// ─────────── Sales: ONE entity for quotation → sales order ───────────
+// NON-NEGOTIABLE: Quotation and SalesOrder share ONE id and ONE
+// document_number; the number is never regenerated (REQUIREMENTS §9).
+
+enum SalesDocumentStatus {
+  DRAFT
+  QUOTATION
+  SENT
+  CUSTOMER_CONFIRMED
+  SALES_ORDER
+  PARTIALLY_LOADED
+  COMPLETED
+  CANCELLED
+  LOST
+}
+
+model SalesDocument {
+  id             String             @id @default(uuid()) @db.Uuid
+  companyId      String             @map("company_id") @db.Uuid
+  documentNumber String             @map("document_number")
+  opportunityId  String?            @map("opportunity_id") @db.Uuid
+  customerPartyId String            @map("customer_party_id") @db.Uuid
+  salespersonUserId String         @map("salesperson_user_id") @db.Uuid
+  documentDate   DateTime           @map("document_date") @db.Timestamptz(6)
+  expirationDate DateTime?          @map("expiration_date") @db.Timestamptz(6)
+  currency       String             @default("IRR")
+  paymentTermId  String?            @map("payment_term_id") @db.Uuid
+  shippingAddressId String?         @map("shipping_address_id") @db.Uuid
+  language       String             @default("fa")
+  quotationTemplateCode String?     @map("quotation_template_code")
+  priceRequestId String?            @map("price_request_id") @db.Uuid // reference only, not required
+  status         SalesDocumentStatus @default(DRAFT)
+  subtotal       Decimal            @default(0) @db.Decimal(20, 4)
+  discountTotal  Decimal            @default(0) @map("discount_total") @db.Decimal(20, 4)
+  taxTotal       Decimal            @default(0) @map("tax_total") @db.Decimal(20, 4)
+  total          Decimal            @default(0) @db.Decimal(20, 4)
+  operationalOrderedAmount Decimal?  @map("operational_ordered_amount") @db.Decimal(20, 4)
+  operationalLoadedAmount  Decimal?  @map("operational_loaded_amount") @db.Decimal(20, 4)
+  lostReasonId   String?            @map("lost_reason_id") @db.Uuid
+  version        Int                @default(1)
+  createdBy      String?            @map("created_by") @db.Uuid
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  opportunity  Opportunity? @relation(fields: [opportunityId], references: [id])
+  customer     Party        @relation("SalesCustomer", fields: [customerPartyId], references: [id])
+  salesperson  User         @relation("SalesSalesperson", fields: [salespersonUserId], references: [id])
+  paymentTerm  PaymentTerm? @relation(fields: [paymentTermId], references: [id])
+  shippingAddress Address?  @relation(fields: [shippingAddressId], references: [id])
+  lostReason   LostReason?  @relation(fields: [lostReasonId], references: [id])
+  priceRequest PriceRequest? @relation(fields: [priceRequestId], references: [id])
+  lines        SalesLine[]
+
+  @@unique([companyId, documentNumber])
+  @@index([companyId, status, documentDate])
+  @@index([companyId, customerPartyId])
+  @@index([companyId, salespersonUserId, status])
+  @@map("sales_documents")
+}
+
+model SalesLine {
+  id                   String   @id @default(uuid()) @db.Uuid
+  companyId            String   @map("company_id") @db.Uuid
+  salesDocumentId      String   @map("sales_document_id") @db.Uuid
+  productVariantId     String   @map("product_variant_id") @db.Uuid
+  printableDescription String?  @map("printable_description")
+  orderedQuantity      Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
+  uomId                String   @map("uom_id") @db.Uuid
+  unitPrice            Decimal  @map("unit_price") @db.Decimal(20, 4)
+  discountAmount       Decimal  @default(0) @map("discount_amount") @db.Decimal(20, 4)
+  taxDefinitionId      String?  @map("tax_definition_id") @db.Uuid
+  taxRateSnapshot      Decimal? @map("tax_rate_snapshot") @db.Decimal(9, 4)
+  subtotal             Decimal  @db.Decimal(20, 4)
+  taxAmount            Decimal  @default(0) @map("tax_amount") @db.Decimal(20, 4)
+  lineTotal            Decimal  @map("line_total") @db.Decimal(20, 4)
+  notes                String?
+  lineOrder            Int      @default(0) @map("line_order")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document      SalesDocument  @relation(fields: [salesDocumentId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
+  uom           Uom            @relation(fields: [uomId], references: [id])
+  taxDefinition TaxDefinition? @relation(fields: [taxDefinitionId], references: [id])
+  salesAllocations SalesPurchaseAllocation[]
+
+  @@index([salesDocumentId])
+  @@index([productVariantId])
+  @@map("sales_lines")
+}
+
+// ───────────────── Purchase (independent, no PriceRequest required) ─────────────────
+
+enum PurchaseDocumentStatus {
+  DRAFT
+  ORDER_PLACED
+  PARTIALLY_LOADED
+  COMPLETED
+  CANCELLED
+}
+
+model PurchaseDocument {
+  id             String                @id @default(uuid()) @db.Uuid
+  companyId      String                @map("company_id") @db.Uuid
+  documentNumber String                @map("document_number")
+  supplierPartyId String               @map("supplier_party_id") @db.Uuid
+  buyerUserId    String                @map("buyer_user_id") @db.Uuid
+  documentDate   DateTime              @map("document_date") @db.Timestamptz(6)
+  currency       String                @default("IRR")
+  paymentTermId  String?               @map("payment_term_id") @db.Uuid
+  priceRequestId String?               @map("price_request_id") @db.Uuid // reference only
+  status         PurchaseDocumentStatus @default(DRAFT)
+  subtotal       Decimal               @default(0) @db.Decimal(20, 4)
+  discountTotal  Decimal               @default(0) @map("discount_total") @db.Decimal(20, 4)
+  taxTotal       Decimal               @default(0) @map("tax_total") @db.Decimal(20, 4)
+  total          Decimal               @default(0) @db.Decimal(20, 4)
+  operationalOrderedAmount Decimal?    @map("operational_ordered_amount") @db.Decimal(20, 4)
+  operationalLoadedAmount  Decimal?    @map("operational_loaded_amount") @db.Decimal(20, 4)
+  version        Int                   @default(1)
+  createdBy      String?               @map("created_by") @db.Uuid
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  supplier     Party        @relation("PurchaseSupplier", fields: [supplierPartyId], references: [id])
+  buyer        User         @relation("PurchaseBuyer", fields: [buyerUserId], references: [id])
+  paymentTerm  PaymentTerm? @relation(fields: [paymentTermId], references: [id])
+  priceRequest PriceRequest? @relation(fields: [priceRequestId], references: [id])
+  lines        PurchaseLine[]
+
+  @@unique([companyId, documentNumber])
+  @@index([companyId, status, documentDate])
+  @@index([companyId, supplierPartyId])
+  @@map("purchase_documents")
+}
+
+model PurchaseLine {
+  id                 String   @id @default(uuid()) @db.Uuid
+  companyId          String   @map("company_id") @db.Uuid
+  purchaseDocumentId String   @map("purchase_document_id") @db.Uuid
+  productVariantId   String   @map("product_variant_id") @db.Uuid
+  orderedQuantity    Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
+  uomId              String   @map("uom_id") @db.Uuid
+  unitPrice          Decimal  @map("unit_price") @db.Decimal(20, 4)
+  lineTotal          Decimal  @map("line_total") @db.Decimal(20, 4)
+  notes              String?
+  lineOrder          Int      @default(0) @map("line_order")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  document      PurchaseDocument @relation(fields: [purchaseDocumentId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant  @relation(fields: [productVariantId], references: [id])
+  uom           Uom              @relation(fields: [uomId], references: [id])
+  purchaseAllocations SalesPurchaseAllocation[]
+
+  @@index([purchaseDocumentId])
+  @@index([productVariantId])
+  @@map("purchase_lines")
+}
+
+// Line-level M:N supply allocation; over-allocation prevented with
+// transaction + row locks (service).
+model SalesPurchaseAllocation {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  salesLineId       String   @map("sales_line_id") @db.Uuid
+  purchaseLineId    String   @map("purchase_line_id") @db.Uuid
+  allocatedQuantity Decimal  @map("allocated_quantity") @db.Decimal(18, 4)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdBy         String?  @map("created_by") @db.Uuid
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  salesLine    SalesLine    @relation(fields: [salesLineId], references: [id])
+  purchaseLine PurchaseLine @relation(fields: [purchaseLineId], references: [id])
+
+  @@unique([salesLineId, purchaseLineId])
+  @@index([salesLineId])
+  @@index([purchaseLineId])
+  @@map("sales_purchase_allocations")
+}
+
+// ─────────── Price requests + supplier offers (independent, optional) ───────────
+
+enum PriceRequestStatus {
+  OPEN
+  OFFERED
+  CONVERTED
+  CLOSED
+}
+
+model PriceRequest {
+  id               String             @id @default(uuid()) @db.Uuid
+  companyId        String             @map("company_id") @db.Uuid
+  requestNumber    String             @map("request_number")
+  requesterUserId  String             @map("requester_user_id") @db.Uuid
+  customerPartyId  String?            @map("customer_party_id") @db.Uuid
+  opportunityId    String?            @map("opportunity_id") @db.Uuid
+  requestDate      DateTime           @map("request_date") @db.Timestamptz(6)
+  status           PriceRequestStatus @default(OPEN)
+  notes            String?
+  version          Int                @default(1)
+  createdAt        DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company        Company             @relation(fields: [companyId], references: [id])
+  requester      User                @relation("PriceRequester", fields: [requesterUserId], references: [id])
+  customer       Party?              @relation("PriceRequestCustomer", fields: [customerPartyId], references: [id])
+  opportunity    Opportunity?        @relation(fields: [opportunityId], references: [id])
+  lines          PriceRequestLine[]
+  salesDocuments SalesDocument[]
+  purchaseDocuments PurchaseDocument[]
+
+  @@unique([companyId, requestNumber])
+  @@index([companyId, status, requestDate])
+  @@map("price_requests")
+}
+
+model PriceRequestLine {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  priceRequestId    String   @map("price_request_id") @db.Uuid
+  productVariantId  String   @map("product_variant_id") @db.Uuid
+  requestedQuantity Decimal  @map("requested_quantity") @db.Decimal(18, 4)
+  uomId             String   @map("uom_id") @db.Uuid
+  notes             String?
+  lineOrder         Int      @default(0) @map("line_order")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  priceRequest PriceRequest    @relation(fields: [priceRequestId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
+  uom          Uom             @relation(fields: [uomId], references: [id])
+  offers       SupplierOffer[]
+
+  @@index([priceRequestId])
+  @@index([productVariantId])
+  @@map("price_request_lines")
+}
+
+model SupplierOffer {
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  priceRequestLineId String  @map("price_request_line_id") @db.Uuid
+  supplierPartyId   String   @map("supplier_party_id") @db.Uuid
+  offeredPrice      Decimal  @map("offered_price") @db.Decimal(20, 4)
+  uomId             String   @map("uom_id") @db.Uuid
+  paymentTerms      String?
+  deliveryTime      String?  @map("delivery_time")
+  notes             String?
+  offeredAt         DateTime @default(now()) @map("offered_at") @db.Timestamptz(6)
+  createdBy         String?  @map("created_by") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company          Company          @relation(fields: [companyId], references: [id])
+  priceRequestLine PriceRequestLine @relation(fields: [priceRequestLineId], references: [id], onDelete: Cascade)
+  supplier         Party            @relation("OfferSupplier", fields: [supplierPartyId], references: [id])
+  uom              Uom              @relation(fields: [uomId], references: [id])
+
+  @@index([priceRequestLineId])
+  @@index([companyId, supplierPartyId, offeredAt])
+  @@map("supplier_offers")
+}
+
+// ───────────── Document Flow (navigation layer, complements FKs) ─────────────
+
+enum DocumentRelationType {
+  CREATED_FROM
+  GENERATED_FROM
+  RELATED
+  BASED_ON
+}
+
+model DocumentRelation {
+  id           String               @id @default(uuid()) @db.Uuid
+  companyId    String               @map("company_id") @db.Uuid
+  fromType     String               @map("from_type")
+  fromId       String               @map("from_id") @db.Uuid
+  toType       String               @map("to_type")
+  toId         String               @map("to_id") @db.Uuid
+  relationType DocumentRelationType @default(RELATED) @map("relation_type")
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdBy    String?              @map("created_by") @db.Uuid
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([fromType, fromId, toType, toId, relationType])
+  @@index([fromType, fromId])
+  @@index([toType, toId])
+  @@map("document_relations")
 }
 
 // ───────────────────────── Loading ─────────────────────────
