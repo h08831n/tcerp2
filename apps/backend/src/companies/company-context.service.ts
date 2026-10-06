@@ -4,6 +4,7 @@ import { ForbiddenError } from '../common/errors';
 
 export interface CompanyMembership {
   companyId: string;
+  /** True when companyId === users.default_company_id (single canonical source). */
   isDefault: boolean;
   nameFa: string;
 }
@@ -22,6 +23,9 @@ function headerString(headers: RequestHeaders, name: string): string | undefined
  *      otherwise ForbiddenError.
  *   2. the user's `defaultCompanyId` (validated membership).
  *   3. the user's first membership.
+ *
+ * Mini-Gate: UserCompany no longer carries isDefault — users.default_company_id
+ * is the single canonical source of the default company.
  *
  * Scoped controllers/services call `requireCompanyId(user, headers)` at the
  * start of an operation; the resolved id is then passed down explicitly
@@ -64,20 +68,54 @@ export class CompanyContextService {
     return def ? def.companyId : memberships[0].companyId;
   }
 
+  /**
+   * Lenient resolution for the PermissionsGuard: never throws. The
+   * x-company-id header is honoured only when the user is a member;
+   * otherwise the user's default company (when still a member of it);
+   * otherwise null — only platform-wide (companyId IS NULL) permission
+   * overrides apply.
+   */
+  async resolveLenientCompanyId(
+    user: { id: string } | undefined,
+    headers: RequestHeaders,
+  ): Promise<string | null> {
+    if (!user) return null;
+
+    const headerValue = headerString(headers, 'x-company-id');
+    if (headerValue) {
+      const member = await this.isMember(user.id, headerValue);
+      if (member) return headerValue;
+    }
+
+    const row = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      select: { defaultCompanyId: true },
+    });
+    if (row?.defaultCompanyId && (await this.isMember(user.id, row.defaultCompanyId))) {
+      return row.defaultCompanyId;
+    }
+    return null;
+  }
+
   /** Memberships of a user with company names (used by GET /auth/me). */
   async memberships(userId: string): Promise<CompanyMembership[]> {
-    const rows = await this.prisma.userCompany.findMany({
-      where: { userId },
-      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
-      select: {
-        companyId: true,
-        isDefault: true,
-        company: { select: { nameFa: true } },
-      },
-    });
+    const [rows, user] = await Promise.all([
+      this.prisma.userCompany.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          companyId: true,
+          company: { select: { nameFa: true } },
+        },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { defaultCompanyId: true },
+      }),
+    ]);
     return rows.map((r) => ({
       companyId: r.companyId,
-      isDefault: r.isDefault,
+      isDefault: !!user && user.defaultCompanyId === r.companyId,
       nameFa: r.company.nameFa,
     }));
   }
@@ -93,5 +131,14 @@ export class CompanyContextService {
         companyId,
       });
     }
+  }
+
+  /** Non-throwing membership probe. */
+  async isMember(userId: string, companyId: string): Promise<boolean> {
+    const member = await this.prisma.userCompany.findUnique({
+      where: { userId_companyId: { userId, companyId } },
+      select: { userId: true },
+    });
+    return !!member;
   }
 }

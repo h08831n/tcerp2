@@ -23,6 +23,7 @@ import { SupplierProductModule } from './supplierproduct/supplier-product.module
 import { LoadingModule } from './loading/loading.module';
 import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { PortalModule } from './portal/portal.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { HealthModule } from './health/health.module';
 
@@ -57,6 +58,7 @@ import { HealthModule } from './health/health.module';
     LoadingModule,
     WorkflowTimerModule,
     NotificationsModule,
+    PortalModule,
     IntegrationsModule,
     HealthModule,
   ],

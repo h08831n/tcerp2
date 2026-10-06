@@ -5,10 +5,12 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
   MinLength,
 } from 'class-validator';
+import { PaginationDto } from '../common/dto/pagination.dto';
 
 export class CreateNotificationRuleDto {
   @IsString()
@@ -74,4 +76,23 @@ export class UpdateNotificationRuleDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+}
+
+/**
+ * Mini-Gate: notification list query — user-scoped by definition, with an
+ * optional company filter. `includePlatform` also returns platform-wide
+ * (companyId null) notifications.
+ */
+export class NotificationQueryDto extends PaginationDto {
+  @IsOptional()
+  @IsUUID()
+  companyId?: string;
+
+  @IsOptional()
+  @IsIn(['UNREAD', 'READ'])
+  status?: 'UNREAD' | 'READ';
+
+  @IsOptional()
+  @IsBoolean()
+  includePlatform?: boolean;
 }

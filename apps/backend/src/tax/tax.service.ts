@@ -12,18 +12,11 @@ import { ConflictError, ForbiddenError, NotFoundError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { CreateTaxDefinitionDto, UpdateTaxDefinitionDto } from './tax.dto';
 
-export const TAX_USED_SETTING_KEY = 'tax.definition.used';
-
-type UsedMap = Record<string, string>; // definitionId → ISO usedAt
-
 /**
- * Tax definitions are company-scoped and IMMUTABLE after first use: a rate
- * change means creating a NEW definition; documents keep rate snapshots.
- *
- * NOTE (schema-vs-code): the frozen schema has no `usedAt` column on
- * tax_definitions. First-use is therefore tracked in a company-scoped Setting
- * (`tax.definition.used` → {definitionId: ISO timestamp}). Adding the real
- * column is a one-line schema amendment recommended for the next gate.
+ * Tax definitions are company-scoped and IMMUTABLE after first use (Mini-Gate #4):
+ * `lockedAt` is set on first use and never cleared; afterwards code/rate/name
+ * changes are forbidden (isActive may still toggle). A rate change means
+ * creating a NEW definition; documents keep rate snapshots.
  */
 @Injectable()
 export class TaxDefinitionService {
@@ -32,42 +25,29 @@ export class TaxDefinitionService {
     private readonly auditService: AuditService,
   ) {}
 
-  private async readUsedMap(companyId: string): Promise<UsedMap> {
-    const setting = await this.prisma.setting.findUnique({
-      where: { companyId_key: { companyId, key: TAX_USED_SETTING_KEY } },
-      select: { value: true },
-    });
-    return (setting?.value as UsedMap) ?? {};
-  }
-
-  private async writeUsedMap(companyId: string, used: UsedMap): Promise<void> {
-    await this.prisma.setting.upsert({
-      where: { companyId_key: { companyId, key: TAX_USED_SETTING_KEY } },
-      create: { companyId, key: TAX_USED_SETTING_KEY, value: used, category: 'tax' },
-      update: { value: used },
-    });
-  }
-
-  async getUsedAt(companyId: string, id: string): Promise<Date | null> {
-    const used = await this.readUsedMap(companyId);
-    return used[id] ? new Date(used[id]) : null;
-  }
-
   /**
-   * Mark a definition as used (called by the document phases; one-way — the
-   * first timestamp is retained forever).
+   * Mark a definition as used — sets `lockedAt = now` when it is still null
+   * (one-way; the first stamp is retained forever and can never be cleared).
+   * Accepts an optional transaction client so document phases can stamp the
+   * definition atomically with their own writes.
    */
-  async markUsed(companyId: string, id: string): Promise<Date> {
-    const definition = await this.prisma.taxDefinition.findUnique({ where: { id } });
+  async markUsed(
+    companyId: string,
+    id: string,
+    tx?: Pick<Prisma.TransactionClient, 'taxDefinition'>,
+  ): Promise<Date> {
+    const client = tx ?? this.prisma;
+    const definition = await client.taxDefinition.findUnique({ where: { id } });
     if (!definition || definition.companyId !== companyId) {
       throw new NotFoundError('Tax definition not found', { id });
     }
-    const used = await this.readUsedMap(companyId);
-    if (used[id]) return new Date(used[id]); // one-way: keep the first stamp
+    if (definition.lockedAt) return definition.lockedAt; // one-way: keep the first stamp
     const now = new Date();
-    used[id] = now.toISOString();
-    await this.writeUsedMap(companyId, used);
-    return now;
+    const updated = await client.taxDefinition.update({
+      where: { id },
+      data: { lockedAt: now },
+    });
+    return updated.lockedAt ?? now;
   }
 
   async list(companyId: string): Promise<TaxDefinition[]> {
@@ -114,7 +94,8 @@ export class TaxDefinitionService {
   }
 
   /**
-   * Update mutable fields; the rate is immutable once the definition is used.
+   * Update mutable fields. Once `lockedAt` is set (first use) code/rate/name
+   * changes are FORBIDDEN — only the isActive toggle is still allowed.
    */
   async update(
     companyId: string,
@@ -125,11 +106,14 @@ export class TaxDefinitionService {
   ): Promise<TaxDefinition> {
     const existing = await this.getById(companyId, id);
 
-    if (dto.rate !== undefined && Number(dto.rate) !== Number(existing.rate)) {
-      const usedAt = await this.getUsedAt(companyId, id);
-      if (usedAt) {
+    if (existing.lockedAt) {
+      const identityChanged =
+        (dto.code !== undefined && dto.code !== existing.code) ||
+        (dto.rate !== undefined && Number(dto.rate) !== Number(existing.rate)) ||
+        (dto.name !== undefined && dto.name !== existing.name);
+      if (identityChanged) {
         throw new ForbiddenError('TAX_DEFINITION_IMMUTABLE', {
-          usedAt,
+          lockedAt: existing.lockedAt,
           hint: 'Create a new tax definition for the new rate.',
         });
       }
@@ -138,6 +122,7 @@ export class TaxDefinitionService {
     const updated = await this.prisma.taxDefinition.update({
       where: { id: existing.id },
       data: {
+        code: dto.code,
         name: dto.name,
         rate: dto.rate,
         isActive: dto.isActive,
@@ -149,8 +134,8 @@ export class TaxDefinitionService {
       action: AuditAction.UPDATE,
       actor,
       companyId,
-      oldValues: { name: existing.name, rate: Number(existing.rate), isActive: existing.isActive },
-      newValues: { name: updated.name, rate: Number(updated.rate), isActive: updated.isActive },
+      oldValues: { code: existing.code, name: existing.name, rate: Number(existing.rate), isActive: existing.isActive },
+      newValues: { code: updated.code, name: updated.name, rate: Number(updated.rate), isActive: updated.isActive },
       ip: ctx.ip,
       userAgent: ctx.userAgent,
     });

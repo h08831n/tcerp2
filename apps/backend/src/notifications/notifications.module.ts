@@ -1,5 +1,8 @@
 import { Module, OnModuleInit } from '@nestjs/common';
-import { NotificationRulesController } from './notifications.controller';
+import {
+  NotificationsController,
+  NotificationRulesController,
+} from './notifications.controller';
 import {
   NotificationDispatchHandler,
   NotificationRuleService,
@@ -8,7 +11,7 @@ import {
 import { QueueHandlerRegistry } from '../queue/queue.handlers';
 
 @Module({
-  controllers: [NotificationRulesController],
+  controllers: [NotificationsController, NotificationRulesController],
   providers: [NotificationService, NotificationRuleService, NotificationDispatchHandler],
   exports: [NotificationService, NotificationRuleService],
 })

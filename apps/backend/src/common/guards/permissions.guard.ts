@@ -7,6 +7,7 @@ import {
 import { ForbiddenError, UnauthorizedError } from '../errors';
 import { AuthenticatedRequest } from './jwt-auth.guard';
 import { PermissionsService } from '../../permissions/permissions.service';
+import { CompanyContextService } from '../../companies/company-context.service';
 
 /**
  * Backend permission enforcement (REQUIREMENTS §2.5: permissions must be
@@ -14,13 +15,24 @@ import { PermissionsService } from '../../permissions/permissions.service';
  *
  * Reads @RequirePermissions(...) metadata; if none present the route is
  * allowed. Resolves the user's effective permissions through
- * PermissionsService (role permissions − REVOKE overrides + GRANT overrides).
+ * PermissionsService, scoped to the request's company (Mini-Gate):
+ *
+ * Company resolution is LENIENT (never throws):
+ *   1. `x-company-id` header when the user is a member of that company;
+ *   2. otherwise the user's `defaultCompanyId` (when still a member);
+ *   3. otherwise null.
+ *
+ * With no company resolvable only platform-wide (companyId IS NULL)
+ * overrides apply and no company-scoped role permissions are granted —
+ * platform-level routes must therefore grant their permissions through
+ * roles in the user's companies or platform-wide overrides.
  */
 @Injectable()
 export class PermissionsGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly permissionsService: PermissionsService,
+    private readonly companyContext: CompanyContextService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -35,7 +47,14 @@ export class PermissionsGuard implements CanActivate {
       throw new UnauthorizedError('Authentication required');
     }
 
-    const effective = await this.permissionsService.getEffectivePermissions(request.user.id);
+    const companyId = await this.companyContext.resolveLenientCompanyId(
+      request.user,
+      request.headers,
+    );
+    const effective = await this.permissionsService.getEffectivePermissions(
+      request.user.id,
+      companyId,
+    );
     const missing = required.filter((code) => !effective.has(code));
     if (missing.length > 0) {
       throw new ForbiddenError('Missing required permissions', { missing });

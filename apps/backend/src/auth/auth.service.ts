@@ -226,37 +226,58 @@ export class AuthService {
     }
   }
 
+  /**
+   * Mini-Gate: roles are company-scoped. `permissions` are the effective
+   * permissions for the user's default company (null → platform context);
+   * `rolesPerCompany` groups the raw role assignments per company.
+   */
   async me(userId: string): Promise<
     UserProfile & {
-      roles: { code: string; nameFa: string; nameEn: string }[];
       permissions: string[];
       companies: { id: string; nameFa: string; isDefault: boolean }[];
       defaultCompanyId: string | null;
+      rolesPerCompany: { companyId: string; roles: { code: string; nameFa: string; nameEn: string }[] }[];
     }
   > {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      include: { roles: { include: { role: true } } },
+      include: { companyRoles: { include: { role: true } } },
     });
     if (!user) throw new NotFoundError('User not found');
-    const [permissions, companies] = await Promise.all([
-      this.permissionsService.getEffectivePermissions(userId),
-      this.companyContext.memberships(userId),
-    ]);
+
+    const memberships = await this.companyContext.memberships(userId);
+    const permissions = await this.permissionsService.getEffectivePermissions(
+      userId,
+      user.defaultCompanyId,
+    );
+
+    const rolesPerCompany = new Map<
+      string,
+      { code: string; nameFa: string; nameEn: string }[]
+    >();
+    for (const assignment of user.companyRoles) {
+      const roles = rolesPerCompany.get(assignment.companyId) ?? [];
+      roles.push({
+        code: assignment.role.code,
+        nameFa: assignment.role.nameFa,
+        nameEn: assignment.role.nameEn,
+      });
+      rolesPerCompany.set(assignment.companyId, roles);
+    }
+
     return {
       ...this.toProfile(user),
-      roles: user.roles.map(({ role }) => ({
-        code: role.code,
-        nameFa: role.nameFa,
-        nameEn: role.nameEn,
-      })),
       permissions: [...permissions].sort(),
-      companies: companies.map((c) => ({
+      companies: memberships.map((c) => ({
         id: c.companyId,
         nameFa: c.nameFa,
         isDefault: c.isDefault,
       })),
       defaultCompanyId: user.defaultCompanyId,
+      rolesPerCompany: [...rolesPerCompany.entries()].map(([companyId, roles]) => ({
+        companyId,
+        roles,
+      })),
     };
   }
 

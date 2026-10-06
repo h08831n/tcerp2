@@ -6,6 +6,7 @@ import { AuditAction } from '../audit/audit.dto';
 import { evaluateConditions, RuleConditions } from './notification-conditions';
 import { NotFoundError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
+import { Paginated } from '../common/dto/pagination.dto';
 import { QueueService } from '../queue/queue.service';
 import { QueueHandler } from '../queue/queue.handlers';
 import { CreateNotificationRuleDto, UpdateNotificationRuleDto } from './notifications.dto';
@@ -16,7 +17,8 @@ export type RecipientConfig = {
 };
 
 export interface DispatchOptions {
-  companyId: string;
+  /** Dispatching company; null = platform-level notification (Mini-Gate). */
+  companyId?: string | null;
   title: string;
   body?: string;
   relatedEntityType?: string;
@@ -55,11 +57,13 @@ export class NotificationService {
             : recipient.value;
         if (owner) ids.push(owner);
       } else if (recipient.type === 'ROLE') {
+        // Mini-Gate: roles are company-scoped — resolve ROLE recipients by
+        // their user_company_roles assignment inside THIS company.
         const users = await this.prisma.user.findMany({
           where: {
             status: 'ACTIVE',
             companies: { some: { companyId } },
-            roles: { some: { role: { code: recipient.value } } },
+            companyRoles: { some: { companyId, role: { code: recipient.value } } },
           },
           select: { id: true },
         });
@@ -74,11 +78,14 @@ export class NotificationService {
     options: Omit<DispatchOptions, 'recipients'>,
   ): Promise<Notification[]> {
     if (userIds.length === 0) return [];
+    // Mini-Gate: notifications carry the dispatch context's companyId
+    // (null = platform-level notification).
     return this.prisma.$transaction(
       userIds.map((userId) =>
         this.prisma.notification.create({
           data: {
             userId,
+            companyId: options.companyId ?? null,
             title: options.title,
             body: options.body,
             relatedEntityType: options.relatedEntityType,
@@ -91,6 +98,47 @@ export class NotificationService {
   }
 
   /**
+   * List the current user's notifications, newest first (uses the
+   * (userId, companyId, status, createdAt) index). Optional companyId and
+   * status filters; pass `includePlatform: true` to also see platform-wide
+   * (companyId null) notifications alongside a company filter.
+   */
+  async listForUser(
+    userId: string,
+    query: {
+      companyId?: string | null;
+      status?: Notification['status'];
+      includePlatform?: boolean;
+      skip: number;
+      take: number;
+    },
+  ): Promise<Paginated<Notification>> {
+    const companyScope: Prisma.NotificationWhereInput = query.includePlatform
+      ? { OR: [{ companyId: query.companyId ?? null }, { companyId: null }] }
+      : { companyId: query.companyId ?? null };
+    const where: Prisma.NotificationWhereInput = {
+      userId,
+      ...companyScope,
+      status: query.status,
+    };
+    const [items, total] = await Promise.all([
+      this.prisma.notification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: query.skip,
+        take: query.take,
+      }),
+      this.prisma.notification.count({ where }),
+    ]);
+    return {
+      items,
+      total,
+      page: Math.floor(query.skip / Math.max(query.take, 1)) + 1,
+      pageSize: query.take,
+    };
+  }
+
+  /**
    * Dispatch the enabled, condition-matching rules for `event`. Returns the
    * number of rules that actually dispatched (0 when nothing matched —
    * callers may fall back to a direct notification, e.g. the claim declarer).
@@ -100,8 +148,10 @@ export class NotificationService {
     payload: Record<string, unknown>,
     base: Omit<DispatchOptions, 'recipients'>,
   ): Promise<number> {
+    // Rules are company-scoped; a platform dispatch (companyId null) matches
+    // no rules by design.
     const rules = await this.prisma.notificationRule.findMany({
-      where: { companyId: base.companyId, event, enabled: true },
+      where: { companyId: base.companyId ?? undefined, event, enabled: true },
       orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
     });
     const matching = rules.filter((rule) =>
@@ -113,17 +163,19 @@ export class NotificationService {
       const delayMinutes = Number(
         (rule.delayConfig as { delayMinutes?: number } | null)?.delayMinutes ?? 0,
       );
-      const resolved = await this.resolveRecipients(base.companyId, recipients, payload);
+      const resolved = await this.resolveRecipients(rule.companyId, recipients, payload);
+      // The notification carries the RULE's company (dispatch event context).
+      const ruleBase = { ...base, companyId: rule.companyId };
       if (delayMinutes > 0) {
         // Delayed delivery: durable queue job; the handler creates the rows.
         await this.queueService.enqueue({
           jobType: 'notification.dispatch',
-          companyId: base.companyId,
-          payload: { userIds: resolved, base },
+          companyId: rule.companyId,
+          payload: { userIds: resolved, base: ruleBase },
           delayMs: delayMinutes * 60_000,
         });
       } else {
-        await this.createNotifications(resolved, base);
+        await this.createNotifications(resolved, ruleBase);
       }
     }
     return matching.length;

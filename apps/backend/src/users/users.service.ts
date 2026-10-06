@@ -10,7 +10,7 @@ import { RequestContext } from '../auth/auth.service';
 import {
   CreateUserDto,
   ResetPasswordDto,
-  SetUserRolesDto,
+  SetUserCompanyRolesDto,
   UpdateUserDto,
   UserQueryDto,
 } from './users.dto';
@@ -33,21 +33,41 @@ const USER_LIST_SELECT = {
   lastLoginAt: true,
   createdAt: true,
   updatedAt: true,
-  roles: { select: { role: { select: { id: true, code: true, nameFa: true, nameEn: true } } } },
+  // Mini-Gate: roles are company-scoped assignments (user_company_roles).
+  companyRoles: {
+    orderBy: { companyId: 'asc' as const },
+    select: {
+      companyId: true,
+      role: { select: { id: true, code: true, nameFa: true, nameEn: true } },
+    },
+  },
 } satisfies Prisma.UserSelect;
 
 export type UserWithRoles = Prisma.UserGetPayload<{ select: typeof USER_LIST_SELECT }>;
 
+export interface CompanyRolesGroup {
+  companyId: string;
+  roles: { id: string; code: string; nameFa: string; nameEn: string }[];
+}
+
+/** Group flat user_company_roles rows by company (pure — unit-testable). */
+export function groupRolesByCompany(
+  assignments: { companyId: string; role: { id: string; code: string; nameFa: string; nameEn: string } }[],
+): CompanyRolesGroup[] {
+  const groups = new Map<string, CompanyRolesGroup>();
+  for (const { companyId, role } of assignments) {
+    const group = groups.get(companyId) ?? { companyId, roles: [] };
+    group.roles.push(role);
+    groups.set(companyId, group);
+  }
+  return [...groups.values()];
+}
+
 function toProfile(user: UserWithRoles): Record<string, unknown> {
-  const { roles, ...rest } = user;
+  const { companyRoles, ...rest } = user;
   return {
     ...rest,
-    roles: roles.map(({ role }) => ({
-      id: role.id,
-      code: role.code,
-      nameFa: role.nameFa,
-      nameEn: role.nameEn,
-    })),
+    rolesByCompany: groupRolesByCompany(companyRoles),
   };
 }
 
@@ -103,29 +123,22 @@ export class UsersService {
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
-    const roleIds = dto.roleIds ?? [];
 
-    const user = await this.prisma.$transaction(async (trx) => {
-      if (roleIds.length > 0) {
-        const count = await trx.role.count({ where: { id: { in: roleIds } } });
-        if (count !== roleIds.length) {
-          throw new ValidationError('One or more role ids do not exist', { roleIds });
-        }
-      }
-      return trx.user.create({
-        data: {
-          username: dto.username,
-          email: dto.email?.toLowerCase(),
-          passwordHash,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          mobile,
-          language: dto.language ?? 'fa',
-          timezone: dto.timezone ?? 'Asia/Tehran',
-          roles: { create: roleIds.map((roleId) => ({ roleId })) },
-        },
-        select: USER_LIST_SELECT,
-      });
+    // Mini-Gate: roles are company-scoped, so user creation no longer takes a
+    // global roleIds list — grant roles per company via
+    // PUT /users/:id/companies/:companyId/roles (or membership creation).
+    const user = await this.prisma.user.create({
+      data: {
+        username: dto.username,
+        email: dto.email?.toLowerCase(),
+        passwordHash,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        mobile,
+        language: dto.language ?? 'fa',
+        timezone: dto.timezone ?? 'Asia/Tehran',
+      },
+      select: USER_LIST_SELECT,
     });
 
     await this.auditService.record({
@@ -255,17 +268,35 @@ export class UsersService {
     });
   }
 
-  async setRoles(
+  /**
+   * Replace the target user's roles within ONE company (Mini-Gate #1).
+   * The user must already be a member of the company (UserCompany row);
+   * granting roles to a non-member is only possible together with membership
+   * creation via the companies module.
+   */
+  async setCompanyRoles(
     id: string,
-    dto: SetUserRolesDto,
+    companyId: string,
+    dto: SetUserCompanyRolesDto,
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<UserWithRoles> {
     const existing = await this.prisma.user.findUnique({
       where: { id },
-      include: { roles: { select: { roleId: true } } },
+      include: { companyRoles: { select: { companyId: true, roleId: true } } },
     });
     if (!existing) throw new NotFoundError('User not found', { id });
+
+    const member = await this.prisma.userCompany.findUnique({
+      where: { userId_companyId: { userId: id, companyId } },
+      select: { userId: true },
+    });
+    if (!member) {
+      throw new ValidationError('User is not a member of the company; create the membership first', {
+        userId: id,
+        companyId,
+      });
+    }
 
     const uniqueIds = [...new Set(dto.roleIds)];
     const count = await this.prisma.role.count({ where: { id: { in: uniqueIds } } });
@@ -273,26 +304,47 @@ export class UsersService {
       throw new ValidationError('One or more role ids do not exist', { roleIds: uniqueIds });
     }
 
-    const oldRoleIds = existing.roles.map((r) => r.roleId).sort();
+    const oldRoleIds = existing.companyRoles
+      .filter((r) => r.companyId === companyId)
+      .map((r) => r.roleId)
+      .sort();
     const newRoleIds = [...uniqueIds].sort();
 
     if (oldRoleIds.join(',') !== newRoleIds.join(',')) {
       await this.prisma.$transaction([
-        this.prisma.userRole.deleteMany({ where: { userId: id } }),
-        this.prisma.userRole.createMany({
-          data: uniqueIds.map((roleId) => ({ userId: id, roleId })),
+        this.prisma.userCompanyRole.deleteMany({ where: { userId: id, companyId } }),
+        this.prisma.userCompanyRole.createMany({
+          data: uniqueIds.map((roleId) => ({ userId: id, companyId, roleId, assignedBy: actor.id })),
         }),
       ]);
-      await this.auditService.record({
-        entityType: 'user',
-        entityId: id,
-        action: AuditAction.ROLES_CHANGED,
-        actor,
-        oldValues: { roleIds: oldRoleIds },
-        newValues: { roleIds: newRoleIds },
-        ip: ctx.ip,
-        userAgent: ctx.userAgent,
-      });
+      const removed = oldRoleIds.filter((r) => !newRoleIds.includes(r));
+      const added = newRoleIds.filter((r) => !oldRoleIds.includes(r));
+      if (removed.length > 0) {
+        await this.auditService.record({
+          entityType: 'user',
+          entityId: id,
+          action: AuditAction.ROLE_REMOVED,
+          actor,
+          companyId,
+          oldValues: { companyId, roleIds: oldRoleIds },
+          newValues: { companyId, roleIds: newRoleIds },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+      }
+      if (added.length > 0) {
+        await this.auditService.record({
+          entityType: 'user',
+          entityId: id,
+          action: AuditAction.ROLE_ASSIGNED,
+          actor,
+          companyId,
+          oldValues: { companyId, roleIds: oldRoleIds },
+          newValues: { companyId, roleIds: newRoleIds },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+      }
     }
 
     return this.getById(id);

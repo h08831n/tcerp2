@@ -46,11 +46,13 @@ model Company {
   updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   users              UserCompany[]
+  companyRoles       UserCompanyRole[]
   teams              Team[]
   settings           Setting[]
   sequences          Sequence[]
   integrationConfigs IntegrationConfig[]
   notificationRules  NotificationRule[]
+  notifications      Notification[]
   queueJobs          QueueJob[]
   bankAccounts       BankAccount[]
   chartOfAccounts    ChartOfAccount[]
@@ -65,6 +67,8 @@ model Company {
   workflowDefinitions WorkflowDefinition[]
   portalAccounts     PortalAccount[]
   defaultUsers       User[]
+  userRoleOverrides  UserPermissionOverride[]
+  fileAttachments    FileAttachment[]
 
   @@map("companies")
 }
@@ -100,7 +104,7 @@ model User {
 
   defaultCompany  Company?                 @relation(fields: [defaultCompanyId], references: [id])
   companies       UserCompany[]
-  roles           UserRole[]
+  companyRoles    UserCompanyRole[]
   overrides       UserPermissionOverride[]
   refreshTokens   RefreshToken[]
   teamMemberships TeamMember[]
@@ -109,12 +113,11 @@ model User {
   @@map("users")
 }
 
-// Membership of a user in a company; roles may later be granted per company
-// (company-specific roles) — permission checks resolve scopes through this table.
+// Membership of a user in a company. `User.defaultCompanyId` is the single
+// canonical source for the default company — this table is membership only.
 model UserCompany {
   userId    String   @map("user_id") @db.Uuid
   companyId String   @map("company_id") @db.Uuid
-  isDefault Boolean  @default(false) @map("is_default")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -123,6 +126,25 @@ model UserCompany {
   @@id([userId, companyId])
   @@index([companyId])
   @@map("user_companies")
+}
+
+// Company-scoped role assignment (Mini-Gate #1): the same user may be
+// SALES_MANAGER in company A and SALESPERSON in company B. Role/Permission
+// definitions remain system-level. @@id matches the ratified unique triple.
+model UserCompanyRole {
+  userId     String   @map("user_id") @db.Uuid
+  companyId  String   @map("company_id") @db.Uuid
+  roleId     String   @map("role_id") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  assignedBy String?  @map("assigned_by") @db.Uuid
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role    Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, companyId, roleId])
+  @@index([companyId, roleId])
+  @@map("user_company_roles")
 }
 
 model RefreshToken {
@@ -154,8 +176,8 @@ model Role {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  users       UserRole[]
-  permissions RolePermission[]
+  users           UserCompanyRole[]
+  permissions     RolePermission[]
 
   @@map("roles")
 }
@@ -185,26 +207,18 @@ model RolePermission {
   @@map("role_permissions")
 }
 
-model UserRole {
-  userId     String   @map("user_id") @db.Uuid
-  roleId     String   @map("role_id") @db.Uuid
-  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
-
-  @@id([userId, roleId])
-  @@map("user_roles")
-}
-
 enum OverrideMode {
   GRANT
   REVOKE
 }
 
+// Mini-Gate #1: companyId null = platform-wide override (applies in every
+// company the user is a member of); non-null = company-specific override.
 model UserPermissionOverride {
+  id           String       @id @default(uuid()) @db.Uuid
   userId       String       @map("user_id") @db.Uuid
   permissionId String       @map("permission_id") @db.Uuid
+  companyId    String?      @map("company_id") @db.Uuid
   mode         OverrideMode
   reason       String?
   createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -212,8 +226,9 @@ model UserPermissionOverride {
 
   user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  company    Company?   @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  @@id([userId, permissionId])
+  @@unique([userId, permissionId, companyId])
   @@map("user_permission_overrides")
 }
 
@@ -323,30 +338,37 @@ model Sequence {
 model FileBlob {
   id         String   @id @default(uuid()) @db.Uuid
   sha256     String   @unique
-  filename   String
   mimeType   String   @map("mime_type")
   size       BigInt
   storageKey String   @map("storage_key")
   createdBy  String?  @map("created_by") @db.Uuid
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  // Filenames intentionally live on FileAttachment (per-upload metadata), never
+  // on the deduped blob: two companies uploading identical bytes with different
+  // names share one blob and neither name leaks to the other (Mini-Gate #8).
   attachments FileAttachment[]
 
   @@map("file_blobs")
 }
 
 model FileAttachment {
-  id         String   @id @default(uuid()) @db.Uuid
-  fileBlobId String   @map("file_blob_id") @db.Uuid
-  entityType String   @map("entity_type")
-  entityId   String   @map("entity_id")
-  category   String?
-  createdBy  String?  @map("created_by") @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id               String   @id @default(uuid()) @db.Uuid
+  fileBlobId       String   @map("file_blob_id") @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  entityType       String   @map("entity_type")
+  entityId         String   @map("entity_id")
+  originalFilename String   @map("original_filename")
+  displayName      String?  @map("display_name")
+  category         String?
+  createdBy        String?  @map("created_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   fileBlob FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)
+  company  Company  @relation(fields: [companyId], references: [id])
 
   @@index([entityType, entityId])
+  @@index([companyId])
   @@index([fileBlobId])
   @@map("file_attachments")
 }
@@ -386,7 +408,7 @@ model QueueJob {
   startedAt      DateTime?      @map("started_at") @db.Timestamptz(6)
   finishedAt     DateTime?      @map("finished_at") @db.Timestamptz(6)
   lastError      String?        @map("last_error")
-  idempotencyKey String?        @unique @map("idempotency_key")
+  idempotencyKey String?        @map("idempotency_key") // unique per company (see @@unique); platform jobs (null) are deduped in service
   createdBy      String?        @map("created_by") @db.Uuid
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -395,6 +417,7 @@ model QueueJob {
 
   @@index([status, priority, scheduledAt])
   @@index([jobType, status])
+  @@unique([companyId, idempotencyKey])
   @@map("queue_jobs")
 }
 
@@ -447,6 +470,7 @@ enum NotificationStatus {
 model Notification {
   id                String             @id @default(uuid()) @db.Uuid
   userId            String             @map("user_id") @db.Uuid
+  companyId         String?            @map("company_id") @db.Uuid // null = platform notification
   title             String
   body              String?
   relatedEntityType String?            @map("related_entity_type")
@@ -456,7 +480,9 @@ model Notification {
   createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
   readAt            DateTime?          @map("read_at") @db.Timestamptz(6)
 
-  @@index([userId, status, createdAt])
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([userId, companyId, status, createdAt])
   @@map("notifications")
 }
 
@@ -569,6 +595,9 @@ model TaxDefinition {
   name      String // e.g. ارزش افزوده ۹٪
   rate      Decimal  @db.Decimal(9, 4) // percent, e.g. 9.0000
   isActive  Boolean  @default(true) @map("is_active")
+  // Mini-Gate #4: set on first use in a tax invoice line; afterwards code/rate
+  // are immutable — a rate change means a NEW TaxDefinition row.
+  lockedAt  DateTime? @map("locked_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -1015,6 +1044,9 @@ model PortalAccount {
   company Company @relation(fields: [companyId], references: [id])
 
   @@unique([companyId, verifiedMobile])
+  // Mini-Gate #3: one website user may link to at most one Party per company.
+  // Partial unique index (non-null website_user_id) added in migration:
+  //   portal_accounts_website_user_uniq
   @@index([partyId])
   @@map("portal_accounts")
 }

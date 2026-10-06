@@ -135,7 +135,7 @@ export class RolesService {
     if (existing.isSystem) {
       throw new ForbiddenError('System roles cannot be deleted', { code: existing.code });
     }
-    const inUse = await this.prisma.userRole.count({ where: { roleId: id } });
+    const inUse = await this.prisma.userCompanyRole.count({ where: { roleId: id } });
     if (inUse > 0) {
       throw new ConflictError('Role is assigned to users and cannot be deleted', { assignedTo: inUse });
     }

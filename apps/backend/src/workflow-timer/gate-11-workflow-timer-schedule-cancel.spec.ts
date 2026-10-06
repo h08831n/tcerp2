@@ -59,7 +59,7 @@ describe('11 workflow-timer-schedule-cancel', () => {
           return { id: args.where.id, ...args.data };
         }),
       },
-      queueJob: { findUnique: jest.fn().mockResolvedValue({ id: 'q-1' }) },
+      queueJob: { findFirst: jest.fn().mockResolvedValue({ id: 'q-1' }) },
     };
     const queueService = {
       enqueue: jest.fn(async (input: Record<string, unknown>) => {
@@ -117,8 +117,9 @@ describe('11 workflow-timer-schedule-cancel', () => {
     });
     const cancelled = await service.cancel('company-1', 'timer-1');
     expect(cancelled.status).toBe('CANCELLED');
-    expect(prisma.queueJob.findUnique).toHaveBeenCalledWith({
-      where: { idempotencyKey: 'workflow-timer:timer-1' },
+    // Mini-Gate: idempotency unique is (companyId, idempotencyKey).
+    expect(prisma.queueJob.findFirst).toHaveBeenCalledWith({
+      where: { companyId: 'company-1', idempotencyKey: 'workflow-timer:timer-1' },
       select: { id: true },
     });
     expect(queueService.cancel).toHaveBeenCalledWith('q-1');

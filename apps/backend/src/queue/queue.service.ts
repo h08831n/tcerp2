@@ -53,11 +53,19 @@ export class QueueService {
    * Enqueue a job. When `idempotencyKey` is supplied and already known, the
    * existing job is returned unchanged — no second BullMQ job is added
    * (idempotency keys on automation/queue paths, REQUIREMENTS §70-71).
+   *
+   * Mini-Gate: idempotency is scoped per company — the durable unique is
+   * (companyId, idempotencyKey), so the same key in two different companies
+   * creates two jobs. Platform jobs (companyId null) CANNOT be deduped by the
+   * DB (PostgreSQL unique treats NULL as distinct), so they are deduped here
+   * in the service via findFirst and remain best-effort under concurrent
+   * races.
    */
   async enqueue(input: EnqueueJobInput): Promise<QueueJob> {
+    const companyId = input.companyId ?? null;
     if (input.idempotencyKey) {
-      const existing = await this.prisma.queueJob.findUnique({
-        where: { idempotencyKey: input.idempotencyKey },
+      const existing = await this.prisma.queueJob.findFirst({
+        where: { companyId, idempotencyKey: input.idempotencyKey },
       });
       if (existing) return existing;
     }
@@ -70,7 +78,7 @@ export class QueueService {
         data: {
           jobType: input.jobType,
           payload: toJson(input.payload),
-          companyId: input.companyId ?? null,
+          companyId,
           queueName: input.queueName ?? 'default',
           priority: input.priority ?? 'NORMAL',
           maxAttempts: input.maxAttempts ?? 5,
@@ -81,14 +89,15 @@ export class QueueService {
         },
       });
     } catch (error) {
-      // Lost the idempotency race — return the winner.
+      // Lost the same-company idempotency race (composite unique
+      // (companyId, idempotencyKey)) — re-fetch and return the winner.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002' &&
         input.idempotencyKey
       ) {
-        const existing = await this.prisma.queueJob.findUnique({
-          where: { idempotencyKey: input.idempotencyKey },
+        const existing = await this.prisma.queueJob.findFirst({
+          where: { companyId, idempotencyKey: input.idempotencyKey },
         });
         if (existing) return existing;
       }

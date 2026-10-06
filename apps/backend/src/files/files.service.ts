@@ -13,7 +13,7 @@ import { AppConfig, CONFIG } from '../config/configuration';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
-import { NotFoundError } from '../common/errors';
+import { NotFoundError, ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 
 export interface UploadedFilePayload {
@@ -31,7 +31,10 @@ export interface DownloadResult {
 }
 
 export type FileBlobDto = Omit<FileBlob, 'size'> & { size: number };
-export type FileAttachmentDto = FileAttachment;
+
+export interface AttachmentWithBlob extends FileAttachment {
+  fileBlob: FileBlob;
+}
 
 /** BigInt does not survive JSON.stringify — expose it as a number. */
 function toBlobDto(blob: FileBlob): FileBlobDto {
@@ -42,6 +45,12 @@ function toBlobDto(blob: FileBlob): FileBlobDto {
  * S3-compatible file storage (MinIO locally) with content-addressed dedupe:
  * the sha256 of the payload is the blob identity, so identical uploads are
  * stored once (REQUIREMENTS architecture: Files module).
+ *
+ * Mini-Gate #8: FileBlob is pure content facts (NO filename). Every upload
+ * creates a FileAttachment row carrying the per-upload metadata
+ * (originalFilename, displayName, category) and the owning company — two
+ * companies uploading identical bytes share ONE blob but keep separate
+ * attachments, and neither sees the other's attachments.
  */
 @Injectable()
 export class FilesService {
@@ -65,69 +74,68 @@ export class FilesService {
     });
   }
 
+  /**
+   * Upload a file: blob dedupe by sha256, then always create an attachment.
+   * `companyId` comes from the request's company context; `originalFilename`
+   * comes from the multipart part.
+   */
   async upload(
     file: UploadedFilePayload,
+    data: { entityType: string; entityId: string; displayName?: string; category?: string },
+    companyId: string,
     actor: { id: string; username: string },
     ctx: RequestContext,
-  ): Promise<FileBlobDto> {
-    const sha256 = createHash('sha256').update(file.buffer).digest('hex');
-
-    const existing = await this.prisma.fileBlob.findUnique({ where: { sha256 } });
-    if (existing) {
-      // Dedupe hit: the blob is already in object storage.
-      return toBlobDto(existing);
+  ): Promise<{ blob: FileBlobDto; attachment: FileAttachment }> {
+    if (!data.entityType || !data.entityId) {
+      throw new ValidationError('entityType and entityId are required');
     }
 
-    const now = new Date();
-    const key = `blobs/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${sha256}/${file.originalname}`;
+    const sha256 = createHash('sha256').update(file.buffer).digest('hex');
+    let blob = await this.prisma.fileBlob.findUnique({ where: { sha256 } });
 
-    await this.ensureBucket();
-    await this.s3.send(
-      new PutObjectCommand({
-        Bucket: this.config.S3_BUCKET,
-        Key: key,
-        Body: file.buffer,
-        ContentType: file.mimetype,
-      }),
-    );
+    if (!blob) {
+      const now = new Date();
+      const key = `blobs/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${sha256}`;
 
-    const blob = await this.prisma.fileBlob.create({
-      data: {
-        sha256,
-        filename: file.originalname,
-        mimeType: file.mimetype,
-        size: BigInt(file.size),
-        storageKey: key,
-        createdBy: actor.id,
-      },
-    });
+      await this.ensureBucket();
+      await this.s3.send(
+        new PutObjectCommand({
+          Bucket: this.config.S3_BUCKET,
+          Key: key,
+          Body: file.buffer,
+          ContentType: file.mimetype,
+        }),
+      );
 
-    await this.auditService.record({
-      entityType: 'file',
-      entityId: blob.id,
-      action: AuditAction.CREATE,
-      actor,
-      newValues: toBlobDto(blob),
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
-    return toBlobDto(blob);
-  }
-
-  async createAttachment(
-    fileBlobId: string,
-    data: { entityType: string; entityId: string; category?: string },
-    actor: { id: string; username: string },
-    ctx: RequestContext,
-  ): Promise<FileAttachment> {
-    const blob = await this.prisma.fileBlob.findUnique({ where: { id: fileBlobId } });
-    if (!blob) throw new NotFoundError('File not found', { id: fileBlobId });
+      blob = await this.prisma.fileBlob.create({
+        data: {
+          sha256,
+          mimeType: file.mimetype,
+          size: BigInt(file.size),
+          storageKey: key,
+          createdBy: actor.id,
+        },
+      });
+      await this.auditService.record({
+        entityType: 'file',
+        entityId: blob.id,
+        action: AuditAction.CREATE,
+        actor,
+        companyId,
+        newValues: toBlobDto(blob),
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+    }
 
     const attachment = await this.prisma.fileAttachment.create({
       data: {
-        fileBlobId,
+        fileBlobId: blob.id,
+        companyId,
         entityType: data.entityType,
         entityId: data.entityId,
+        originalFilename: file.originalname,
+        displayName: data.displayName,
         category: data.category,
         createdBy: actor.id,
       },
@@ -137,6 +145,56 @@ export class FilesService {
       entityId: attachment.id,
       action: AuditAction.CREATE,
       actor,
+      companyId,
+      newValues: {
+        fileBlobId: blob.id,
+        entityType: data.entityType,
+        entityId: data.entityId,
+        originalFilename: file.originalname,
+        displayName: data.displayName ?? null,
+        category: data.category ?? null,
+      },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return { blob: toBlobDto(blob), attachment };
+  }
+
+  /** Attach an existing blob to an entity (two-step flow). */
+  async createAttachment(
+    fileBlobId: string,
+    data: {
+      entityType: string;
+      entityId: string;
+      originalFilename: string;
+      displayName?: string;
+      category?: string;
+    },
+    companyId: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<FileAttachment> {
+    const blob = await this.prisma.fileBlob.findUnique({ where: { id: fileBlobId } });
+    if (!blob) throw new NotFoundError('File not found', { id: fileBlobId });
+
+    const attachment = await this.prisma.fileAttachment.create({
+      data: {
+        fileBlobId,
+        companyId,
+        entityType: data.entityType,
+        entityId: data.entityId,
+        originalFilename: data.originalFilename,
+        displayName: data.displayName,
+        category: data.category,
+        createdBy: actor.id,
+      },
+    });
+    await this.auditService.record({
+      entityType: 'file_attachment',
+      entityId: attachment.id,
+      action: AuditAction.CREATE,
+      actor,
+      companyId,
       newValues: { ...data, fileBlobId },
       ip: ctx.ip,
       userAgent: ctx.userAgent,
@@ -144,18 +202,53 @@ export class FilesService {
     return attachment;
   }
 
-  async getMeta(id: string): Promise<FileBlobDto & { attachments: FileAttachment[] }> {
+  /**
+   * Attachments of the caller's company only (Mini-Gate #8: never expose
+   * another company's attachments, even for a shared blob).
+   */
+  async listAttachments(
+    companyId: string,
+    filters: { entityType?: string; entityId?: string },
+  ): Promise<(AttachmentWithBlob & { blob: FileBlobDto })[]> {
+    const rows = await this.prisma.fileAttachment.findMany({
+      where: {
+        companyId,
+        entityType: filters.entityType,
+        entityId: filters.entityId,
+      },
+      include: { fileBlob: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return rows.map(({ fileBlob, ...attachment }) => ({
+      ...attachment,
+      fileBlob,
+      blob: toBlobDto(fileBlob),
+    }));
+  }
+
+  async getMeta(id: string, companyId: string): Promise<FileBlobDto & { attachments: FileAttachment[] }> {
     const blob = await this.prisma.fileBlob.findUnique({
       where: { id },
-      include: { attachments: true },
+      include: { attachments: { where: { companyId } } },
     });
     if (!blob) throw new NotFoundError('File not found', { id });
     return { ...toBlobDto(blob), attachments: blob.attachments };
   }
 
-  async download(id: string): Promise<DownloadResult> {
-    const blob = await this.prisma.fileBlob.findUnique({ where: { id } });
+  /**
+   * Download a blob by id. The Content-Disposition filename is the caller's
+   * company attachment name (the blob itself no longer stores one).
+   */
+  async download(id: string, companyId: string): Promise<DownloadResult> {
+    const blob = await this.prisma.fileBlob.findUnique({
+      where: { id },
+      include: { attachments: { where: { companyId }, orderBy: { createdAt: 'asc' }, take: 1 } },
+    });
     if (!blob) throw new NotFoundError('File not found', { id });
+    if (blob.attachments.length === 0) {
+      // No attachment in this company → the blob is not theirs to download.
+      throw new NotFoundError('File not found', { id });
+    }
 
     const result = await this.s3.send(
       new GetObjectCommand({ Bucket: this.config.S3_BUCKET, Key: blob.storageKey }),
@@ -163,7 +256,27 @@ export class FilesService {
     return {
       stream: result.Body as unknown as Readable,
       contentType: result.ContentType ?? blob.mimeType,
-      filename: blob.filename,
+      filename: blob.attachments[0].originalFilename,
+      size: Number(blob.size),
+    };
+  }
+
+  /** Download through a specific attachment (company-filtered). */
+  async downloadAttachment(attachmentId: string, companyId: string): Promise<DownloadResult> {
+    const attachment = await this.prisma.fileAttachment.findFirst({
+      where: { id: attachmentId, companyId },
+      include: { fileBlob: true },
+    });
+    if (!attachment) throw new NotFoundError('Attachment not found', { id: attachmentId });
+
+    const blob = attachment.fileBlob;
+    const result = await this.s3.send(
+      new GetObjectCommand({ Bucket: this.config.S3_BUCKET, Key: blob.storageKey }),
+    );
+    return {
+      stream: result.Body as unknown as Readable,
+      contentType: result.ContentType ?? blob.mimeType,
+      filename: attachment.originalFilename,
       size: Number(blob.size),
     };
   }

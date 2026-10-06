@@ -173,8 +173,10 @@ export class WorkflowTimerService {
     });
     // BullMQ removal is best-effort — the handler no-ops on CANCELLED anyway.
     try {
-      const job = await this.prisma.queueJob.findUnique({
-        where: { idempotencyKey: `workflow-timer:${id}` },
+      // Mini-Gate: the unique is (companyId, idempotencyKey) — findFirst with
+      // the timer's company (the enqueue above used the same scope).
+      const job = await this.prisma.queueJob.findFirst({
+        where: { companyId, idempotencyKey: `workflow-timer:${id}` },
         select: { id: true },
       });
       if (job) await this.queueService.cancel(job.id);

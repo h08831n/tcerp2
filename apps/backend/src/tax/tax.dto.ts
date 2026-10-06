@@ -33,6 +33,12 @@ export class UpdateTaxDefinitionDto {
   @IsOptional()
   @IsString()
   @MinLength(1)
+  @MaxLength(64)
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
   @MaxLength(200)
   name?: string;
 

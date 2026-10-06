@@ -94,6 +94,9 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'integrations.create', module: 'integrations', action: 'create', description: 'Create integration configs' },
   { code: 'integrations.edit', module: 'integrations', action: 'edit', description: 'Edit integration configs' },
   { code: 'integrations.delete', module: 'integrations', action: 'delete', description: 'Delete integration configs' },
+  // portal accounts (Mini-Gate: customer website links)
+  { code: 'portalaccounts.view', module: 'portalaccounts', action: 'view', description: 'View portal accounts' },
+  { code: 'portalaccounts.create', module: 'portalaccounts', action: 'create', description: 'Create / remove portal accounts' },
 ];
 
 const ROLE_DEFS: {
@@ -241,17 +244,30 @@ async function seedAdmin(roleIds: Map<string, string>, companyId: string): Promi
   });
   if (existing) {
     // Do not reset an existing admin's password on re-seed; just make sure the
-    // company membership/default exist.
+    // company membership, company-scoped role and default company exist.
     await prisma.userCompany.upsert({
       where: { userId_companyId: { userId: existing.id, companyId } },
-      create: { userId: existing.id, companyId, isDefault: true },
-      update: { isDefault: true },
-    });
-    await prisma.userRole.upsert({
-      where: { userId_roleId: { userId: existing.id, roleId: adminRoleId } },
-      create: { userId: existing.id, roleId: adminRoleId },
+      create: { userId: existing.id, companyId },
       update: {},
     });
+    // Mini-Gate: roles live in user_company_roles (per company).
+    await prisma.userCompanyRole.upsert({
+      where: {
+        userId_companyId_roleId: { userId: existing.id, companyId, roleId: adminRoleId },
+      },
+      create: { userId: existing.id, companyId, roleId: adminRoleId, assignedBy: null },
+      update: {},
+    });
+    const user = await prisma.user.findUnique({
+      where: { id: existing.id },
+      select: { defaultCompanyId: true },
+    });
+    if (user && !user.defaultCompanyId) {
+      await prisma.user.update({
+        where: { id: existing.id },
+        data: { defaultCompanyId: companyId },
+      });
+    }
     return;
   }
 
@@ -262,8 +278,10 @@ async function seedAdmin(roleIds: Map<string, string>, companyId: string): Promi
       passwordHash,
       mustChangePassword: true,
       defaultCompanyId: companyId,
-      roles: { create: [{ roleId: adminRoleId }] },
-      companies: { create: [{ companyId, isDefault: true }] },
+      // Mini-Gate: admin's role is a company-scoped assignment; the membership
+      // and role live in user_companies / user_company_roles respectively.
+      companies: { create: [{ companyId }] },
+      companyRoles: { create: [{ roleId: adminRoleId, companyId, assignedBy: null }] },
     },
   });
 }

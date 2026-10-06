@@ -2,95 +2,129 @@ import { ForbiddenError } from '../common/errors';
 import { TaxDefinitionService } from './tax.service';
 
 /**
- * GATE TEST 13 — tax snapshot immutability: once a definition is used its
- * rate cannot change (TAX_DEFINITION_IMMUTABLE); a new rate means a new
- * definition; markUsed is one-way.
+ * GATE TEST 13 — tax snapshot immutability (Mini-Gate #4): `lockedAt` is set
+ * on first use and never cleared; afterwards code/rate/name changes are
+ * forbidden (TAX_DEFINITION_IMMUTABLE) — a new rate means a new definition;
+ * isActive may still be toggled.
  */
 describe('13 tax-snapshot-immutability', () => {
   const COMPANY = 'company-1';
-  const DEF = {
+  const UNLOCKED = {
     id: 'def-1',
     companyId: COMPANY,
     code: 'VAT_9',
     name: 'ارزش افزوده ۹٪',
     rate: '9.0000',
     isActive: true,
+    lockedAt: null as Date | null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+  const LOCKED_AT = new Date('2026-09-01T10:00:00Z');
+  const LOCKED = { ...UNLOCKED, lockedAt: LOCKED_AT };
 
-  function makeMocks(usedMap: Record<string, string> | null = null) {
-    const upserts: Record<string, unknown>[] = [];
+  function makeMocks(definition: typeof UNLOCKED = UNLOCKED) {
     const prisma = {
       taxDefinition: {
-        findUnique: jest.fn().mockResolvedValue(DEF),
+        findUnique: jest.fn().mockResolvedValue(definition),
         create: jest.fn(async (args: { data: object }) => ({ id: 'def-2', ...args.data })),
-        update: jest.fn(async (args: { data: object }) => ({ ...DEF, ...args.data })),
+        update: jest.fn(async (args: { data: Record<string, unknown> }) => ({
+          ...definition,
+          ...args.data,
+        })),
         findMany: jest.fn().mockResolvedValue([]),
-      },
-      setting: {
-        findUnique: jest.fn().mockResolvedValue(
-          usedMap ? { value: usedMap } : null,
-        ),
-        upsert: jest.fn(async (args: Record<string, unknown>) => {
-          upserts.push(args);
-          return args;
-        }),
       },
     };
     const audit = { record: jest.fn() };
     const service = new TaxDefinitionService(prisma as never, audit as never);
-    return { service, prisma, upserts, audit };
+    return { service, prisma, audit };
   }
 
-  it('markUsed sets usedAt once', async () => {
-    const { service, upserts } = makeMocks();
-    const usedAt = await service.markUsed(COMPANY, 'def-1');
-    expect(usedAt).toBeInstanceOf(Date);
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0].where).toEqual({ companyId_key: { companyId: COMPANY, key: 'tax.definition.used' } });
+  it('markUsed sets lockedAt once (replaces the old Setting workaround)', async () => {
+    const { service, prisma } = makeMocks(UNLOCKED);
+    const lockedAt = await service.markUsed(COMPANY, 'def-1');
+    expect(lockedAt).toBeInstanceOf(Date);
+    expect(prisma.taxDefinition.update).toHaveBeenCalledWith({
+      where: { id: 'def-1' },
+      data: { lockedAt: expect.any(Date) },
+    });
   });
 
   it('markUsed is one-way — the first stamp is kept', async () => {
-    const original = new Date('2026-09-01T10:00:00Z');
-    const { service, upserts } = makeMocks({ 'def-1': original.toISOString() });
-    const usedAt = await service.markUsed(COMPANY, 'def-1');
-    expect(usedAt.toISOString()).toBe(original.toISOString());
-    expect(upserts).toHaveLength(0); // no write — already stamped
+    const { service, prisma } = makeMocks(LOCKED);
+    const lockedAt = await service.markUsed(COMPANY, 'def-1');
+    expect(lockedAt.toISOString()).toBe(LOCKED_AT.toISOString());
+    expect(prisma.taxDefinition.update).not.toHaveBeenCalled();
   });
 
-  it('updating the rate after use is forbidden', async () => {
-    const { service } = makeMocks({ 'def-1': new Date().toISOString() });
+  it('markUsed works inside a transaction client (tx passed through)', async () => {
+    const tx = {
+      taxDefinition: {
+        findUnique: jest.fn().mockResolvedValue(UNLOCKED),
+        update: jest.fn(async (args: { data: Record<string, unknown> }) => ({
+          ...UNLOCKED,
+          ...args.data,
+        })),
+      },
+    };
+    const service = new TaxDefinitionService(tx as never, { record: jest.fn() } as never);
+    const lockedAt = await service.markUsed(COMPANY, 'def-1', tx as never);
+    expect(lockedAt).toBeInstanceOf(Date);
+    expect(tx.taxDefinition.update).toHaveBeenCalled();
+  });
+
+  it('updating the rate after lock is forbidden', async () => {
+    const { service, prisma } = makeMocks(LOCKED);
     await expect(
-      service.update(
-        COMPANY,
-        'def-1',
-        { rate: 10 },
-        { id: 'u1', username: 'admin' },
-        {},
-      ),
+      service.update(COMPANY, 'def-1', { rate: 10 }, { id: 'u1', username: 'admin' }, {}),
     ).rejects.toBeInstanceOf(ForbiddenError);
     await expect(
-      service.update(
-        COMPANY,
-        'def-1',
-        { rate: 10 },
-        { id: 'u1', username: 'admin' },
-        {},
-      ),
+      service.update(COMPANY, 'def-1', { rate: 10 }, { id: 'u1', username: 'admin' }, {}),
+    ).rejects.toMatchObject({ message: 'TAX_DEFINITION_IMMUTABLE' });
+    expect(prisma.taxDefinition.update).not.toHaveBeenCalled();
+  });
+
+  it('updating the code or name after lock is forbidden', async () => {
+    const { service } = makeMocks(LOCKED);
+    await expect(
+      service.update(COMPANY, 'def-1', { code: 'VAT_10' }, { id: 'u1', username: 'admin' }, {}),
+    ).rejects.toMatchObject({ message: 'TAX_DEFINITION_IMMUTABLE' });
+    await expect(
+      service.update(COMPANY, 'def-1', { name: 'new name' }, { id: 'u1', username: 'admin' }, {}),
     ).rejects.toMatchObject({ message: 'TAX_DEFINITION_IMMUTABLE' });
   });
 
-  it('renaming (non-rate fields) stays allowed after use', async () => {
-    const { service, prisma } = makeMocks({ 'def-1': new Date().toISOString() });
+  it('toggling isActive stays allowed after lock (but no unlock: lockedAt is not writable)', async () => {
+    const { service, prisma } = makeMocks(LOCKED);
+    const updated = await service.update(
+      COMPANY,
+      'def-1',
+      { isActive: false },
+      { id: 'u1', username: 'admin' },
+      {},
+    );
+    expect(updated.isActive).toBe(false);
+    expect(prisma.taxDefinition.update).toHaveBeenCalledWith({
+      where: { id: 'def-1' },
+      data: { code: undefined, name: undefined, rate: undefined, isActive: false },
+    });
+  });
+
+  it('before lock, rate/name/code changes are allowed', async () => {
+    const { service } = makeMocks(UNLOCKED);
     await expect(
-      service.update(COMPANY, 'def-1', { name: 'new name' }, { id: 'u1', username: 'admin' }, {}),
+      service.update(
+        COMPANY,
+        'def-1',
+        { rate: 10, name: 'نرخ جدید' },
+        { id: 'u1', username: 'admin' },
+        {},
+      ),
     ).resolves.toBeTruthy();
-    expect(prisma.taxDefinition.update).toHaveBeenCalled();
   });
 
   it('a new definition carries the new rate', async () => {
-    const { service, prisma } = makeMocks({ 'def-1': new Date().toISOString() });
+    const { service, prisma } = makeMocks(LOCKED);
     const created = await service.create(
       COMPANY,
       { code: 'VAT_10', name: 'ارزش افزوده ۱۰٪', rate: 10 },

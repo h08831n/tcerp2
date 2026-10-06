@@ -16,7 +16,7 @@ import { UsersService } from './users.service';
 import {
   CreateUserDto,
   ResetPasswordDto,
-  SetUserRolesDto,
+  SetUserCompanyRolesDto,
   UpdateUserDto,
   UserQueryDto,
 } from './users.dto';
@@ -86,14 +86,15 @@ export class UsersController {
     return this.usersService.resetPassword(id, dto, actor, this.ctx(request));
   }
 
-  @Put(':id/roles')
+  @Put(':id/companies/:companyId/roles')
   @RequirePermissions('users.edit')
-  setRoles(
+  setCompanyRoles(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: SetUserRolesDto,
+    @Param('companyId', ParseUUIDPipe) companyId: string,
+    @Body() dto: SetUserCompanyRolesDto,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
-    return this.usersService.setRoles(id, dto, actor, this.ctx(request));
+    return this.usersService.setCompanyRoles(id, companyId, dto, actor, this.ctx(request));
   }
 }

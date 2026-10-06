@@ -60,11 +60,6 @@ export class CreateUserDto {
   @IsString()
   @MaxLength(64)
   timezone?: string;
-
-  @IsOptional()
-  @IsArray()
-  @IsUUID('4', { each: true })
-  roleIds?: string[];
 }
 
 export class UpdateUserDto {
@@ -117,7 +112,11 @@ export class ResetPasswordDto {
   password: string;
 }
 
-export class SetUserRolesDto {
+/**
+ * Mini-Gate #1: roles are assigned PER COMPANY. Replaces the old global
+ * PUT /users/:id/roles with PUT /users/:id/companies/:companyId/roles.
+ */
+export class SetUserCompanyRolesDto {
   @IsArray()
   @IsUUID('4', { each: true })
   roleIds: string[];
