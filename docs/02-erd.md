@@ -15,13 +15,16 @@ Conventions (apply to every table, including Phase-2 modules):
   company-specific role bindings are supported through `user_companies` (see §Identity).
   All "natural" unique constraints are company-scoped (see the constraint table below).
 - **Optimistic locking**: `version INT` on concurrently-edited documents (e.g. `journal_entries`,
-  `party_operational_balances`).
+  `party_operational_balances`) and on the Phase 3B product catalog entities
+  (`product_categories`, `brands`, `product_templates`, `product_variants`).
 - **Phase-N FKs**: columns whose target tables land with their own phase (Party → Phase 3,
   Product → Phase 3, Sales/Purchase documents & lines → Phase 4, Tax invoices → Phase 8) exist
   now as bare UUIDs so corrected relations never need renumbering. They are marked
   **"FK in Phase N"** below; the FK constraints are added by those phases' migrations.
   Ground truth for field names: `apps/backend/prisma/schema.prisma`
-  (migrations `20241006000000_correction_gate` + `20241006120000_party_operational_balance`).
+  (migrations `20241006000000_correction_gate`, `20241006120000_party_operational_balance`,
+  `20241006150000_mini_gate`, `20241006170000_phase3a_party_crm`,
+  `20241007000000_p3a_corrections`, `20241007100000_phase3b_product_catalog`).
 
 ## Diagrams by bounded context
 
@@ -81,6 +84,7 @@ erDiagram
     PARTY ||--o{ FINANCIAL_RESPONSIBILITY : "member of group"
     PARTY ||--o{ FINANCIAL_RESPONSIBILITY : "responsible party"
     PARTY ||--o{ PARTY_OPERATIONAL_BALANCE : "one cached balance per (company, party)"
+    PARTY ||--o{ SUPPLIER_PRODUCT : "supplier mappings (real FK, Phase 3B)"
     USER ||--o{ PARTY : "owner_user_id"
     USER ||--o{ ACTIVITY : "assigned_to / created_by"
     ACTIVITY }o--|| ACTIVITY_TYPE : "dynamic types"
@@ -88,41 +92,91 @@ erDiagram
 
 `PARTY.role` is a multi-valued relation (a company can be CUSTOMER and SUPPLIER simultaneously).
 Unique: normalized mobile (exact-duplicate block), `national_id`, `economic_code`.
-Party tables land in **Phase 3**; `PARTY_OPERATIONAL_BALANCE` already exists
+Party tables landed in **Phase 3A** (commit `1f57758`); the 3A corrective pass (`f32fe7f`)
+added pg_trgm search + lightweight grid projection, company-member owners, company-scoped
+team scopes and **transactional audit atomicity** (`AuditService.recordTx(tx)` — audit rows
+are written inside the mutation transaction; failure propagates and rolls back both).
+These are service-level concerns: no schema change, but see the p3a-corrections partial
+unique indexes in the index table below. `PARTY_OPERATIONAL_BALANCE` exists
 (`UNIQUE(company_id, party_id)`, `balance NUMERIC(20,4)`, optimistic `version`).
 
 ### Product & Pricing
 
+Implemented in **Phase 3B** (`20241007100000_phase3b_product_catalog`, commit `2989f4f`);
+ground truth `apps/backend/prisma/schema.prisma` (Product Catalog section) and
+`apps/backend/src/products/*`.
+
 ```mermaid
 erDiagram
-    PRODUCT_CATEGORY ||--o{ PRODUCT_CATEGORY : "hierarchical parent"
-    BRAND ||--o{ PRODUCT_TEMPLATE : has
-    PRODUCT_TEMPLATE ||--o{ PRODUCT_VARIANT : "1:N variants"
+    PRODUCT_CATEGORY ||--o{ PRODUCT_CATEGORY : "hierarchical parent (cycle-guarded)"
+    BRAND |o--o{ PRODUCT_TEMPLATE : has
+    BRAND }o--o| FILE_ATTACHMENT : "logo_attachment_id"
     PRODUCT_TEMPLATE }o--|| PRODUCT_CATEGORY : belongs
-    PRODUCT_TEMPLATE ||--o{ TEMPLATE_ATTRIBUTE : "attribute lines"
-    ATTRIBUTE ||--o{ ATTRIBUTE_VALUE : "1:N values"
-    TEMPLATE_ATTRIBUTE }o--|| ATTRIBUTE : uses
-    PRODUCT_VARIANT }o--o{ ATTRIBUTE_VALUE : "variant values"
     UOM_CATEGORY ||--o{ UOM : has
-    UOM ||--o{ UOM_CONVERSION : "ratio to base"
-    PRODUCT_VARIANT }o--|| UOM : "base uom"
-    PARTY ||--o{ SUPPLIER_PRODUCT : "supplier_party_id (FK in Phase 3)"
+    UOM }o--|| UOM : "conversion_ratio vs the one base unit"
+    PRODUCT_TEMPLATE ||--o{ PRODUCT_TEMPLATE_ATTRIBUTE : "attribute lines"
+    ATTRIBUTE ||--o{ ATTRIBUTE_VALUE : "1:N values"
+    PRODUCT_TEMPLATE_ATTRIBUTE }o--|| ATTRIBUTE : uses
+    PRODUCT_TEMPLATE ||--o{ PRODUCT_VARIANT : "1:N variants"
+    PRODUCT_VARIANT ||--o{ VARIANT_ATTRIBUTE_VALUE : "combination map"
+    VARIANT_ATTRIBUTE_VALUE }o--|| ATTRIBUTE : attribute
+    VARIANT_ATTRIBUTE_VALUE }o--|| ATTRIBUTE_VALUE : value
+    PRODUCT_VARIANT }o--o| UOM : "default_uom_id"
+    PRODUCT_TEMPLATE }o--o| UOM : "default sales/purchase uom"
+    PRODUCT_TEMPLATE }o--o| TAX_DEFINITION : "default_tax_definition_id"
+    PARTY ||--o{ SUPPLIER_PRODUCT : "supplier_party_id (real FK, SUPPLIER role)"
     SUPPLIER_PRODUCT }o--o| PRODUCT_VARIANT : "mapping_level=VARIANT"
     SUPPLIER_PRODUCT }o--o| PRODUCT_TEMPLATE : "mapping_level=TEMPLATE"
     SUPPLIER_PRODUCT }o--o| PRODUCT_CATEGORY : "mapping_level=CATEGORY"
-    PRODUCT_VARIANT ||--o{ DAILY_PRICE : "1:N price history"
-    USER ||--o{ DAILY_PRICE : "set by"
-    DAILY_PRICE ||--o{ PUBLISH_BATCH_ITEM : published in
-    PUBLISH_BATCH ||--o{ PUBLISH_BATCH_ITEM : "channel jobs"
-    TAX_DEFINITION ||--o{ SALES_TAX_INVOICE_LINE : "tax_definition_id + tax_rate_snapshot (FK in Phase 8)"
+    PRODUCT_VARIANT ||--o{ DAILY_PRICE : "1:N price history (Phase 5)"
+    USER ||--o{ DAILY_PRICE : "set by (Phase 5)"
+    DAILY_PRICE ||--o{ PUBLISH_BATCH_ITEM : "published in (Phase 5)"
+    PUBLISH_BATCH ||--o{ PUBLISH_BATCH_ITEM : "channel jobs (Phase 5)"
 ```
 
-`DAILY_PRICE`: unique `(product_variant_id, date, source)`; full history retained.
+- **ProductCategory**: hierarchical (`parent_id`, arbitrary depth); moving a category under
+  itself or a descendant is blocked (422 `CATEGORY_CYCLE`, service-level cycle guard);
+  `UNIQUE(company_id, code)`; bilingual `name_fa`/`name_en`; optimistic `version`.
+- **Brand**: `logo_attachment_id` → `file_attachments` (validated same-company via the files
+  module); `UNIQUE(company_id, code)`; GIN trgm index on `name_fa`; optimistic `version`.
+- **UOM engine** (3B): `UomCategory` + `Uom` with `conversion_ratio DECIMAL(20,6)` measured
+  against the category's base unit — **exactly one** `is_base_unit` per category enforced by
+  the partial unique `uoms_base_unit_uniq (category_id) WHERE is_base_unit` plus the service
+  (`UOM_BASE_UNIT_EXISTS`). Cross-category conversion is blocked (422
+  `UOM_CATEGORY_MISMATCH`); `POST /api/products/uom/convert` uses Decimal arithmetic only.
+  `UomConversionService.convertWithProductWeight` handles `weight_per_unit`-carrying variants
+  (used by later phases). No separate `UomConversion` table — ratios live on `uoms`.
+- **Attribute / AttributeValue**: fully dynamic (REQUIREMENTS §5); `UNIQUE(company_id, code)`
+  on attributes, `UNIQUE(attribute_id, code)` on values; optional `numeric_value
+  DECIMAL(20,6)` for numeric attributes.
+- **ProductTemplate**: Odoo-style commercial family — `category_id` (required),
+  `brand_id?`, `default_sales_uom_id?` / `default_purchase_uom_id?`,
+  `default_sales_price NUMERIC(20,4)`, `default_tax_definition_id?` (FK → `tax_definitions`),
+  `product_type (STORABLE|CONSUMABLE|SERVICE)`, `is_sellable`/`is_purchasable`,
+  optimistic `version`; `UNIQUE(company_id, internal_code)`.
+- **ProductTemplateAttribute**: `(template_id, attribute_id)` UNIQUE with `display_order`,
+  `creates_variants` (defines the variant space), `is_required`.
+- **ProductVariant**: `UNIQUE(company_id, sku)`; `weight_per_unit NUMERIC(18,4)?`,
+  `default_uom_id?`, optimistic `version`. Variants are generated in ONE transaction from the
+  template's `createsVariants` attributes — existing identical combinations are **skipped with
+  a report** (`{created[], skipped[]}`), never duplicated or mutated; SKU collisions are
+  auto-suffixed `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`.
+- **VariantAttributeValue**: explicit relation rows (no JSON) — **one value per attribute per
+  variant**: `UNIQUE(variant_id, attribute_id)` and `UNIQUE(variant_id, attribute_value_id)`.
+- **SupplierProduct**: now carries **real FKs** — `supplier_party_id` → `parties`
+  (supplier must hold the SUPPLIER role in the same company, else 422 `NOT_A_SUPPLIER`),
+  and the level FKs → `product_variants` / `product_templates` / `product_categories`
+  (all validated same-company).
+
+`DAILY_PRICE`, `PUBLISH_BATCH(_ITEM)` and `TAX_PRODUCT` are **future** (Phase 5 daily pricing +
+publishing; `TAX_PRODUCT` with the Phase 8 tax/Moadian module) — kept in the diagram as
+planned nodes only; the Phase 5 `DailyPrice` engine now references **real** `ProductVariant`
+rows.
 
 **SupplierProduct is genuinely three-level** (Correction Gate #6): exactly one of
 `product_variant_id` / `product_template_id` / `category_id` is set, enforced by DB CHECK
-`supplier_products_exactly_one_level_chk` (mapping_level must match the one non-null FK).
-Indexes: `(company_id, supplier_party_id)`.
+`supplier_products_exactly_one_level_chk` (mapping_level must match the one non-null FK) and
+again in the service. Indexes: `(company_id, supplier_party_id)` plus per-target indexes.
 
 ### Sales / Procurement / Loading
 
@@ -321,14 +375,15 @@ no longer holds (e.g. quotation confirmed before 3-day follow-up).
 | Company → Team / Setting / Sequence / IntegrationConfig / NotificationRule / TaxDefinition / BankAccount / ChartOfAccount / JournalEntry / Receipt / Payment / BankTransfer / Check / Claim / Loading / WorkflowDefinition / PortalAccount | 1:N (mandatory company scope) |
 | Company → QueueJob / AuditLog | 1:N, `company_id` nullable (null = platform) |
 | Party → Address / Contact / PartyRole | 1:N |
-| ProductTemplate → ProductVariant | 1:N |
+| ProductTemplate → ProductVariant | 1:N; variant space = template's `createsVariants` attributes; VariantAttributeValue rows give **one value per attribute per variant** |
+| ProductVariant → Uom (default) / Template → sales/purchase Uom | 0..1 each; conversions only inside one UomCategory (Decimal ratio vs the single base unit) |
 | SalesDocument → SalesLine / PurchaseDocument → PurchaseLine | 1:N |
 | Sales ↔ Purchase | **M:N** (`SalesPurchaseAllocation`, line-level, Phase 4) |
 | SalesOrder ↔ SalesTaxInvoice | **M:N** (`SalesTaxInvoiceOrderAllocation`, `UNIQUE` pair, amounts + optional quantity) |
 | PurchaseOrder ↔ PurchaseTaxInvoice | **M:N** (`PurchaseTaxInvoiceOrderAllocation`, same pattern) |
 | PriceRequestLine → SupplierOffer | 1:N |
 | Loading → LoadingLine → LoadingAllocation → Sales/Purchase lines | 1:N → **M:N** (auto-match in 1:1); registered once, shown on both sides |
-| Supplier ↔ Product | three-level mapping (VARIANT/TEMPLATE/CATEGORY, exactly one FK set) |
+| Supplier ↔ Product | three-level mapping (VARIANT/TEMPLATE/CATEGORY, exactly one FK set — **real FKs since 3B**; supplier must hold the SUPPLIER role) |
 | MoadianSubmission → Attempts | 1:N (append-only) |
 | Party ↔ Role | M:N (`PartyRole`, multiple roles per party) |
 | User ↔ Role ↔ Permission | M:N + per-user overrides (system-level) |
@@ -344,12 +399,21 @@ no longer holds (e.g. quotation confirmed before 3-day follow-up).
 |---|---|---|
 | `companies` | PK `id`; `user_companies` PK `(user_id, company_id)` + index `company_id`; `users.default_company_id` FK | multi-company from day one |
 | `users` | UNIQUE `username`, `email`; FK `default_company_id` → `companies` | login + active company |
-| `parties` | UNIQUE `normalized_mobile` (partial, where deleted_at is null); index `national_id`, `economic_code`; trigram/GIN index on name for similarity search | duplicate detection (Phase 3) |
+| `parties` | UNIQUE `normalized_mobile` (partial, where deleted_at is null); index `national_id`, `economic_code`; trigram/GIN index on name for similarity search | duplicate detection (Phase 3A, commit f32fe7f search/projection) |
+| `user_permission_overrides` | partial UNIQUE `user_permission_overrides_platform_uniq (user_id, permission_id) WHERE company_id IS NULL` (p3a_corrections) | one platform-wide override per (user, permission) — PostgreSQL NULL-distinct semantics defeat the plain composite unique |
+| `product_categories` | UNIQUE `(company_id, code)`; index `(company_id, parent_id)`; cycle guard in service (`CATEGORY_CYCLE`) | hierarchical category tree |
+| `brands` | UNIQUE `(company_id, code)`; index `(company_id, name_fa)`; GIN `brands_name_fa_trgm_idx` (`gin_trgm_ops`) | brand lists + trgm-accelerated search |
+| `uom_categories` / `uoms` | UNIQUE `(company_id, code)` / `(company_id, symbol)`; index `(company_id, category_id)`; partial UNIQUE `uoms_base_unit_uniq (category_id) WHERE is_base_unit` | exactly one base unit per UOM category |
+| `attributes` / `attribute_values` | UNIQUE `(company_id, code)` / `(attribute_id, code)`; index `(company_id, active)` / `(attribute_id, active)`; optional `numeric_value DECIMAL(20,6)` | dynamic attribute catalog |
+| `product_templates` | UNIQUE `(company_id, internal_code)`; index `(company_id, name_fa)`, `(company_id, active)`, `(company_id, category_id)`, `(company_id, brand_id)`; GIN `product_templates_name_fa_trgm_idx` (`gin_trgm_ops`) | template lists + trgm-accelerated search over name_fa/name_en/internal_code |
+| `product_template_attributes` | UNIQUE `(template_id, attribute_id)`; index `(template_id, display_order)` | ordered variant-defining attribute lines |
+| `product_variants` | UNIQUE `(company_id, sku)`; index `(template_id, active)` | SKU unique per company |
+| `variant_attribute_values` | UNIQUE `(variant_id, attribute_id)`, `(variant_id, attribute_value_id)`; index `attribute_value_id` | one value per attribute per variant |
+| `supplier_products` | index `(company_id, supplier_party_id)`, `product_variant_id`, `product_template_id`, `category_id`; CHECK `supplier_products_exactly_one_level_chk` (exactly one of `product_variant_id`/`product_template_id`/`category_id`, matching `mapping_level`) — **real FKs since 3B** | genuine three-level mapping; supplier SUPPLIER-role validated in service |
 | `sales_documents` | UNIQUE `(company_id, document_number)`; index `(status, date)`, `customer_id`, `salesperson_id` | company-scoped numbering, lists & reports |
 | `purchase_documents` | UNIQUE `(company_id, document_number)`; index `(supplier_id, date)` | same |
 | `daily_prices` | UNIQUE `(product_variant_id, date)`; index `(product_variant_id, date DESC)` | "today's price" lookup |
 | `supplier_offers` | index `(price_request_line_id)`, `(supplier_id, date)` | supplier intelligence |
-| `supplier_products` | index `(company_id, supplier_party_id)`; CHECK `supplier_products_exactly_one_level_chk` (exactly one of `product_variant_id`/`product_template_id`/`category_id`, matching `mapping_level`) | genuine three-level mapping |
 | `settings` | UNIQUE `(company_id, key)` | per-company typed settings |
 | `sequences` | UNIQUE `(company_id, document_type)`; fields `prefix`, `padding`, `reset_cycle` (`NEVER\|FISCAL_YEAR\|JALALI_YEAR\|MONTHLY`), `current_number`, `last_reset_marker`; `SELECT … FOR UPDATE` allocation | concurrency-safe v2 engine; history never renumbered |
 | `integration_configs` | UNIQUE `(company_id, code)`; index `type` | adapter registry |
@@ -367,7 +431,7 @@ no longer holds (e.g. quotation confirmed before 3-day follow-up).
 | `checks` | index `(company_id, status, due_date)` | due-date notifications; bank effect only on CLEARED/PAID |
 | `tax_definitions` | UNIQUE `(company_id, code)` | immutable-after-first-use rates |
 | `workflow_timers` | index `(status, due_at)` | timer dispatcher |
-| `queue_jobs` | UNIQUE `idempotency_key` (nullable); index `(status, priority, scheduled_at)`, `(job_type, status)`; nullable `company_id` | worker claim; BullMQ = runtime, DB = history |
+| `queue_jobs` | UNIQUE `idempotency_key` (nullable); partial UNIQUE `queue_jobs_platform_idempotency_uniq (idempotency_key) WHERE company_id IS NULL` (p3a_corrections); index `(status, priority, scheduled_at)`, `(job_type, status)`; nullable `company_id` | worker claim; BullMQ = runtime, DB = history; platform-level jobs deduped too |
 | `job_executions` | UNIQUE `(job_id, attempt_no)` | append-only attempt history |
 | `audit_logs` | index `(entity_type, entity_id)`, `actor_id`, `company_id`, `created_at`; nullable `company_id` | timeline & review |
 | `file_blobs` | UNIQUE `sha256` | content dedupe |

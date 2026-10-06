@@ -76,6 +76,9 @@ src/
   claims/          operational settlement claims + party operational balance
   tax/             tax definitions (immutable after first use) + M:N allocations
   supplierproduct/ supplier ↔ product 3-level mapping (exactly-one CHECK)
+  products/         Phase 3B catalog: categories, brands, UOM engine +
+                    conversions, dynamic attributes, templates/variants,
+                    supplier mappings
   loading/         loading header + lines + allocations
   workflow-timer/  durable timers executed by the queue (action registry)
   notifications/   notification rules (condition engine) + dispatch service
@@ -165,6 +168,37 @@ are optimistic-locked on `version` (`VERSION_CONFLICT` on mismatch).
 | POST | `/api/parties/:id/score/recompute` (rules from Setting `crm.score_rules`; writes `CustomerScoreHistory` + caches `Party.score/scoreLevel`) | `parties.score.compute` |
 | GET | `/api/parties/:id/score` → `{score, level, metrics, history[]}` | `parties.view` |
 
+### Product catalog (Phase 3B)
+
+Route prefixes: categories and brands are top-level (`/api/categories`,
+`/api/brands`); UOMs are `/api/uoms/*`; everything else lives under the
+`/api/products` prefix (`attributes`, `attribute-values`, `templates`,
+`uom/convert`, `supplier-mappings`). All rows are company-scoped and audited
+in the mutation transaction (`AuditService.recordTx`). List endpoints are
+paginated with `?page&pageSize&search&active` (`active` ∈
+`true`/`false`/`any`, default `true` — archived rows are hidden).
+
+| Method + path | Notes | Permission |
+|---|---|---|
+| POST/GET/GET :id/PATCH/DELETE | `/api/categories` — hierarchical (arbitrary depth `parentId`), unique `code` per company, bilingual `nameFa`/`nameEn`; PATCH moving a category under itself/descendant → 422 `CATEGORY_CYCLE`; DELETE hard-blocks with children/templates (archive via PATCH `active:false`) | `products.create` / `products.view` / `products.edit` / `products.archive` |
+| POST/GET/GET :id/PATCH | `/api/brands` — unique `code`, `logoAttachmentId` optional FK (validated same-company via the files module) | `products.create` / `products.view` / `products.edit` |
+| POST/GET/PATCH | `/api/uoms/categories` — UOM dimension categories | `products.uom.manage` / `products.view` |
+| POST/GET/PATCH | `/api/uoms` — units per category; `symbol` unique per company; exactly one `isBaseUnit` per category (service ConflictError `UOM_BASE_UNIT_EXISTS` + DB partial unique `uoms_base_unit_uniq`); `conversionRatio` Decimal(20,6) vs base | `products.uom.manage` / `products.view` |
+| POST | `/api/products/uom/convert` `{value, fromUomId, toUomId}` → `{value, fromSymbol, toSymbol, categoryId}` — Decimal arithmetic; cross-category → 422 `UOM_CATEGORY_MISMATCH` (product-weight path: `UomConversionService.convertWithProductWeight` for `weightPerUnit`-carrying variants, used by later phases) | `products.view` |
+| POST/GET/PATCH | `/api/products/attributes` + `/api/products/attribute-values` — fully dynamic attributes (code unique per company / per attribute, optional Decimal `numericValue`); values belong to their attribute | `products.attributes.manage` / `products.view` |
+| POST/GET/PATCH/DELETE | `/api/products/templates` — Odoo-style template; FKs (category/brand/UOMs/tax definition) validated same-company, category must be active; GET list is a lightweight projection + grouped `variantsCount` (≤ 3 queries/page, trgm-accelerated `search` over `name_fa`/`name_en`/`internal_code`); GET `:id` full detail (ordered attributes+values, variants+values, UOM summaries); PATCH is optimistic (`version` mismatch → 409 `VERSION_CONFLICT`); DELETE = soft archive (`active:false`) | `products.create` / `products.view` / `products.edit` / `products.archive` |
+| POST/PATCH/DELETE | `/api/products/templates/:id/attributes(/:attributeId)` — `{attributeId, displayOrder?, createsVariants?, isRequired?}`; unique per template; `createsVariants` attributes define the variant space | `products.variants.manage` |
+| POST | `/api/products/templates/:id/variants/preview` — restricted to the template's `createsVariants` attributes; full cartesian product with `skuSuggestion` (`internalCode-valueCode…`) and `existsAlready` markers (deterministic) | `products.variants.manage` |
+| POST | `/api/products/templates/:id/variants/generate` — user-selected subset only; ONE transaction; existing identical combinations are SKIPPED with a report (`{created[], skipped[]}` — skip-with-report, never duplicated); SKU collisions auto-suffix `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`; SKU unique per company; existing variants are never mutated/deleted | `products.variants.manage` |
+| GET | `/api/products/templates/:id/matrix` — `{columns, rows, cells}` for the Phase 4 variant matrix (columns = first createsVariants attribute, rows = the rest, cells = existing variants with their combination map) | `products.view` |
+| POST/GET/PATCH | `/api/products/supplier-mappings` — three-level mapping (VARIANT/TEMPLATE/CATEGORY, exactly one target — service + DB CHECK `supplier_products_exactly_one_level_chk`); supplier must be a same-company Party holding the SUPPLIER role (else 422 `NOT_A_SUPPLIER`); FK targets must belong to the same company | `products.supplier_mapping.manage` / `products.view` |
+
+**Product files**: attach through the central files module
+(`POST /api/files/attachments` etc.) with `entityType` `product_template` /
+`product_variant` and `category` one of
+`catalog` / `technical_specification` / `certificate` / `image` / `other`.
+No new tables — attachments are already company-isolated by the files module.
+
 Pre-existing groups (users, roles + `GET /api/permissions` catalog, teams,
 files, audit — now with optional `?companyId=`) are unchanged; see git history
 for their full tables.
@@ -213,7 +247,10 @@ for their full tables.
   `claims.*`, `treasury.*`, `tax.*`, `supplierproduct.*`, `loading.*`,
   `workflowtimer.*`, `notifications.*`, `integrations.*`, `parties.*`
   (incl. `parties.scope.all` / `parties.scope.team` record scopes),
-  `financialresponsibility.manage`, `timeline.view`.
+  `financialresponsibility.manage`, `timeline.view`,
+  `products.*` (view / create / edit / archive / attributes.manage /
+  variants.manage / uom.manage / supplier_mapping.manage; `salesperson` and
+  `buyer` get `products.view`).
 - System roles: `admin` (all), `salesperson`, `sales_manager`, `buyer`,
   `purchase_manager`, `accountant`, `financial_manager`, `pricing_user`.
 - Chart of accounts: `BANK`, `RECEIVABLE`, `CHECKS_IN_TRANSIT`, `PAYABLE`,
@@ -226,13 +263,14 @@ for their full tables.
 
 ## Tests
 
-`npm test` — 249 tests across 41 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, 251 tests run against
-Postgres and clean up after themselves). Coverage includes the 15
+`npm test` — 359 tests across 66 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, all 359 run against Postgres
+and clean up after themselves). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
 tests (`p3a-01` duplicate normalized phone … `p3a-12` score rules from
-settings) plus Jalali conversion, phone
+settings), the Phase 3B product-catalog acceptance tests (`p3b-01` category
+hierarchy … `p3b-20` restart persistence) plus Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

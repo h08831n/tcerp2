@@ -38,9 +38,13 @@ export async function apiFetch(
   init: RequestInit = {},
   isRetry = false,
 ): Promise<Response> {
+  // Multipart (FormData) bodies must keep the browser-generated
+  // multipart boundary header — never force a JSON content-type on them.
   const headers: Record<string, string> = {
     Accept: "application/json",
-    ...(init.body ? { "Content-Type": "application/json" } : {}),
+    ...(init.body && !(init.body instanceof FormData)
+      ? { "Content-Type": "application/json" }
+      : {}),
     ...(init.headers as Record<string, string> | undefined),
   };
 

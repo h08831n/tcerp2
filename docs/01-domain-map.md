@@ -32,16 +32,27 @@ independent but connected through explicit, auditable relations (Document Flow).
 | Financial Responsibility | Grouping parties under a financially responsible party without merging identities | `FinancialResponsibility` |
 | Activities | Generic activity engine (call, meeting, follow-up…), dynamic types | `Activity` |
 
+Party/CRM tables landed in **Phase 3A** (commit `1f57758`); the corrective pass (`f32fe7f`)
+added pg_trgm-accelerated search + a ≤2-query grid projection for lists, company-member
+owners, company-scoped team record scopes and **transactional audit atomicity**
+(`AuditService.recordTx(tx)` — audit rows are written inside the mutation transaction;
+failure propagates and rolls back both).
+
 ## 3. Product & Pricing
+
+**Implemented in Phase 3B** (commit `2989f4f`, migration `20241007100000_phase3b_product_catalog`):
+categories/brands/UOM engine/attributes/templates/variants/variant matrix/supplier mappings
+are live in `apps/backend/src/products/*`. Daily Pricing, Publishing and Tax Product remain
+future phases.
 
 | Module | Responsibility | Key entities |
 |---|---|---|
-| Product | Odoo-style template + variants, dynamic attributes, hierarchical categories, brands | `ProductTemplate`, `ProductVariant`, `Attribute`, `AttributeValue`, `ProductCategory`, `Brand` |
-| UOM | UOM categories and precise conversion (KG ↔ TON) | `Uom`, `UomCategory`, `UomConversion` |
-| Supplier Product | Supplier↔product mapping, genuinely three-level (variant/template/category, exactly one FK set — DB CHECK) | `SupplierProduct` |
-| Daily Pricing | Per-variant daily price with full history, bulk update engine | `DailyPrice` |
-| Publishing | Publish price batches to Website/Telegram/WhatsApp/Eitaa/Bale/Rubika; per-channel job isolation | `PublishBatch`, `PublishBatchItem` |
-| Tax Product | Separate catalog used only by tax invoices/Moadian | `TaxProduct` |
+| Product | Odoo-style template + variants with **deterministic variant generation** (cartesian preview, one-transaction generate with skip-with-report `{created[], skipped[]}`), dynamic attributes, hierarchical cycle-guarded categories, brands; matrix API for the Phase 4 variant UI | `ProductTemplate`, `ProductVariant`, `Attribute`, `AttributeValue`, `ProductCategory`, `Brand` |
+| UOM | UOM categories with exactly one base unit; precise conversion via Decimal(20,6) `conversion_ratio` vs the base (KG ↔ TON); cross-category conversion blocked (422); product-weight conversion path for `weight_per_unit`-carrying variants | `Uom`, `UomCategory` (no separate conversion table — ratios live on `uoms`) |
+| Supplier Product | Supplier↔product mapping, genuinely three-level (variant/template/category, exactly one FK set — DB CHECK `supplier_products_exactly_one_level_chk`); **real FKs** to Party (3A) and the 3B product tables; supplier must hold the SUPPLIER role (422 `NOT_A_SUPPLIER`) | `SupplierProduct` |
+| Daily Pricing | **Phase 5 (future)**: per-variant daily price with full history, bulk update engine — the engine references the **real** `ProductVariant` rows landed in 3B | `DailyPrice` (not in schema yet) |
+| Publishing | **Phase 5 (future)**: publish price batches to Website/Telegram/WhatsApp/Eitaa/Bale/Rubika; per-channel job isolation | `PublishBatch`, `PublishBatchItem` (not in schema yet) |
+| Tax Product | **Phase 8 (future)**: separate catalog used only by tax invoices/Moadian | `TaxProduct` (not in schema yet) |
 
 ## 4. Sales
 

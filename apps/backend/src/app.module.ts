@@ -19,6 +19,7 @@ import { AccountingModule } from './accounting/accounting.module';
 import { TreasuryModule } from './treasury/treasury.module';
 import { ClaimsModule } from './claims/claims.module';
 import { PartiesModule } from './parties/parties.module';
+import { ProductsModule } from './products/products.module';
 import { TaxModule } from './tax/tax.module';
 import { SupplierProductModule } from './supplierproduct/supplier-product.module';
 import { LoadingModule } from './loading/loading.module';
@@ -55,6 +56,7 @@ import { HealthModule } from './health/health.module';
     TreasuryModule,
     ClaimsModule,
     PartiesModule,
+    ProductsModule,
     TaxModule,
     SupplierProductModule,
     LoadingModule,

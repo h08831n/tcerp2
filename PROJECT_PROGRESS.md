@@ -97,10 +97,53 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 `docs/03-architecture.md`, `docs/REQUIREMENTS.md` (Correction Log appendix), `README.md`,
 `AGENTS.md`.
 
+### Phase 3A — Party/CRM core (commit `1f57758`) + corrective pass (`f32fe7f`) — COMPLETED
+- Party/Contact/Address/PartyRole/PartyPhone/CustomerScoreHistory/FinancialResponsibility/
+  TimelineEvent schema + services + APIs + record-scope-filtered permissions
+  (OWN/TEAM/ALL, backend-enforced) + RTL frontend.
+- **Corrective pass (`f32fe7f`)**:
+  - Party search (pg_trgm) + lightweight grid projection for lists.
+  - Company-member owners; company-scoped team record scopes.
+  - **Audit atomicity**: `AuditService.recordTx(tx)` writes audit rows inside the same
+    transaction as the mutation; failure propagates and rolls back both (propagated-failure
+    pattern).
+  - **Platform-level dedupe** via partial unique indexes
+    (`user_permission_overrides_platform_uniq`, `queue_jobs_platform_idempotency_uniq` —
+    migration `20241007000000_p3a_corrections`): PostgreSQL NULL-distinct semantics mean a
+    plain composite unique cannot enforce a single platform-wide row when `company_id IS NULL`.
+
+### Phase 3B — Product Catalog (commit `2989f4f`, migration `20241007100000_phase3b_product_catalog`) — COMPLETED
+- **Endpoint families**: `/api/categories`, `/api/brands`, `/api/uoms/categories`,
+  `/api/uoms`, `/api/products/uom/convert`, `/api/products/attributes`,
+  `/api/products/attribute-values`, `/api/products/templates` (+ nested
+  `/:id/attributes`, `/:id/variants/preview`, `/:id/variants/generate`, `/:id/matrix`),
+  `/api/products/supplier-mappings`. All company-scoped, permission-guarded, audited in the
+  mutation transaction, paginated lists with archive filtering (`active` flag).
+- **UOM engine**: `UomCategory`/`Uom` with Decimal(20,6) `conversion_ratio` vs the category's
+  single base unit (partial unique `uoms_base_unit_uniq` + service `UOM_BASE_UNIT_EXISTS`);
+  cross-category conversion blocked (422 `UOM_CATEGORY_MISMATCH`); KG↔TON conversion tested;
+  `convertWithProductWeight` path for `weight_per_unit`-carrying variants.
+- **Variant generation engine**: deterministic cartesian preview (`skuSuggestion`,
+  `existsAlready` markers) restricted to `createsVariants` attributes; generate runs in ONE
+  transaction with **skip-with-report** semantics (`{created[], skipped[]}` — existing
+  identical combinations are skipped, never duplicated or mutated); SKU collisions
+  auto-suffix `-2`, `-3` then 409 `VARIANT_SKU_COLLISION`; SKU unique per company.
+- **Matrix API**: `GET /api/products/templates/:id/matrix` → `{columns, rows, cells}` for the
+  Phase 4 variant matrix UI.
+- **Supplier mapping**: three-level VARIANT/TEMPLATE/CATEGORY (service + DB CHECK
+  `supplier_products_exactly_one_level_chk`) with **real FKs** to Party (3A) and the 3B product
+  tables; supplier must be a same-company Party holding the SUPPLIER role (422
+  `NOT_A_SUPPLIER`).
+- **20 p3b spec files** (`apps/backend/src/products/p3b-*.spec.ts`): category hierarchy cycle
+  guard, company isolation, bilingual fields, dynamic attribute creation, attribute ordering,
+  deterministic variant generation, no duplicate combinations, SKU uniqueness, UOM
+  conversions, cross-category block, product-weight conversion, supplier role/target
+  validation, list projection (no N+1), optimistic locking, permission enforcement,
+  audit-rollback atomicity, archive filtering, restart persistence.
+
 ## Current module
-- **Phase 3 is BLOCKED pending owner review** after the Architecture Correction Gate
-  (2026-10-06) — see the Correction Gate section below. Phase 2 was previously verified
-  end-to-end on the live local stack (see Verification below).
+- **Phase 3 (3A CRM + 3B Product Catalog) is COMPLETE.** Next: **Phase 4 — Sales/Purchase**.
+  Phase 2 remains verified end-to-end on the live local stack (see Verification below).
 
 ## Verification log (2026-10-05, live local stack)
 - Docker: `tcerp-postgres` (host port **5433** — 5432 occupied by a local Windows PostgreSQL
@@ -124,17 +167,20 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 > `Receipt`, `Payment`, `BankTransfer`, `Check`, `TaxDefinition`,
 > `SalesTaxInvoiceOrderAllocation`, `PurchaseTaxInvoiceOrderAllocation`,
 > `OperationalSettlementClaim`, `PartyOperationalBalance`) plus core schema-level
-> constraints exist now. Phases 3/4 must **wire the FKs for the bare-UUID columns** already
-> present (`party_id`, `product_variant_id`/`product_template_id`/`category_id`,
-> `sales_document_id`/`purchase_document_id`, `sales_line_id`/`purchase_line_id`,
-> `sales_tax_invoice_id`/`purchase_tax_invoice_id`) — the columns exist precisely so the
-> corrected relations never need renumbering.
+> constraints exist now. Phase 3 **wired its FKs** (supplier mapping carries real FKs to
+> Party and the 3B product tables); the remaining bare-UUID columns
+> (`sales_document_id`/`purchase_document_id`, `sales_line_id`/`purchase_line_id`,
+> loading `product_variant_id`/`uom_id`, `sales_tax_invoice_id`/`purchase_tax_invoice_id`)
+> are wired by **Phases 4/6/8** — the columns exist precisely so the corrected relations
+> never need renumbering.
 
-- Phase 3: CRM (Party/Contacts/Addresses/Customer Score) + Product (templates, variants,
-  attributes, UOM, brands, categories, supplier mapping) — **blocked pending owner review**
-- Phase 4: Sales (Lead/Opportunity/SalesDocument), Purchase, Price Request, Supplier Offers,
-  Document Flow, Sales↔Purchase allocation
-- Phase 5: Daily Pricing + Publishing (channel adapters, per-channel jobs)
+- Phase 3: ~~CRM (Party/Contacts/Addresses/Customer Score) + Product (templates, variants,
+  attributes, UOM, brands, categories, supplier mapping)~~ — **DONE** (3A `1f57758` +
+  3A corrective pass `f32fe7f` + 3B `2989f4f`; see Completed above)
+- Phase 4 — **NEXT**: Sales (Lead/Opportunity/SalesDocument), Purchase, Price Request,
+  Supplier Offers, Document Flow, Sales↔Purchase allocation
+- Phase 5: Daily Pricing + Publishing (channel adapters, per-channel jobs) — `DailyPrice` now
+  references **real** `ProductVariant` rows (FKs landed with 3B)
 - Phase 6: Loading + allocations + inventory (auto stock movements)
 - Phase 7: Accounting core services (CoA, fiscal years, journals, receipts/payments, settlement
   claims, bank statement ordering, checks, reconciliation, opening balances,
@@ -169,6 +215,23 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 8. Performance: pagination + composite indexes from day one, Redis planned for hot reads
    (today's price, permission sets), WebSocket/SSE planned for realtime UI (Phase 9+ wiring,
    envelope already in place).
+9. **Audit atomicity** (3A corrections, applied across 3B): mutations write audit rows in the
+   SAME transaction via `AuditService.recordTx(tx)`; an audit failure propagates and rolls
+   back the mutation too — audit can never be silently skipped.
+10. **Platform-level dedupe via partial unique indexes** (migration `20241007000000_p3a_corrections`):
+    `user_permission_overrides_platform_uniq` and `queue_jobs_platform_idempotency_uniq`
+    (`WHERE company_id IS NULL`) — PostgreSQL NULL-distinct semantics defeat a plain composite
+    unique for platform-wide (null-company) rows, so the DB-level partial uniques close the gap.
+11. **Variant generation = skip-with-report** (3B): generate runs in ONE transaction; existing
+    identical attribute combinations are skipped and reported (`{created[], skipped[]}`),
+    never duplicated or mutated; SKU collisions auto-suffix `-2`, `-3`, then 409
+    `VARIANT_SKU_COLLISION`.
+12. **Route prefixes** (3B): `/api/categories`, `/api/brands`, `/api/uoms/*` are top-level;
+    everything else (attributes, attribute-values, templates with nested attribute/variant/
+    matrix routes, supplier-mappings) lives under `/api/products`.
+13. **Party grid projection ≤2 queries** (3A corrective pass): the relations a grid row needs
+    (primary phone, roles, owner) are fetched in the same `findMany` (no per-row follow-ups,
+    no N+1) plus one `count` — exactly 2 queries per page.
 
 ## Known issues
 - Ports: DB exposed on host **5433** and MinIO on **9100** (already reflected in
@@ -181,6 +244,7 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   shell (fine for now; server middleware can be added later).
 
 ## Next steps
-1. Owner review of the Correction Gate outcome → unblock Phase 3.
-2. Phase 3: Party/CRM + Product schema, services, APIs, permissions, audit, list/form UIs —
-   including the FK migrations for the bare-UUID columns noted above.
+1. Phase 4 — Sales/Purchase: SalesDocument/SalesLine (quotation→order workflow), Purchase
+   Document/Line, Price Request + Supplier Offers, Sales↔Purchase allocation (M:N),
+   Document Flow; wire the bare-UUID FK columns listed above (sales/purchase document &
+   line ids, loading product/uom ids).

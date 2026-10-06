@@ -114,6 +114,15 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'parties.scope.all', module: 'parties', action: 'scope.all', description: 'Record scope: see all parties' },
   { code: 'financialresponsibility.manage', module: 'financialresponsibility', action: 'manage', description: 'Manage financial responsibility groups' },
   { code: 'timeline.view', module: 'timeline', action: 'view', description: 'View party timeline (incl. hidden events with audit rights)' },
+  // product catalog (Phase 3B)
+  { code: 'products.view', module: 'products', action: 'view', description: 'View product catalog (categories, brands, UOMs, attributes, templates, variants)' },
+  { code: 'products.create', module: 'products', action: 'create', description: 'Create categories, brands and product templates' },
+  { code: 'products.edit', module: 'products', action: 'edit', description: 'Edit categories, brands and product templates' },
+  { code: 'products.archive', module: 'products', action: 'archive', description: 'Archive product catalog entries' },
+  { code: 'products.attributes.manage', module: 'products', action: 'attributes.manage', description: 'Manage product attributes and values' },
+  { code: 'products.variants.manage', module: 'products', action: 'variants.manage', description: 'Manage template attributes and generate variants' },
+  { code: 'products.uom.manage', module: 'products', action: 'uom.manage', description: 'Manage UOM categories and units' },
+  { code: 'products.supplier_mapping.manage', module: 'products', action: 'supplier_mapping.manage', description: 'Manage supplier ↔ product mappings' },
 ];
 
 const ROLE_DEFS: {
@@ -133,6 +142,7 @@ const ROLE_DEFS: {
       'claims.view', 'claims.create', 'loading.view',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
+      'products.view',
     ],
   },
   {
@@ -152,7 +162,7 @@ const ROLE_DEFS: {
     code: 'buyer',
     nameFa: 'کارمند خرید',
     nameEn: 'Buyer',
-    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view'],
+    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'products.view'],
   },
   {
     code: 'purchase_manager',

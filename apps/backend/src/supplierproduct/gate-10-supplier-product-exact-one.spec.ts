@@ -114,15 +114,36 @@ describe('10 supplier-product-exact-one', () => {
 
     it('a raw INSERT matching the CHECK succeeds', async () => {
       if (!TEST_INTEGRATION) return;
-      const partyId = testUuid();
-      partyIds.push(partyId);
+      // The 3B migration added real FKs on supplier_products (party, variant,
+      // template, category) — the insert must reference EXISTING rows now.
+      // CATEGORY level needs exactly one target: a real category.
+      const marker = Date.now();
+      const party = await prisma.party.create({
+        data: {
+          companyId: INTEGRATION_COMPANY_ID,
+          type: 'COMPANY',
+          nameFa: `تامین‌کننده گیت۱۰ ${marker}`,
+        },
+      });
+      partyIds.push(party.id);
+      const category = await prisma.productCategory.create({
+        data: {
+          companyId: INTEGRATION_COMPANY_ID,
+          code: `G10-${marker}`,
+          nameFa: 'دسته گیت۱۰',
+        },
+      });
       await expect(
         prisma.$executeRaw`
           INSERT INTO "supplier_products"
-            ("id", "company_id", "supplier_party_id", "mapping_level", "product_variant_id", "created_at", "updated_at")
-          VALUES (gen_random_uuid(), ${INTEGRATION_COMPANY_ID}::uuid, ${partyId}::uuid, 'VARIANT'::"SupplierMappingLevel", gen_random_uuid(), now(), now())
+            ("id", "company_id", "supplier_party_id", "mapping_level", "category_id", "created_at", "updated_at")
+          VALUES (gen_random_uuid(), ${INTEGRATION_COMPANY_ID}::uuid, ${party.id}::uuid, 'CATEGORY'::"SupplierMappingLevel", ${category.id}::uuid, now(), now())
         `,
       ).resolves.toBe(1);
+      // Delete the mapping BEFORE the category: ON DELETE SET NULL would null
+      // the CATEGORY target and re-trigger the exactly-one CHECK.
+      await prisma.supplierProduct.deleteMany({ where: { supplierPartyId: party.id } });
+      await prisma.productCategory.delete({ where: { id: category.id } });
     });
   });
 });
