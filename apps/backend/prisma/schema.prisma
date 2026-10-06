@@ -1041,8 +1041,8 @@ model Uom {
   nameFa          String   @map("name_fa")
   nameEn          String?  @map("name_en")
   symbol          String
-  conversionRatio Decimal  @map("conversion_ratio") @db.Decimal(20, 6)
-  isBaseUnit      Boolean  @default(false) @map("is_base_unit")
+  conversionRatio Decimal  @map("conversion_ratio") @db.Decimal(20, 6) // vs base; > 0 (DB CHECK); base must be exactly 1
+  isBaseUnit      Boolean  @default(false) @map("is_base_unit") // AT MOST one per category (partial unique); conversion blocked until one exists
   active          Boolean  @default(true)
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -1051,6 +1051,7 @@ model Uom {
   category          UomCategory       @relation(fields: [categoryId], references: [id])
   salesTemplates    ProductTemplate[] @relation("TemplateSalesUom")
   purchaseTemplates ProductTemplate[] @relation("TemplatePurchaseUom")
+  weightVariants    ProductVariant[]  @relation("VariantWeightUom")
   variants          ProductVariant[]
 
   @@unique([companyId, symbol])
@@ -1091,8 +1092,9 @@ model AttributeValue {
   displayOrder Int      @default(0) @map("display_order")
   active       Boolean  @default(true)
 
-  attribute     Attribute               @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  attribute     Attribute                       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
   variantValues VariantAttributeValue[]
+  templateSelections ProductTemplateAttributeValue[]
 
   @@unique([attributeId, code])
   @@index([attributeId, active])
@@ -1151,6 +1153,7 @@ model ProductTemplateAttribute {
 
   template  ProductTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
   attribute Attribute       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  selectedValues ProductTemplateAttributeValue[]
 
   @@unique([templateId, attributeId])
   @@index([templateId, displayOrder])
@@ -1164,7 +1167,13 @@ model ProductVariant {
   sku           String
   nameFa        String   @map("name_fa")
   nameEn        String?  @map("name_en")
+  // Canonical sorted "attribute_id=attribute_value_id|..." key — DB-unique per
+  // template so concurrent generation can never create a duplicate combination.
+  combinationKey String  @map("combination_key")
   weightPerUnit Decimal? @map("weight_per_unit") @db.Decimal(18, 4)
+  // Explicit unit for weightPerUnit (required when weightPerUnit is set);
+  // must belong to the company's Weight category (service-validated).
+  weightUomId   String?  @map("weight_uom_id") @db.Uuid
   defaultUomId  String?  @map("default_uom_id") @db.Uuid
   active        Boolean  @default(true)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -1174,12 +1183,33 @@ model ProductVariant {
   company    Company         @relation(fields: [companyId], references: [id])
   template   ProductTemplate @relation(fields: [templateId], references: [id])
   defaultUom Uom?            @relation(fields: [defaultUomId], references: [id])
+  weightUom  Uom?            @relation("VariantWeightUom", fields: [weightUomId], references: [id])
   values     VariantAttributeValue[]
   supplierMappings SupplierProduct[]
 
   @@unique([companyId, sku])
+  @@unique([templateId, combinationKey])
   @@index([templateId, active])
   @@map("product_variants")
+}
+
+// Selected AttributeValues allowed for a template attribute (3B correction #2):
+// the template/matrix/variant generator uses THESE, not every global value.
+
+model ProductTemplateAttributeValue {
+  id                String  @id @default(uuid()) @db.Uuid
+  templateAttributeId String @map("template_attribute_id") @db.Uuid
+  attributeValueId  String  @map("attribute_value_id") @db.Uuid
+  displayOrder      Int     @default(0) @map("display_order")
+  active            Boolean @default(true)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  templateAttribute ProductTemplateAttribute @relation(fields: [templateAttributeId], references: [id], onDelete: Cascade)
+  attributeValue    AttributeValue           @relation(fields: [attributeValueId], references: [id])
+
+  @@unique([templateAttributeId, attributeValueId])
+  @@index([templateAttributeId, displayOrder])
+  @@map("product_template_attribute_values")
 }
 
 // One value per attribute per variant; explicit relations (no JSON).
