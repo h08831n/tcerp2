@@ -69,8 +69,260 @@ model Company {
   defaultUsers       User[]
   userRoleOverrides  UserPermissionOverride[]
   fileAttachments    FileAttachment[]
+  parties            Party[]
+  timelineEvents     TimelineEvent[]
 
   @@map("companies")
+}
+
+// ────────────────────────────── CRM: Party ──────────────────────────────
+// Party is the single central CRM entity: a PERSON or COMPANY that can hold
+// several roles at once (CUSTOMER + SUPPLIER + DRIVER + ...). Always
+// company-scoped. FKs from Sales/Purchase/Loading land in Phase 4/6.
+
+enum PartyType {
+  PERSON
+  COMPANY
+}
+
+enum PartyRoleType {
+  CUSTOMER
+  SUPPLIER
+  DRIVER
+  CARRIER
+  PARTNER
+}
+
+enum PhoneKind {
+  MOBILE
+  PHONE
+  FAX
+  WHATSAPP
+}
+
+model Party {
+  id            String    @id @default(uuid()) @db.Uuid
+  companyId     String    @map("company_id") @db.Uuid
+  type          PartyType
+  nameFa        String    @map("name_fa")
+  nameEn        String?   @map("name_en")
+  internalCode  String?   @map("internal_code")
+
+  // COMPANY fields
+  registrationNumber String? @map("registration_number")
+  nationalId         String? @map("national_id")
+  economicCode       String? @map("economic_code")
+  postalCode         String? @map("postal_code")
+  website            String?
+  email              String?
+
+  // PERSON fields
+  firstName     String?   @map("first_name")
+  lastName      String?   @map("last_name")
+  gender        String?
+  birthDate     DateTime? @map("birth_date") @db.Date
+  nationalCode  String?   @map("national_code")
+
+  // CRM ownership: Party owner (assigned salesperson). Independent from any
+  // future sales-document salesperson (REQUIREMENTS §4).
+  ownerUserId   String?   @map("owner_user_id") @db.Uuid
+  notes         String?
+
+  // Cached customer score (see CustomerScoreHistory); computed, not hand-edited.
+  score         Int?
+  scoreLevel    ScoreLevel? @map("score_level")
+
+  version       Int       @default(1) // optimistic locking
+  archivedAt    DateTime? @map("archived_at") @db.Timestamptz(6)
+  archivedBy    String?   @map("archived_by") @db.Uuid
+  createdBy     String?   @map("created_by") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company    Company                 @relation(fields: [companyId], references: [id])
+  owner      User?                   @relation("PartyOwner", fields: [ownerUserId], references: [id])
+  roles      PartyRole[]
+  phones     PartyPhone[]
+  contacts   Contact[]
+  addresses  Address[]
+  scores     CustomerScoreHistory[]
+  responsibleFor    FinancialResponsibility[] @relation("ResponsibleParty")
+  membershipOf      FinancialResponsibility[] @relation("MemberParty")
+
+  @@unique([companyId, internalCode])
+  @@unique([companyId, nationalId])
+  @@unique([companyId, nationalCode])
+  @@index([companyId, nameFa])
+  @@index([companyId, type, archivedAt])
+  @@index([companyId, ownerUserId])
+  @@map("parties")
+}
+
+// One Party may hold several roles simultaneously (unique per pair).
+model PartyRole {
+  id       String        @id @default(uuid()) @db.Uuid
+  partyId  String        @map("party_id") @db.Uuid
+  role     PartyRoleType
+  since    DateTime      @default(now()) @db.Timestamptz(6)
+  notes    String?
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, role])
+  @@map("party_roles")
+}
+
+// Multi-phone model with a normalized canonical value. Exact duplicate
+// normalized MOBILE within a company is blocked by a partial unique index
+// (parties_mobile_uniq, added in migration); landlines may repeat.
+model PartyPhone {
+  id              String    @id @default(uuid()) @db.Uuid
+  companyId       String    @map("company_id") @db.Uuid
+  partyId         String    @map("party_id") @db.Uuid
+  kind            PhoneKind @default(MOBILE)
+  rawValue        String    @map("raw_value")
+  normalizedValue String    @map("normalized_value")
+  isPrimary       Boolean   @default(false) @map("is_primary")
+  extension       String?
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId])
+  @@index([companyId, normalizedValue])
+  @@map("party_phones")
+}
+
+model Contact {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  partyId   String   @map("party_id") @db.Uuid
+  name      String
+  position  String?
+  email     String?
+  isPrimary Boolean  @default(false) @map("is_primary")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  party  Party          @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  phones ContactPhone[]
+
+  @@index([partyId])
+  @@map("contacts")
+}
+
+model ContactPhone {
+  id              String    @id @default(uuid()) @db.Uuid
+  contactId       String    @map("contact_id") @db.Uuid
+  kind            PhoneKind @default(MOBILE)
+  rawValue        String    @map("raw_value")
+  normalizedValue String    @map("normalized_value")
+  isPrimary       Boolean   @default(false) @map("is_primary")
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([contactId])
+  @@map("contact_phones")
+}
+
+enum AddressType {
+  MAIN
+  BILLING
+  SHIPPING
+  UNLOADING
+  OFFICE
+  WAREHOUSE
+  OTHER
+}
+
+model Address {
+  id         String      @id @default(uuid()) @db.Uuid
+  companyId  String      @map("company_id") @db.Uuid
+  partyId    String      @map("party_id") @db.Uuid
+  type       AddressType @default(MAIN)
+  country    String      @default("ایران")
+  province   String?
+  city       String?
+  postalCode String?     @map("postal_code")
+  line       String
+  isPrimary  Boolean     @default(false) @map("is_primary")
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId])
+  @@map("addresses")
+}
+
+enum ScoreLevel {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+  VIP
+}
+
+// Append-only score computation history. Weights/thresholds live in company
+// Settings (crm.score_rules), never hard-coded (REQUIREMENTS §4).
+model CustomerScoreHistory {
+  id             String     @id @default(uuid()) @db.Uuid
+  companyId      String     @map("company_id") @db.Uuid
+  partyId        String     @map("party_id") @db.Uuid
+  score          Int
+  level          ScoreLevel
+  metrics        Json // { operationalProfit, tonnage, purchaseCount, paidAmount, recencyDays, frequency }
+  computedAt     DateTime   @map("computed_at") @db.Timestamptz(6)
+  computedBy     String?    @map("computed_by") @db.Uuid
+  note           String?
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId, computedAt])
+  @@map("customer_score_history")
+}
+
+// A financially responsible party answers for several member parties without
+// merging their identities (REQUIREMENTS §38/§100). A member belongs to at
+// most one group per company.
+model FinancialResponsibility {
+  id                  String   @id @default(uuid()) @db.Uuid
+  companyId           String   @map("company_id") @db.Uuid
+  responsiblePartyId  String   @map("responsible_party_id") @db.Uuid
+  memberPartyId       String   @map("member_party_id") @db.Uuid
+  note                String?
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  responsibleParty Party @relation("ResponsibleParty", fields: [responsiblePartyId], references: [id], onDelete: Cascade)
+  memberParty      Party @relation("MemberParty", fields: [memberPartyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, responsiblePartyId, memberPartyId])
+  @@unique([companyId, memberPartyId])
+  @@index([companyId, responsiblePartyId])
+  @@map("financial_responsibilities")
+}
+
+// Generic timeline foundation (CRM now; every important entity later).
+// Noise control: `visible` lets managers hide event types from the shared view.
+model TimelineEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  type        String // PARTY_CREATED | ROLE_ADDED | PHONE_ADDED | OWNER_CHANGED | CALL | ...
+  title       String
+  description String?
+  data        Json?
+  actorType   String   @default("USER") @map("actor_type") // USER | SYSTEM
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  visible     Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([entityType, entityId, createdAt])
+  @@index([companyId, createdAt])
+  @@map("timeline_events")
 }
 
 // ───────────────────────── Identity & Access ─────────────────────────
@@ -108,6 +360,7 @@ model User {
   overrides       UserPermissionOverride[]
   refreshTokens   RefreshToken[]
   teamMemberships TeamMember[]
+  ownedParties    Party[] @relation("PartyOwner")
 
   @@index([status])
   @@map("users")
