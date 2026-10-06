@@ -28,11 +28,17 @@ describe('p3a-04 multi-role-party', () => {
     const prisma = {
       partyPhone: { findFirst: jest.fn(async () => null) },
       $queryRaw: jest.fn(async () => []),
+      // corr-03: the default owner (the creating actor) is a company member.
+      userCompany: { findFirst: jest.fn(async () => ({ userId: 'u1' })) },
       user: { findUnique: jest.fn(async () => ({ id: 'u1' })) },
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
     const timeline = new TimelineService(prisma as never);
-    const service = new PartiesService(prisma as never, { record: jest.fn() } as never, timeline);
+    const service = new PartiesService(
+      prisma as never,
+      { record: jest.fn(), recordTx: jest.fn() } as never,
+      timeline,
+    );
     return { service, trx };
   }
 
@@ -102,7 +108,7 @@ describe('p3a-04 multi-role-party', () => {
     };
     const service = new PartiesService(
       prisma as never,
-      { record: jest.fn() } as never,
+      { record: jest.fn(), recordTx: jest.fn() } as never,
       new TimelineService(prisma as never),
     );
 

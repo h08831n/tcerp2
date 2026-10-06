@@ -169,6 +169,41 @@ Pre-existing groups (users, roles + `GET /api/permissions` catalog, teams,
 files, audit — now with optional `?companyId=`) are unchanged; see git history
 for their full tables.
 
+### Parties — corrective pass notes (corr-01…corr-06)
+
+- **Search (`?search=`)** ORs every identifier: `nameFa` (ilike over the
+  `parties_name_fa_trgm_idx` GIN trigram index), `nameEn`, `internalCode`,
+  `economicCode`, `registrationNumber` (all ilike contains — code-ish fields),
+  `nationalId` / `nationalCode` (exact equals — unique identity numbers), and
+  phones: a search input that normalizes as an Iranian mobile is matched
+  exactly against `party_phones.normalized_value` AND
+  `contact_phones.normalized_value` (via the party's contacts); any other
+  digit-ish input (≥ 4 digits) is matched as a substring of the normalized
+  values.
+- **List projection** returns exactly the grid fields: `id, type, nameFa,
+  nameEn, internalCode, primaryPhone {kind, normalizedValue} | null, roles[]
+  (codes), owner {id, name} | null (firstName+lastName, else username), score,
+  scoreLevel, archived (bool), version, createdAt, updatedAt` — relations are
+  resolved in the SAME `findMany` (≤ 2 queries per page, no N+1).
+- **Owner assignment** (create / PATCH `ownerUserId` / POST `:id/owner`)
+  requires the target user to be an ACTIVE member of the party's company
+  (`user_companies` ⋈ `users.status='ACTIVE'`); otherwise 422
+  `OWNER_NOT_COMPANY_MEMBER`.
+- **TEAM scope is company-scoped**: `teamUserIds(userId, companyId)` only lets
+  teams of THAT company contribute members (membership or team-manager).
+- **Audit atomicity**: business mutation + TimelineEvent + AuditLog run in ONE
+  transaction. `AuditService.recordTx(tx, entry)` writes with the caller's
+  transaction client and propagates failures so the mutation rolls back when
+  the audit write fails (the legacy `record()` keeps its swallow-and-log
+  behavior for non-transactional callers).
+- **Queue idempotency** is DB-enforced with no race-prone pre-check:
+  `enqueue` inserts first; on P2002 company jobs re-fetch by
+  `(companyId, idempotencyKey)` and platform jobs by the partial unique index
+  `queue_jobs_platform_idempotency_uniq` (idempotency_key WHERE company_id IS
+  NULL), so platform-level dedupe no longer has a concurrency gap. The same
+  migration's `user_permission_overrides_platform_uniq` enforces a single
+  platform-wide (user, permission) override.
+
 ## Seeded data (idempotent, `npm run db:seed`)
 
 - Company `00000000-0000-4000-8000-000000000001` (`SEED_COMPANY_NAME`,

@@ -82,11 +82,15 @@ describe('p3a-09 financial-responsibility-aggregation', () => {
         ),
       },
       timelineEvent: { create: jest.fn(async (args: unknown) => args) },
-      $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn({})),
-    };
+    } as Record<string, unknown>;
+    // corr-05: mutations + timeline + audit run inside one transaction —
+    // the mock passes the same store as the transaction client.
+    (prisma as Record<string, unknown>).$transaction = jest.fn(
+      async (fn: (t: unknown) => unknown) => fn(prisma),
+    );
 
     const timeline = new TimelineService(prisma as never);
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
     const service = new FinancialResponsibilityService(prisma as never, audit as never, timeline);
     return { service, memberships };
   }

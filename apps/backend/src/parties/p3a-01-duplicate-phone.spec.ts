@@ -44,10 +44,12 @@ describe('p3a-01 duplicate-normalized-phone', () => {
         }),
       },
       $queryRaw: jest.fn(async () => []), // no similar-name rows
+      // corr-03: the default owner (the creating actor) is a company member.
+      userCompany: { findFirst: jest.fn(async () => ({ userId: 'u1' })) },
       user: { findUnique: jest.fn(async () => ({ id: 'u1' })) },
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
     const timeline = new TimelineService(prisma as never);
     const service = new PartiesService(prisma as never, audit as never, timeline);
     return { service, prisma, trx, createdParties, findFirstQueries, audit };
@@ -102,7 +104,8 @@ describe('p3a-01 duplicate-normalized-phone', () => {
     );
     expect(createdParties[0]).toMatchObject({ nameFa: 'محمدرضا کریمی' });
     expect(result.warnings).toEqual([]);
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.recordTx).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ entityType: 'party', action: 'CREATE' }),
     );
   });
@@ -124,12 +127,13 @@ describe('p3a-01 duplicate-normalized-phone', () => {
     const prisma = {
       partyPhone: { findFirst: jest.fn(async () => null) },
       $queryRaw: jest.fn(async () => []),
+      userCompany: { findFirst: jest.fn(async () => ({ userId: 'u1' })) },
       user: { findUnique: jest.fn(async () => ({ id: 'u1' })) },
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
     const service = new PartiesService(
       prisma as never,
-      { record: jest.fn() } as never,
+      { record: jest.fn(), recordTx: jest.fn() } as never,
       new TimelineService(prisma as never),
     );
     await expect(

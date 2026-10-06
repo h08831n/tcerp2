@@ -34,10 +34,12 @@ describe('p3a-03 similar-name-candidate', () => {
         query = q;
         return queryRawRows;
       }),
+      // corr-03: the default owner (the creating actor) is a company member.
+      userCompany: { findFirst: jest.fn(async () => ({ userId: 'u1' })) },
       user: { findUnique: jest.fn(async () => ({ id: 'u1' })) },
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
     const timeline = new TimelineService(prisma as never);
     const service = new PartiesService(prisma as never, audit as never, timeline);
     return { service, prisma, createdParties, get query() { return query; } };

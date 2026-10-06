@@ -87,13 +87,45 @@ export class FinancialResponsibilityService {
 
     let membership;
     try {
-      membership = await this.prisma.financialResponsibility.create({
-        data: {
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      membership = await this.prisma.$transaction(async (trx) => {
+        const created = await trx.financialResponsibility.create({
+          data: {
+            companyId,
+            responsiblePartyId: dto.responsiblePartyId,
+            memberPartyId,
+            note: dto.note,
+          },
+        });
+        await this.timeline.record(trx, {
           companyId,
-          responsiblePartyId: dto.responsiblePartyId,
-          memberPartyId,
-          note: dto.note,
-        },
+          entityType: 'PARTY',
+          entityId: memberPartyId,
+          type: 'FINANCIAL_RESPONSIBILITY_ADDED',
+          title: 'افزودن به گروه مسئولیت مالی',
+          data: { partyId: memberPartyId, responsiblePartyId: dto.responsiblePartyId },
+          actorUserId: actor.id,
+        });
+        await this.timeline.record(trx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: dto.responsiblePartyId,
+          type: 'FINANCIAL_RESPONSIBILITY_MEMBER_ADDED',
+          title: 'افزودن عضو به گروه مسئولیت مالی',
+          data: { partyId: dto.responsiblePartyId, memberPartyId },
+          actorUserId: actor.id,
+        });
+        await this.auditService.recordTx(trx, {
+          entityType: 'financial_responsibility',
+          entityId: created.id,
+          action: 'FINANCIAL_RESPONSIBILITY_ADDED',
+          actor,
+          companyId,
+          newValues: { memberPartyId, responsiblePartyId: dto.responsiblePartyId, note: dto.note },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+        return created;
       });
     } catch (error) {
       const mapped = mapUniqueViolation(error, () => ({
@@ -103,34 +135,6 @@ export class FinancialResponsibilityService {
       throw mapped ?? error;
     }
 
-    await this.timeline.record(this.prisma, {
-      companyId,
-      entityType: 'PARTY',
-      entityId: memberPartyId,
-      type: 'FINANCIAL_RESPONSIBILITY_ADDED',
-      title: 'افزودن به گروه مسئولیت مالی',
-      data: { partyId: memberPartyId, responsiblePartyId: dto.responsiblePartyId },
-      actorUserId: actor.id,
-    });
-    await this.timeline.record(this.prisma, {
-      companyId,
-      entityType: 'PARTY',
-      entityId: dto.responsiblePartyId,
-      type: 'FINANCIAL_RESPONSIBILITY_MEMBER_ADDED',
-      title: 'افزودن عضو به گروه مسئولیت مالی',
-      data: { partyId: dto.responsiblePartyId, memberPartyId },
-      actorUserId: actor.id,
-    });
-    await this.auditService.record({
-      entityType: 'financial_responsibility',
-      entityId: membership.id,
-      action: 'FINANCIAL_RESPONSIBILITY_ADDED',
-      actor,
-      companyId,
-      newValues: { memberPartyId, responsiblePartyId: dto.responsiblePartyId, note: dto.note },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return membership;
   }
 
@@ -149,29 +153,31 @@ export class FinancialResponsibilityService {
         partyId: memberPartyId,
       });
     }
-    await this.prisma.financialResponsibility.delete({ where: { id: existing.id } });
-
-    await this.timeline.record(this.prisma, {
-      companyId,
-      entityType: 'PARTY',
-      entityId: memberPartyId,
-      type: 'FINANCIAL_RESPONSIBILITY_REMOVED',
-      title: 'حذف از گروه مسئولیت مالی',
-      data: { partyId: memberPartyId, responsiblePartyId: existing.responsiblePartyId },
-      actorUserId: actor.id,
-    });
-    await this.auditService.record({
-      entityType: 'financial_responsibility',
-      entityId: existing.id,
-      action: 'FINANCIAL_RESPONSIBILITY_REMOVED',
-      actor,
-      companyId,
-      oldValues: {
-        memberPartyId,
-        responsiblePartyId: existing.responsiblePartyId,
-      },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
+    // corr-05: business mutation + timeline + audit in ONE transaction.
+    await this.prisma.$transaction(async (trx) => {
+      await trx.financialResponsibility.delete({ where: { id: existing.id } });
+      await this.timeline.record(trx, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: memberPartyId,
+        type: 'FINANCIAL_RESPONSIBILITY_REMOVED',
+        title: 'حذف از گروه مسئولیت مالی',
+        data: { partyId: memberPartyId, responsiblePartyId: existing.responsiblePartyId },
+        actorUserId: actor.id,
+      });
+      await this.auditService.recordTx(trx, {
+        entityType: 'financial_responsibility',
+        entityId: existing.id,
+        action: 'FINANCIAL_RESPONSIBILITY_REMOVED',
+        actor,
+        companyId,
+        oldValues: {
+          memberPartyId,
+          responsiblePartyId: existing.responsiblePartyId,
+        },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
     return { removed: true, memberPartyId };
   }

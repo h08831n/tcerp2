@@ -11,7 +11,6 @@ import {
   PARTY_ROLE_LABELS,
   PARTY_TYPE_LABELS,
   fetchParties,
-  ownerDisplayName,
   PARTY_ROLES,
   type PartyListItem,
   type PartyListQuery,
@@ -114,7 +113,7 @@ export default function PartiesPage() {
         render: (row) => (
           <div className="flex items-center gap-2">
             <span className="font-medium text-slate-800">{row.nameFa}</span>
-            {row.archivedAt && (
+            {row.archived && (
               <span className="rounded border border-red-200 bg-red-50 px-1 text-[10px] text-red-600">
                 بایگانی
               </span>
@@ -142,11 +141,11 @@ export default function PartiesPage() {
           ),
       },
       {
-        key: "primaryMobile",
+        key: "primaryPhone",
         header: "موبایل اصلی",
         render: (row) => (
           <span dir="ltr" className="block text-start tabular-nums">
-            {row.primaryMobile ? faDigits(row.primaryMobile) : "—"}
+            {row.primaryPhone ? faDigits(row.primaryPhone.normalizedValue) : "—"}
           </span>
         ),
       },
@@ -158,7 +157,7 @@ export default function PartiesPage() {
       {
         key: "owner",
         header: "مالک",
-        render: (row) => ownerDisplayName(row.owner),
+        render: (row) => row.owner?.name ?? "—",
       },
       {
         key: "score",

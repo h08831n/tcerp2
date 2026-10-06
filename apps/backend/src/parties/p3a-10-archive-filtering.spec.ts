@@ -29,12 +29,13 @@ describe('p3a-10 archive-filtering', () => {
         count: jest.fn(async () => 0),
       },
       teamMember: { findMany: jest.fn(async () => []) },
+      team: { findMany: jest.fn(async () => []) },
       partyPhone: { findFirst: jest.fn(async () => null) },
       user: { findUnique: jest.fn(async () => ({ id: 'u1' })) },
       $queryRaw: jest.fn(async () => []),
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
     const service = new PartiesService(
       prisma as never,
       audit as never,
@@ -80,7 +81,8 @@ describe('p3a-10 archive-filtering', () => {
       }),
     );
     expect(timelineEvents.some((e) => e.type === 'PARTY_ARCHIVED')).toBe(true);
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.recordTx).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ entityType: 'party', entityId: 'party-1', action: 'ARCHIVE' }),
     );
   });

@@ -9,6 +9,11 @@ function toAsciiDigits(input: string): string {
     .replace(/[٠-٩]/g, (d) => String(ARABIC_DIGITS.indexOf(d)));
 }
 
+/** Persian/Arabic digits → ASCII (exported for phone-like search probes). */
+export function asciiDigits(input: string): string {
+  return toAsciiDigits(input);
+}
+
 /**
  * Normalize any reasonable Iranian mobile input to the canonical
  * `09XXXXXXXXX` form (REQUIREMENTS §75: `09121234567`, `+989121234567`, …

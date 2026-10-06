@@ -50,26 +50,25 @@ export class QueueService {
   ) {}
 
   /**
-   * Enqueue a job. When `idempotencyKey` is supplied and already known, the
-   * existing job is returned unchanged — no second BullMQ job is added
+   * Enqueue a job. When `idempotencyKey` is supplied and the job already
+   * exists, the existing job is returned — no second BullMQ job is added
    * (idempotency keys on automation/queue paths, REQUIREMENTS §70-71).
    *
-   * Mini-Gate: idempotency is scoped per company — the durable unique is
-   * (companyId, idempotencyKey), so the same key in two different companies
-   * creates two jobs. Platform jobs (companyId null) CANNOT be deduped by the
-   * DB (PostgreSQL unique treats NULL as distinct), so they are deduped here
-   * in the service via findFirst and remain best-effort under concurrent
-   * races.
+   * corr-06 — DB-level idempotency, no race-prone pre-check. We insert FIRST
+   * and resolve races through the unique indexes on P2002:
+   *   - company jobs: the composite unique (companyId, idempotencyKey) rejects
+   *     a duplicate insert;
+   *   - platform jobs (companyId null): the partial unique index
+   *     `queue_jobs_platform_idempotency_uniq` (idempotency_key WHERE
+   *     company_id IS NULL, migration 20241007000000_p3a_corrections) now
+   *     guarantees DB-level dedupe for platform jobs too — PostgreSQL
+   *     NULL-distinct semantics no longer leave a gap.
+   * The loser of a concurrent race re-fetches the winning row by
+   * (companyId, idempotency_key) and returns it unchanged; only the insert
+   * winner hands the row to BullMQ.
    */
   async enqueue(input: EnqueueJobInput): Promise<QueueJob> {
     const companyId = input.companyId ?? null;
-    if (input.idempotencyKey) {
-      const existing = await this.prisma.queueJob.findFirst({
-        where: { companyId, idempotencyKey: input.idempotencyKey },
-      });
-      if (existing) return existing;
-    }
-
     const delayMs = input.delayMs ?? 0;
     const status: QueueJobStatus = delayMs > 0 ? 'SCHEDULED' : 'PENDING';
     let row: QueueJob;
@@ -89,8 +88,9 @@ export class QueueService {
         },
       });
     } catch (error) {
-      // Lost the same-company idempotency race (composite unique
-      // (companyId, idempotencyKey)) — re-fetch and return the winner.
+      // Lost an idempotency race: company jobs hit the composite unique
+      // (companyId, idempotencyKey), platform jobs hit the partial unique
+      // queue_jobs_platform_idempotency_uniq. Re-fetch and return the winner.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002' &&

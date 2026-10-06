@@ -23,6 +23,22 @@ function toJson(value: unknown): Prisma.InputJsonValue | undefined {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
+function auditData(entry: AuditEntry): Prisma.AuditLogUncheckedCreateInput {
+  return {
+    entityType: entry.entityType,
+    entityId: entry.entityId,
+    action: entry.action,
+    companyId: entry.companyId ?? null,
+    actorId: entry.actor?.id ?? null,
+    actorName: entry.actor?.username ?? null,
+    oldValues: toJson(entry.oldValues),
+    newValues: toJson(entry.newValues),
+    reason: entry.reason ?? null,
+    ip: entry.ip ?? null,
+    userAgent: entry.userAgent ?? null,
+  };
+}
+
 /**
  * Central audit trail (REQUIREMENTS §2.1, §110). Never throws to the caller —
  * an audit write failure must not break the business operation; it is logged
@@ -36,21 +52,7 @@ export class AuditService {
 
   async record(entry: AuditEntry): Promise<void> {
     try {
-      await this.prisma.auditLog.create({
-        data: {
-          entityType: entry.entityType,
-          entityId: entry.entityId,
-          action: entry.action,
-          companyId: entry.companyId ?? null,
-          actorId: entry.actor?.id ?? null,
-          actorName: entry.actor?.username ?? null,
-          oldValues: toJson(entry.oldValues),
-          newValues: toJson(entry.newValues),
-          reason: entry.reason ?? null,
-          ip: entry.ip ?? null,
-          userAgent: entry.userAgent ?? null,
-        },
-      });
+      await this.prisma.auditLog.create({ data: auditData(entry) });
     } catch (error) {
       this.logger.error(
         `Failed to record audit entry ${entry.entityType}/${entry.entityId} action=${entry.action}: ${
@@ -58,6 +60,18 @@ export class AuditService {
         }`,
       );
     }
+  }
+
+  /**
+   * corr-05 — atomicity variant: writes the AuditLog row through the
+   * CALLER's transaction client and does NOT open its own transaction.
+   * Unlike `record`, failures here PROPAGATE so that a surrounding
+   * `$transaction` (business mutation + timeline + audit) rolls back as one
+   * atomic unit — the audit trail can never be silently missing from a
+   * committed mutation that opted into atomicity.
+   */
+  async recordTx(tx: Prisma.TransactionClient, entry: AuditEntry): Promise<void> {
+    await tx.auditLog.create({ data: auditData(entry) });
   }
 
   async list(query: AuditQueryDto): Promise<Paginated<AuditLog>> {

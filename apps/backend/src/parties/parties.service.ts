@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { Party, PartyRoleType, PhoneKind, Prisma } from '@prisma/client';
+import {
+  Party,
+  PartyRoleType,
+  PartyType,
+  PhoneKind,
+  Prisma,
+  ScoreLevel,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
@@ -11,7 +18,7 @@ import {
   ValidationError,
 } from '../common/errors';
 import { Paginated } from '../common/dto/pagination.dto';
-import { normalizeIranMobile, normalizePhone } from '../common/utils/phone';
+import { asciiDigits, normalizeIranMobile, normalizePhone } from '../common/utils/phone';
 import { normalizePersianName } from '../common/utils/persian-name';
 import { assertInScope, RecordScope, scopeWhere } from './party-scope';
 import { TimelineService } from './timeline.service';
@@ -68,6 +75,131 @@ const LIST_SELECT = {
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.PartySelect;
+
+// ─────────────────────── grid projection (corr-02) ───────────────────────
+
+/** Owner summary on the party grid: id + display name (firstName+lastName or username). */
+export interface PartyGridOwner {
+  id: string;
+  name: string;
+}
+
+/** Primary phone summary on the party grid. */
+export interface PartyGridPhone {
+  kind: PhoneKind;
+  normalizedValue: string;
+}
+
+/**
+ * corr-02 — the exact GET /api/parties grid projection. Nothing more, nothing
+ * less: a flat row per party with summarized relations (roles as codes, owner
+ * as {id, name}, one primary phone).
+ */
+export interface PartyGridItem {
+  id: string;
+  type: PartyType;
+  nameFa: string;
+  nameEn: string | null;
+  internalCode: string | null;
+  primaryPhone: PartyGridPhone | null;
+  roles: PartyRoleType[];
+  owner: PartyGridOwner | null;
+  score: number | null;
+  scoreLevel: ScoreLevel | null;
+  archived: boolean;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const GRID_SELECT = {
+  id: true,
+  type: true,
+  nameFa: true,
+  nameEn: true,
+  internalCode: true,
+  score: true,
+  scoreLevel: true,
+  version: true,
+  archivedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  owner: { select: { id: true, username: true, firstName: true, lastName: true } },
+  roles: { select: { role: true }, orderBy: { since: 'asc' as const } },
+  // The primary phone is resolved in the SAME query (no N+1): primary flag
+  // wins, then the earliest phone; take: 1 keeps the payload minimal.
+  phones: {
+    select: { kind: true, normalizedValue: true },
+    orderBy: [{ isPrimary: 'desc' as const }, { createdAt: 'asc' as const }],
+    take: 1,
+  },
+} satisfies Prisma.PartySelect;
+
+type GridRow = {
+  id: string;
+  type: PartyType;
+  nameFa: string;
+  nameEn: string | null;
+  internalCode: string | null;
+  score: number | null;
+  scoreLevel: ScoreLevel | null;
+  archivedAt: Date | null;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+  owner: { id: string; username: string; firstName: string | null; lastName: string | null } | null;
+  roles: { role: PartyRoleType }[];
+  phones: { kind: PhoneKind; normalizedValue: string }[];
+};
+
+/** Pure grid-row → grid-item mapper (unit-testable without a DB). */
+export function toPartyGridItem(row: GridRow): PartyGridItem {
+  const owner = row.owner
+    ? {
+        id: row.owner.id,
+        name:
+          [row.owner.firstName, row.owner.lastName].filter(Boolean).join(' ').trim() ||
+          row.owner.username,
+      }
+    : null;
+  return {
+    id: row.id,
+    type: row.type,
+    nameFa: row.nameFa,
+    nameEn: row.nameEn,
+    internalCode: row.internalCode,
+    primaryPhone: row.phones[0]
+      ? { kind: row.phones[0].kind, normalizedValue: row.phones[0].normalizedValue }
+      : null,
+    roles: row.roles.map((r) => r.role),
+    owner,
+    score: row.score,
+    scoreLevel: row.scoreLevel,
+    archived: row.archivedAt !== null,
+    version: row.version,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/**
+ * corr-01 — pure search-input → normalized phone candidates for the party
+ * search. A value that normalizes as an Iranian mobile yields the canonical
+ * `09XXXXXXXXX` (matched exactly against party_phones AND contact_phones
+ * normalized values); any other digit-ish value (≥ 4 digits after separator
+ * stripping, optional leading `+`) is matched as a substring of stored
+ * normalized values. Non-phone inputs yield [].
+ */
+export function phoneSearchCandidates(input: string): string[] {
+  if (typeof input !== 'string' || input.trim().length === 0) return [];
+  try {
+    return [normalizeIranMobile(input)];
+  } catch {
+    // Not an Iranian mobile — probe with the generic digit heuristic below.
+  }
+  const stripped = asciiDigits(input.replace(/\u200c/g, '')).replace(/[\s\-().]/g, '');
+  return /^\+?\d{4,}$/.test(stripped) ? [stripped] : [];
+}
 
 const DETAIL_SELECT = {
   ...LIST_SELECT,
@@ -191,22 +323,51 @@ export class PartiesService {
 
   // ─────────────────────── scope helpers ───────────────────────
 
-  /** User ids sharing a team with `userId` (TEAM scope). */
-  async teamUserIds(userId: string): Promise<string[]> {
-    const memberships = await this.prisma.teamMember.findMany({
-      where: { userId },
-      select: { teamId: true },
+  /**
+   * User ids sharing a team with `userId` (TEAM scope), corr-04: teams are
+   * COMPANY-SCOPED — only teams whose `team.company_id === companyId`
+   * contribute members (the user is a member or the manager of those teams).
+   * Memberships held in teams of OTHER companies never leak across.
+   */
+  async teamUserIds(userId: string, companyId: string): Promise<string[]> {
+    const teams = await this.prisma.team.findMany({
+      where: {
+        companyId,
+        OR: [{ members: { some: { userId } } }, { managerId: userId }],
+      },
+      select: { id: true },
     });
-    if (memberships.length === 0) return [];
+    if (teams.length === 0) return [];
     const rows = await this.prisma.teamMember.findMany({
-      where: { teamId: { in: memberships.map((m) => m.teamId) } },
+      where: { teamId: { in: teams.map((t) => t.id) } },
       select: { userId: true },
     });
     return [...new Set(rows.map((r) => r.userId))];
   }
 
-  private async teamIdsFor(actorScope: ActorScope): Promise<string[]> {
-    return actorScope.scope === 'TEAM' ? this.teamUserIds(actorScope.userId) : [];
+  private async teamIdsFor(companyId: string, actorScope: ActorScope): Promise<string[]> {
+    return actorScope.scope === 'TEAM'
+      ? this.teamUserIds(actorScope.userId, companyId)
+      : [];
+  }
+
+  /**
+   * corr-03 — a party owner must be an ACTIVE member of the party's company
+   * (`user_companies` ⋈ `users.status = 'ACTIVE'`). A globally existing but
+   * non-member (or inactive) user is NEVER accepted as owner.
+   */
+  static async assertOwnerIsCompanyMember(
+    client: Client,
+    companyId: string,
+    ownerUserId: string,
+  ): Promise<void> {
+    const member = await client.userCompany.findFirst({
+      where: { userId: ownerUserId, companyId, user: { status: 'ACTIVE' } },
+      select: { userId: true },
+    });
+    if (!member) {
+      throw new ValidationError('OWNER_NOT_COMPANY_MEMBER', { companyId, ownerUserId });
+    }
   }
 
   private assertScope(
@@ -324,8 +485,8 @@ export class PartiesService {
     companyId: string,
     actorScope: ActorScope,
     query: PartyQueryDto,
-  ): Promise<Paginated<Partial<Party>>> {
-    const teamIds = await this.teamIdsFor(actorScope);
+  ): Promise<Paginated<PartyGridItem>> {
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const where: Prisma.PartyWhereInput = {
       companyId,
       ...scopeWhere(actorScope.scope, actorScope.userId, teamIds),
@@ -339,44 +500,76 @@ export class PartiesService {
     const sortField = ['nameFa', 'createdAt', 'score'].includes(query.sortBy ?? '')
       ? (query.sortBy as 'nameFa' | 'createdAt' | 'score')
       : 'createdAt';
-    const [items, total] = await Promise.all([
+    // corr-02 — efficient grid projection: relations (primary phone, roles,
+    // owner) are fetched in the SAME findMany (no per-row follow-ups, no N+1);
+    // the count makes this exactly 2 queries for the whole page.
+    const [rows, total] = await Promise.all([
       this.prisma.party.findMany({
         where,
-        select: LIST_SELECT,
+        select: GRID_SELECT,
         orderBy: { [sortField]: query.sortDir },
         skip: query.skip,
         take: query.take,
       }),
       this.prisma.party.count({ where }),
     ]);
-    return { items, total, page: query.page, pageSize: query.pageSize };
+    return { items: rows.map(toPartyGridItem), total, page: query.page, pageSize: query.pageSize };
   }
 
+  /**
+   * corr-01 — complete party search (company- and scope-filtered by the
+   * caller's where). OR semantics across every party identifier:
+   *
+   *   - name_fa: ilike contains (REQUIREMENTS: fuzzy variant kept — the
+   *     `parties_name_fa_trgm_idx` GIN trigram index accelerates this ilike;
+   *     the similarity-`%` gate remains a separate check-duplicate concern);
+   *   - name_en, internal_code, economic_code, registration_number: ilike
+   *     contains — code-ish fields, partial/prefix search is the useful
+   *     behavior;
+   *   - national_id, national_code: exact equals — unique identity numbers,
+   *     where a partial match would be meaningless (and they already carry
+   *     company-unique indexes);
+   *   - phones: when the input normalizes as an Iranian mobile → exact match
+   *     on `party_phones.normalized_value` AND
+   *     `contact_phones.normalized_value` (via the party's contacts); any
+   *     other digit-ish input (≥ 4 digits) → substring match on the stored
+   *     normalized values.
+   */
   private searchWhere(search: string): Prisma.PartyWhereInput {
+    const trimmed = search.trim();
     const clauses: Prisma.PartyWhereInput[] = [
       { nameFa: { contains: search, mode: 'insensitive' as const } },
       { nameEn: { contains: search, mode: 'insensitive' as const } },
       { internalCode: { contains: search, mode: 'insensitive' as const } },
+      { economicCode: { contains: search, mode: 'insensitive' as const } },
+      { registrationNumber: { contains: search, mode: 'insensitive' as const } },
     ];
-    let normalizedMobile: string | null = null;
-    try {
-      normalizedMobile = normalizeIranMobile(search);
-    } catch {
-      normalizedMobile = null;
+    if (trimmed) {
+      clauses.push({ nationalId: trimmed });
+      clauses.push({ nationalCode: trimmed });
     }
-    if (normalizedMobile) {
-      clauses.push({ phones: { some: { normalizedValue: { in: [normalizedMobile] } } } });
-    } else {
-      const stripped = search.replace(/[\s\-().\u200c]/g, '');
-      if (stripped) {
-        clauses.push({ phones: { some: { normalizedValue: { contains: stripped } } } });
-      }
+    for (const candidate of phoneSearchCandidates(search)) {
+      const isCanonicalMobile = /^09\d{9}$/.test(candidate);
+      clauses.push({
+        phones: {
+          some: { normalizedValue: isCanonicalMobile ? candidate : { contains: candidate } },
+        },
+      });
+      clauses.push({
+        contacts: {
+          some: {
+            phones: {
+              some: { normalizedValue: isCanonicalMobile ? candidate : { contains: candidate } },
+            },
+          },
+        },
+      });
     }
     return { OR: clauses };
   }
 
   async getById(companyId: string, actorScope: ActorScope, id: string) {
-    const teamIds = await this.teamIdsFor(actorScope);
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const party = await this.prisma.party.findUnique({
       where: { id },
       select: DETAIL_SELECT,
@@ -414,13 +607,8 @@ export class PartiesService {
     const warnings = dto.nameFa ? await this.findSimilarNames(companyId, dto.nameFa) : [];
 
     const ownerUserId = dto.ownerUserId ?? actor.id;
-    const owner = await this.prisma.user.findUnique({
-      where: { id: ownerUserId },
-      select: { id: true },
-    });
-    if (!owner) {
-      throw new ValidationError('Owner user not found', { ownerUserId });
-    }
+    // corr-03: the owner must be an ACTIVE member of THIS company.
+    await PartiesService.assertOwnerIsCompanyMember(this.prisma, companyId, ownerUserId);
 
     const roles = [...new Set(dto.roles ?? [])];
 
@@ -464,6 +652,23 @@ export class PartiesService {
           data: { partyId: created.id, type: created.type, roles },
           actorUserId: actor.id,
         });
+        // corr-05: business mutation + timeline + audit in ONE transaction.
+        await this.auditService.recordTx(trx, {
+          entityType: 'party',
+          entityId: created.id,
+          action: AuditAction.CREATE,
+          actor,
+          companyId,
+          newValues: {
+            type: created.type,
+            nameFa: created.nameFa,
+            roles,
+            phones: phoneRows.map((p) => ({ kind: p.kind, normalizedValue: p.normalizedValue })),
+            ownerUserId,
+          },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
         return created;
       });
     } catch (error) {
@@ -485,22 +690,6 @@ export class PartiesService {
       throw mapped ?? error;
     }
 
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: party.id,
-      action: AuditAction.CREATE,
-      actor,
-      companyId,
-      newValues: {
-        type: party.type,
-        nameFa: party.nameFa,
-        roles,
-        phones: phoneRows.map((p) => ({ kind: p.kind, normalizedValue: p.normalizedValue })),
-        ownerUserId,
-      },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return { party, warnings };
   }
 
@@ -513,7 +702,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    const teamIds = await this.teamIdsFor(actorScope);
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const oldParty = await this.prisma.party.findUnique({ where: { id } });
     if (!oldParty || oldParty.companyId !== companyId) {
       throw new NotFoundError('Party not found', { id });
@@ -556,13 +745,8 @@ export class PartiesService {
       if (dto.ownerUserId === null) {
         newOwnerUserId = null;
       } else {
-        const owner = await this.prisma.user.findUnique({
-          where: { id: dto.ownerUserId },
-          select: { id: true },
-        });
-        if (!owner) {
-          throw new ValidationError('Owner user not found', { ownerUserId: dto.ownerUserId });
-        }
+        // corr-03: the new owner must be an ACTIVE member of THIS company.
+        await PartiesService.assertOwnerIsCompanyMember(this.prisma, companyId, dto.ownerUserId);
         newOwnerUserId = dto.ownerUserId;
       }
       ownerChanged = true;
@@ -614,6 +798,37 @@ export class PartiesService {
           data: { partyId: id, fields: Object.keys(data).filter((k) => k !== 'version') },
           actorUserId: actor.id,
         });
+        // corr-05: business mutation + timeline + audit in ONE transaction.
+        const oldValues: Record<string, unknown> = {};
+        const newValues: Record<string, unknown> = {};
+        for (const key of Object.keys(data)) {
+          oldValues[key] = (oldParty as unknown as Record<string, unknown>)[key];
+          newValues[key] = (data as Record<string, unknown>)[key];
+        }
+        await this.auditService.recordTx(trx, {
+          entityType: 'party',
+          entityId: id,
+          action: AuditAction.UPDATE,
+          actor,
+          companyId,
+          oldValues,
+          newValues,
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+        if (ownerChanged) {
+          await this.auditService.recordTx(trx, {
+            entityType: 'party',
+            entityId: id,
+            action: 'OWNER_CHANGED',
+            actor,
+            companyId,
+            oldValues: { ownerUserId: oldParty.ownerUserId },
+            newValues: { ownerUserId: newOwnerUserId },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          });
+        }
         return updated;
       });
     } catch (error) {
@@ -632,37 +847,6 @@ export class PartiesService {
       throw mapped ?? error;
     }
 
-    const oldValues: Record<string, unknown> = {};
-    const newValues: Record<string, unknown> = {};
-    for (const key of Object.keys(data)) {
-      oldValues[key] = (oldParty as unknown as Record<string, unknown>)[key];
-      newValues[key] = (data as Record<string, unknown>)[key];
-    }
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: AuditAction.UPDATE,
-      actor,
-      companyId,
-      oldValues,
-      newValues,
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
-    if (ownerChanged) {
-      await this.auditService.record({
-        entityType: 'party',
-        entityId: id,
-        action: 'OWNER_CHANGED',
-        actor,
-        companyId,
-        oldValues: { ownerUserId: oldParty.ownerUserId },
-        newValues: { ownerUserId: newOwnerUserId },
-        ip: ctx.ip,
-        userAgent: ctx.userAgent,
-      });
-    }
-
     return this.getById(companyId, actorScope, id);
   }
 
@@ -675,19 +859,14 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    const teamIds = await this.teamIdsFor(actorScope);
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const party = await this.prisma.party.findUnique({ where: { id } });
     if (!party || party.companyId !== companyId) {
       throw new NotFoundError('Party not found', { id });
     }
     this.assertScope(actorScope, teamIds, party);
-    const owner = await this.prisma.user.findUnique({
-      where: { id: dto.userId },
-      select: { id: true },
-    });
-    if (!owner) {
-      throw new ValidationError('Owner user not found', { ownerUserId: dto.userId });
-    }
+    // corr-03: the new owner must be an ACTIVE member of THIS company.
+    await PartiesService.assertOwnerIsCompanyMember(this.prisma, companyId, dto.userId);
 
     await this.prisma.$transaction(async (trx) => {
       const updated = await trx.party.updateMany({
@@ -707,19 +886,20 @@ export class PartiesService {
         data: { partyId: id, oldOwnerUserId: party.ownerUserId, newOwnerUserId: dto.userId },
         actorUserId: actor.id,
       });
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'OWNER_CHANGED',
+        actor,
+        companyId,
+        oldValues: { ownerUserId: party.ownerUserId },
+        newValues: { ownerUserId: dto.userId },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
 
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'OWNER_CHANGED',
-      actor,
-      companyId,
-      oldValues: { ownerUserId: party.ownerUserId },
-      newValues: { ownerUserId: dto.userId },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return this.getById(companyId, actorScope, id);
   }
 
@@ -732,7 +912,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    const teamIds = await this.teamIdsFor(actorScope);
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const party = await this.prisma.party.findUnique({ where: { id } });
     if (!party || party.companyId !== companyId) {
       throw new NotFoundError('Party not found', { id });
@@ -761,19 +941,20 @@ export class PartiesService {
         data: { partyId: id },
         actorUserId: actor.id,
       });
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: AuditAction.ARCHIVE,
+        actor,
+        companyId,
+        oldValues: { archivedAt: party.archivedAt },
+        newValues: { archivedAt: archivedAt.toISOString(), archivedBy: actor.id },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
 
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: AuditAction.ARCHIVE,
-      actor,
-      companyId,
-      oldValues: { archivedAt: party.archivedAt },
-      newValues: { archivedAt: archivedAt.toISOString(), archivedBy: actor.id },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return this.getById(companyId, actorScope, id);
   }
 
@@ -784,7 +965,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    const teamIds = await this.teamIdsFor(actorScope);
+    const teamIds = await this.teamIdsFor(companyId, actorScope);
     const party = await this.prisma.party.findUnique({ where: { id } });
     if (!party || party.companyId !== companyId) {
       throw new NotFoundError('Party not found', { id });
@@ -812,19 +993,20 @@ export class PartiesService {
         data: { partyId: id },
         actorUserId: actor.id,
       });
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'RESTORED',
+        actor,
+        companyId,
+        oldValues: { archivedAt: party.archivedAt },
+        newValues: { archivedAt: null },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
 
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'RESTORED',
-      actor,
-      companyId,
-      oldValues: { archivedAt: party.archivedAt },
-      newValues: { archivedAt: null },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return this.getById(companyId, actorScope, id);
   }
 
@@ -855,6 +1037,17 @@ export class PartiesService {
           data: { partyId: id, role: dto.role },
           actorUserId: actor.id,
         });
+        // corr-05: business mutation + timeline + audit in ONE transaction.
+        await this.auditService.recordTx(trx, {
+          entityType: 'party',
+          entityId: id,
+          action: 'ROLE_ADDED',
+          actor,
+          companyId,
+          newValues: { role: dto.role, notes: dto.notes },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
         return created;
       });
     } catch (error) {
@@ -864,16 +1057,6 @@ export class PartiesService {
       }));
       throw mapped ?? error;
     }
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'ROLE_ADDED',
-      actor,
-      companyId,
-      newValues: { role: dto.role, notes: dto.notes },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return role;
   }
 
@@ -904,16 +1087,17 @@ export class PartiesService {
         data: { partyId: id, role },
         actorUserId: actor.id,
       });
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'ROLE_REMOVED',
-      actor,
-      companyId,
-      oldValues: { role },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'ROLE_REMOVED',
+        actor,
+        companyId,
+        oldValues: { role },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
     return { removed: true, role };
   }
@@ -961,7 +1145,8 @@ export class PartiesService {
         },
         actorUserId: actor.id,
       });
-      await this.auditService.record({
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
         entityType: 'party',
         entityId: id,
         action: 'PHONE_ADDED',
@@ -1002,16 +1187,17 @@ export class PartiesService {
         data: { partyId: id, phoneId, normalizedValue: phone.normalizedValue },
         actorUserId: actor.id,
       });
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'PHONE_REMOVED',
-      actor,
-      companyId,
-      oldValues: { phoneId, normalizedValue: phone.normalizedValue },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'PHONE_REMOVED',
+        actor,
+        companyId,
+        oldValues: { phoneId, normalizedValue: phone.normalizedValue },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
     return { removed: true, phoneId };
   }
@@ -1060,7 +1246,7 @@ export class PartiesService {
         data: { partyId: id, contactId: contact.id },
         actorUserId: actor.id,
       });
-      await this.auditService.record({
+      await this.auditService.recordTx(trx, {
         entityType: 'party',
         entityId: id,
         action: 'CONTACT_ADDED',
@@ -1112,18 +1298,19 @@ export class PartiesService {
         data: { partyId: id, contactId: updated.id },
         actorUserId: actor.id,
       });
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'CONTACT_UPDATED',
+        actor,
+        companyId,
+        oldValues: { contactId, name: existing.name },
+        newValues: dto,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
       return updated;
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'CONTACT_UPDATED',
-      actor,
-      companyId,
-      oldValues: { contactId, name: existing.name },
-      newValues: dto,
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
     });
     return contact;
   }
@@ -1155,16 +1342,17 @@ export class PartiesService {
         data: { partyId: id, contactId },
         actorUserId: actor.id,
       });
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'CONTACT_REMOVED',
-      actor,
-      companyId,
-      oldValues: { contactId, name: existing.name },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'CONTACT_REMOVED',
+        actor,
+        companyId,
+        oldValues: { contactId, name: existing.name },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
     return { removed: true, contactId };
   }
@@ -1207,7 +1395,7 @@ export class PartiesService {
         data: { partyId: id, addressId: address.id, addressType: address.type },
         actorUserId: actor.id,
       });
-      await this.auditService.record({
+      await this.auditService.recordTx(trx, {
         entityType: 'party',
         entityId: id,
         action: 'ADDRESS_ADDED',
@@ -1260,18 +1448,19 @@ export class PartiesService {
         data: { partyId: id, addressId: updated.id },
         actorUserId: actor.id,
       });
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'ADDRESS_UPDATED',
+        actor,
+        companyId,
+        oldValues: { addressId, line: existing.line },
+        newValues: dto,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
       return updated;
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'ADDRESS_UPDATED',
-      actor,
-      companyId,
-      oldValues: { addressId, line: existing.line },
-      newValues: dto,
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
     });
     return address;
   }
@@ -1303,16 +1492,17 @@ export class PartiesService {
         data: { partyId: id, addressId },
         actorUserId: actor.id,
       });
-    });
-    await this.auditService.record({
-      entityType: 'party',
-      entityId: id,
-      action: 'ADDRESS_REMOVED',
-      actor,
-      companyId,
-      oldValues: { addressId, line: existing.line },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
+      // corr-05: business mutation + timeline + audit in ONE transaction.
+      await this.auditService.recordTx(trx, {
+        entityType: 'party',
+        entityId: id,
+        action: 'ADDRESS_REMOVED',
+        actor,
+        companyId,
+        oldValues: { addressId, line: existing.line },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
     });
     return { removed: true, addressId };
   }

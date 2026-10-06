@@ -28,10 +28,13 @@ describe('p3a-08 owner-reassignment-audit', () => {
     const prisma = {
       party: { findUnique: jest.fn(async () => partyRow) },
       teamMember: { findMany: jest.fn(async () => []) },
+      team: { findMany: jest.fn(async () => []) },
+      // corr-03: the owner candidate is an ACTIVE member of the company.
+      userCompany: { findFirst: jest.fn(async () => ({ userId: 'user-new' })) },
       user: { findUnique: jest.fn(async (args: { where: { id: string } }) => ({ id: args.where.id })) },
       $transaction: jest.fn(async (fn: (t: unknown) => unknown) => fn(trx)),
     };
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
     const service = new PartiesService(
       prisma as never,
       audit as never,
@@ -60,7 +63,8 @@ describe('p3a-08 owner-reassignment-audit', () => {
       {},
     );
 
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.recordTx).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         entityType: 'party',
         entityId: 'party-1',
@@ -96,7 +100,7 @@ describe('p3a-08 owner-reassignment-audit', () => {
         {},
       ),
     ).rejects.toMatchObject({ statusCode: 403 });
-    expect(audit.record).not.toHaveBeenCalled();
+    expect(audit.recordTx).not.toHaveBeenCalled();
   });
 
   it('PATCH with ownerUserId and the permission changes the owner (via update)', async () => {
@@ -110,8 +114,8 @@ describe('p3a-08 owner-reassignment-audit', () => {
       { id: 'mgr', username: 'mgr' },
       {},
     );
-    const ownerAudit = audit.record.mock.calls
-      .map((c) => c[0] as Record<string, unknown>)
+    const ownerAudit = audit.recordTx.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
       .find((a) => a.action === 'OWNER_CHANGED');
     expect(ownerAudit).toMatchObject({
       entityType: 'party',

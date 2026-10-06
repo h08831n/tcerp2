@@ -86,19 +86,34 @@ export interface PartyOwner {
   username: string;
 }
 
+/** corr-02: owner summary on the party grid (display name, no extra fields). */
+export interface PartyGridOwner {
+  id: string;
+  name: string;
+}
+
+/** corr-02: primary phone summary on the party grid. */
+export interface PartyGridPhone {
+  kind: PhoneKind;
+  normalizedValue: string;
+}
+
+/** corr-02: exact backend grid projection for GET /api/parties. */
 export interface PartyListItem {
   id: string;
   type: PartyType;
   nameFa: string;
   nameEn?: string | null;
   internalCode?: string | null;
+  primaryPhone: PartyGridPhone | null;
+  roles: PartyRole[];
+  owner: PartyGridOwner | null;
   score: number | null;
   scoreLevel: string | null;
-  archivedAt: string | null;
-  owner: PartyOwner | null;
-  primaryMobile?: string | null;
-  roles: PartyRole[];
+  archived: boolean;
+  version: number;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface PartyPhoneDto {
