@@ -71,6 +71,14 @@ model Company {
   fileAttachments    FileAttachment[]
   parties            Party[]
   timelineEvents     TimelineEvent[]
+  productCategories  ProductCategory[]
+  brands             Brand[]
+  uomCategories      UomCategory[]
+  uoms               Uom[]
+  attributes         Attribute[]
+  productTemplates   ProductTemplate[]
+  productVariants    ProductVariant[]
+  supplierProducts   SupplierProduct[]
 
   @@map("companies")
 }
@@ -148,6 +156,7 @@ model Party {
   scores     CustomerScoreHistory[]
   responsibleFor    FinancialResponsibility[] @relation("ResponsibleParty")
   membershipOf      FinancialResponsibility[] @relation("MemberParty")
+  supplierMappings  SupplierProduct[]
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -619,6 +628,7 @@ model FileAttachment {
 
   fileBlob FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)
   company  Company  @relation(fields: [companyId], references: [id])
+  brandLogos Brand[]
 
   @@index([entityType, entityId])
   @@index([companyId])
@@ -855,6 +865,7 @@ model TaxDefinition {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company @relation(fields: [companyId], references: [id])
+  templates ProductTemplate[]
 
   @@unique([companyId, code])
   @@map("tax_definitions")
@@ -948,9 +959,251 @@ model PurchaseTaxInvoiceOrderAllocation {
   @@map("purchase_tax_invoice_order_allocations")
 }
 
-// ───────────────── Supplier ↔ product mapping ─────────────────
-// Genuinely three-level: exactly one of variant/template/category is set
-// (enforced by CHECK constraint added in migration).
+// ───────────────────────── Product Catalog (3B) ─────────────────────────
+// Odoo-style: ProductTemplate (commercial family) + ProductVariant (SKU).
+// Dynamic attributes define variants; nothing hard-coded. No stock quantity
+// on templates — inventory is auto-movement (Phase 6).
+
+enum ProductType {
+  STORABLE
+  CONSUMABLE
+  SERVICE
+}
+
+model ProductCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  parentId    String?  @map("parent_id") @db.Uuid
+  nameFa      String   @map("name_fa")
+  nameEn      String?  @map("name_en")
+  code        String
+  description String?
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int      @default(1)
+
+  company   Company           @relation(fields: [companyId], references: [id])
+  parent    ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  ProductCategory[] @relation("CategoryTree")
+  templates ProductTemplate[]
+  supplierMappings SupplierProduct[]
+
+  @@unique([companyId, code])
+  @@index([companyId, parentId])
+  @@map("product_categories")
+}
+
+model Brand {
+  id               String   @id @default(uuid()) @db.Uuid
+  companyId        String   @map("company_id") @db.Uuid
+  nameFa           String   @map("name_fa")
+  nameEn           String?  @map("name_en")
+  code             String
+  logoAttachmentId String?  @map("logo_attachment_id") @db.Uuid
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version          Int      @default(1)
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  logoAttachment FileAttachment? @relation(fields: [logoAttachmentId], references: [id])
+  templates      ProductTemplate[]
+
+  @@unique([companyId, code])
+  @@index([companyId, nameFa])
+  @@map("brands")
+}
+
+// UOM engine: conversions only inside the same category; Decimal ratios only.
+
+model UomCategory {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  nameFa    String   @map("name_fa")
+  nameEn    String?  @map("name_en")
+  code      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  uoms    Uom[]
+
+  @@unique([companyId, code])
+  @@map("uom_categories")
+}
+
+model Uom {
+  id              String   @id @default(uuid()) @db.Uuid
+  companyId       String   @map("company_id") @db.Uuid
+  categoryId      String   @map("category_id") @db.Uuid
+  nameFa          String   @map("name_fa")
+  nameEn          String?  @map("name_en")
+  symbol          String
+  conversionRatio Decimal  @map("conversion_ratio") @db.Decimal(20, 6)
+  isBaseUnit      Boolean  @default(false) @map("is_base_unit")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company           Company           @relation(fields: [companyId], references: [id])
+  category          UomCategory       @relation(fields: [categoryId], references: [id])
+  salesTemplates    ProductTemplate[] @relation("TemplateSalesUom")
+  purchaseTemplates ProductTemplate[] @relation("TemplatePurchaseUom")
+  variants          ProductVariant[]
+
+  @@unique([companyId, symbol])
+  @@index([companyId, categoryId])
+  @@map("uoms")
+}
+
+// Dynamic attributes (REQUIREMENTS §5): nothing hard-coded.
+
+model Attribute {
+  id           String   @id @default(uuid()) @db.Uuid
+  companyId    String   @map("company_id") @db.Uuid
+  code         String
+  nameFa       String   @map("name_fa")
+  nameEn       String?  @map("name_en")
+  displayOrder Int      @default(0) @map("display_order")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company            Company                    @relation(fields: [companyId], references: [id])
+  values             AttributeValue[]
+  templateAttributes ProductTemplateAttribute[]
+  variantValues      VariantAttributeValue[]
+
+  @@unique([companyId, code])
+  @@index([companyId, active])
+  @@map("attributes")
+}
+
+model AttributeValue {
+  id           String   @id @default(uuid()) @db.Uuid
+  attributeId  String   @map("attribute_id") @db.Uuid
+  valueFa      String   @map("value_fa")
+  valueEn      String?  @map("value_en")
+  code         String
+  numericValue Decimal? @map("numeric_value") @db.Decimal(20, 6)
+  displayOrder Int      @default(0) @map("display_order")
+  active       Boolean  @default(true)
+
+  attribute     Attribute               @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variantValues VariantAttributeValue[]
+
+  @@unique([attributeId, code])
+  @@index([attributeId, active])
+  @@map("attribute_values")
+}
+
+model ProductTemplate {
+  id            String      @id @default(uuid()) @db.Uuid
+  companyId     String      @map("company_id") @db.Uuid
+  categoryId    String      @map("category_id") @db.Uuid
+  brandId       String?     @map("brand_id") @db.Uuid
+  nameFa        String      @map("name_fa")
+  nameEn        String?     @map("name_en")
+  internalCode  String?     @map("internal_code")
+  description   String?
+  productType   ProductType @default(STORABLE) @map("product_type")
+  isSellable    Boolean     @default(true) @map("is_sellable")
+  isPurchasable Boolean     @default(true) @map("is_purchasable")
+  defaultSalesUomId    String? @map("default_sales_uom_id") @db.Uuid
+  defaultPurchaseUomId String? @map("default_purchase_uom_id") @db.Uuid
+  defaultSalesPrice    Decimal @default(0) @map("default_sales_price") @db.Decimal(20, 4)
+  defaultTaxDefinitionId String? @map("default_tax_definition_id") @db.Uuid
+  active        Boolean     @default(true)
+  createdBy     String?     @map("created_by") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version       Int         @default(1)
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  category       ProductCategory @relation(fields: [categoryId], references: [id])
+  brand          Brand?          @relation(fields: [brandId], references: [id])
+  salesUom       Uom?            @relation("TemplateSalesUom", fields: [defaultSalesUomId], references: [id])
+  purchaseUom    Uom?            @relation("TemplatePurchaseUom", fields: [defaultPurchaseUomId], references: [id])
+  taxDefinition  TaxDefinition?  @relation(fields: [defaultTaxDefinitionId], references: [id])
+  attributes     ProductTemplateAttribute[]
+  variants       ProductVariant[]
+  supplierMappings SupplierProduct[]
+
+  @@unique([companyId, internalCode])
+  @@index([companyId, nameFa])
+  @@index([companyId, active])
+  @@index([companyId, categoryId])
+  @@index([companyId, brandId])
+  @@map("product_templates")
+}
+
+// Which attributes define a template's variants; ordering + semantics flags.
+
+model ProductTemplateAttribute {
+  id              String  @id @default(uuid()) @db.Uuid
+  templateId      String  @map("template_id") @db.Uuid
+  attributeId     String  @map("attribute_id") @db.Uuid
+  displayOrder    Int     @default(0) @map("display_order")
+  createsVariants Boolean @default(true) @map("creates_variants")
+  isRequired      Boolean @default(false) @map("is_required")
+
+  template  ProductTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  attribute Attribute       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, attributeId])
+  @@index([templateId, displayOrder])
+  @@map("product_template_attributes")
+}
+
+model ProductVariant {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  templateId    String   @map("template_id") @db.Uuid
+  sku           String
+  nameFa        String   @map("name_fa")
+  nameEn        String?  @map("name_en")
+  weightPerUnit Decimal? @map("weight_per_unit") @db.Decimal(18, 4)
+  defaultUomId  String?  @map("default_uom_id") @db.Uuid
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version       Int      @default(1)
+
+  company    Company         @relation(fields: [companyId], references: [id])
+  template   ProductTemplate @relation(fields: [templateId], references: [id])
+  defaultUom Uom?            @relation(fields: [defaultUomId], references: [id])
+  values     VariantAttributeValue[]
+  supplierMappings SupplierProduct[]
+
+  @@unique([companyId, sku])
+  @@index([templateId, active])
+  @@map("product_variants")
+}
+
+// One value per attribute per variant; explicit relations (no JSON).
+
+model VariantAttributeValue {
+  id               String @id @default(uuid()) @db.Uuid
+  variantId        String @map("variant_id") @db.Uuid
+  attributeId      String @map("attribute_id") @db.Uuid
+  attributeValueId String @map("attribute_value_id") @db.Uuid
+
+  variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attribute      Attribute      @relation(fields: [attributeId], references: [id])
+  attributeValue AttributeValue @relation(fields: [attributeValueId], references: [id])
+
+  @@unique([variantId, attributeId])
+  @@unique([variantId, attributeValueId])
+  @@index([attributeValueId])
+  @@map("variant_attribute_values")
+}
+
+// ───────────────────── Supplier ↔ product mapping (3B) ─────────────────────
+// Real FKs (Party landed in 3A; product tables above). Three-level mapping,
+// exactly one target set — enforced by supplier_products_exactly_one_level_chk
+// CHECK (Correction Gate migration) and again in the service.
 
 enum SupplierMappingLevel {
   VARIANT
@@ -961,17 +1214,28 @@ enum SupplierMappingLevel {
 model SupplierProduct {
   id                String              @id @default(uuid()) @db.Uuid
   companyId         String              @map("company_id") @db.Uuid
-  supplierPartyId   String              @map("supplier_party_id") @db.Uuid // Party FK lands in Phase 3
+  supplierPartyId   String              @map("supplier_party_id") @db.Uuid
   mappingLevel      SupplierMappingLevel @map("mapping_level")
-  productVariantId  String?             @map("product_variant_id") @db.Uuid // Phase 3 FK
-  productTemplateId String?             @map("product_template_id") @db.Uuid // Phase 3 FK
-  categoryId        String?             @map("category_id") @db.Uuid // Phase 3 FK
+  productVariantId  String?             @map("product_variant_id") @db.Uuid
+  productTemplateId String?             @map("product_template_id") @db.Uuid
+  categoryId        String?             @map("category_id") @db.Uuid
   supplierProductCode String?           @map("supplier_product_code")
+  supplierProductName String?           @map("supplier_product_name")
+  notes             String?
   isActive          Boolean             @default(true) @map("is_active")
   createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company         Company          @relation(fields: [companyId], references: [id])
+  supplierParty   Party            @relation(fields: [supplierPartyId], references: [id])
+  productVariant  ProductVariant?  @relation(fields: [productVariantId], references: [id])
+  productTemplate ProductTemplate? @relation(fields: [productTemplateId], references: [id])
+  category        ProductCategory? @relation(fields: [categoryId], references: [id])
+
   @@index([companyId, supplierPartyId])
+  @@index([productVariantId])
+  @@index([productTemplateId])
+  @@index([categoryId])
   @@map("supplier_products")
 }
 
