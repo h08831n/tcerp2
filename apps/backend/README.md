@@ -139,6 +139,32 @@ routes accept `x-company-id`.
 | GET/POST/PATCH/DELETE | `/api/notifications/rules` | `notifications.view` / `edit` |
 | GET/POST/PATCH/DELETE | `/api/integrations` | `integrations.view` / `create` / `edit` / `delete` |
 
+### Parties / CRM core (Phase 3A)
+
+All party routes are record-scope filtered (backend-enforced): users with
+`parties.scope.all` see every party in the company (`sales_manager` via
+`parties.scope.team` sees their teams'), everyone else only parties they own
+(`ownerUserId`). Out-of-scope reads/writes → 403. Party PATCH/owner/archive
+are optimistic-locked on `version` (`VERSION_CONFLICT` on mismatch).
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| POST | `/api/parties/check-duplicate` `{mobile?, nameFa?, excludePartyId?}` → `{exact?, similar[]}` (pg_trgm ≥ 0.85, warning only) | `parties.view` |
+| POST | `/api/parties` `{type, nameFa, …, phones?, roles?, ownerUserId?}` → 201 `{party, warnings?}` (duplicate normalized MOBILE → 409 `DUPLICATE_PHONE`) | `parties.create` |
+| GET | `/api/parties` `?page&pageSize&search&type&role&ownerUserId&archived&scoreLevel&sortBy&sortDir` | `parties.view` |
+| GET | `/api/parties/:id` (roles, phones, contacts+phones, addresses, owner, score) | `parties.view` |
+| PATCH | `/api/parties/:id` (version-checked; `ownerUserId` change needs `parties.owner.change` + `OWNER_CHANGED` audit/timeline) | `parties.edit` |
+| DELETE | `/api/parties/:id` (soft archive) / POST `/api/parties/:id/restore` | `parties.archive` |
+| POST/DELETE | `/api/parties/:id/roles` `{role}` · `/api/parties/:id/roles/:role` | `parties.role.manage` |
+| POST/DELETE | `/api/parties/:id/phones` `{kind, value, isPrimary?}` · `/api/parties/:id/phones/:phoneId` | `parties.phone.manage` |
+| POST/PATCH/DELETE | `/api/parties/:id/contacts` (+`phones[]`) · `/:id/contacts/:contactId` | `parties.contact.manage` |
+| POST/PATCH/DELETE | `/api/parties/:id/addresses` · `/:id/addresses/:addressId` | `parties.address.manage` |
+| POST | `/api/parties/:id/owner` `{userId}` | `parties.owner.change` |
+| GET | `/api/parties/:id/timeline` `?limit&includeHidden` (hidden rows only for scope-ALL / `audit.view` holders) | `timeline.view` |
+| POST/DELETE/GET | `/api/parties/:id/financial-responsibility` `{responsiblePartyId}` (member uniqueness; GET returns group + consolidated balance from `party_operational_balances`) | `financialresponsibility.manage` |
+| POST | `/api/parties/:id/score/recompute` (rules from Setting `crm.score_rules`; writes `CustomerScoreHistory` + caches `Party.score/scoreLevel`) | `parties.score.compute` |
+| GET | `/api/parties/:id/score` → `{score, level, metrics, history[]}` | `parties.view` |
+
 Pre-existing groups (users, roles + `GET /api/permissions` catalog, teams,
 files, audit — now with optional `?companyId=`) are unchanged; see git history
 for their full tables.
@@ -147,10 +173,12 @@ for their full tables.
 
 - Company `00000000-0000-4000-8000-000000000001` (`SEED_COMPANY_NAME`,
   default «شرکت پیش‌فرض»).
-- 53-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
+- 70-permission catalog: `users.*`, `roles.*`, `teams.*`, `settings.*`,
   `sequences.*`, `audit.view`, `files.*`, `queue.*`, `companies.*`,
   `claims.*`, `treasury.*`, `tax.*`, `supplierproduct.*`, `loading.*`,
-  `workflowtimer.*`, `notifications.*`, `integrations.*`.
+  `workflowtimer.*`, `notifications.*`, `integrations.*`, `parties.*`
+  (incl. `parties.scope.all` / `parties.scope.team` record scopes),
+  `financialresponsibility.manage`, `timeline.view`.
 - System roles: `admin` (all), `salesperson`, `sales_manager`, `buyer`,
   `purchase_manager`, `accountant`, `financial_manager`, `pricing_user`.
 - Chart of accounts: `BANK`, `RECEIVABLE`, `CHECKS_IN_TRANSIT`, `PAYABLE`,
@@ -163,10 +191,13 @@ for their full tables.
 
 ## Tests
 
-`npm test` — 142 tests across 22 suites (4 integration tests auto-skip without
-`TEST_INTEGRATION=1`). Coverage includes the 15 architecture-gate scenarios
-(greppable as `01 company-scoped-sequence-uniqueness` …
-`15 outgoing-check-paid-bank-effect`) plus Jalali conversion, phone
+`npm test` — 249 tests across 41 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, 251 tests run against
+Postgres and clean up after themselves). Coverage includes the 15
+architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
+`15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
+tests (`p3a-01` duplicate normalized phone … `p3a-12` score rules from
+settings) plus Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

@@ -97,6 +97,23 @@ const PERMISSIONS: PermissionSeed[] = [
   // portal accounts (Mini-Gate: customer website links)
   { code: 'portalaccounts.view', module: 'portalaccounts', action: 'view', description: 'View portal accounts' },
   { code: 'portalaccounts.create', module: 'portalaccounts', action: 'create', description: 'Create / remove portal accounts' },
+  // parties / CRM core (Phase 3A). Record scope: parties.scope.all → ALL,
+  // parties.scope.team → TEAM, neither → OWN (own records only).
+  { code: 'parties.view', module: 'parties', action: 'view', description: 'View parties (within record scope)' },
+  { code: 'parties.create', module: 'parties', action: 'create', description: 'Create parties' },
+  { code: 'parties.edit', module: 'parties', action: 'edit', description: 'Edit parties (within record scope)' },
+  { code: 'parties.delete', module: 'parties', action: 'delete', description: 'Delete parties' },
+  { code: 'parties.archive', module: 'parties', action: 'archive', description: 'Archive / restore parties' },
+  { code: 'parties.phone.manage', module: 'parties', action: 'phone.manage', description: 'Add / remove party phones' },
+  { code: 'parties.contact.manage', module: 'parties', action: 'contact.manage', description: 'Manage party contacts' },
+  { code: 'parties.address.manage', module: 'parties', action: 'address.manage', description: 'Manage party addresses' },
+  { code: 'parties.role.manage', module: 'parties', action: 'role.manage', description: 'Grant / remove party roles' },
+  { code: 'parties.owner.change', module: 'parties', action: 'owner.change', description: 'Reassign party owner' },
+  { code: 'parties.score.compute', module: 'parties', action: 'score.compute', description: 'Recompute customer scores' },
+  { code: 'parties.scope.team', module: 'parties', action: 'scope.team', description: 'Record scope: see parties owned by the whole team' },
+  { code: 'parties.scope.all', module: 'parties', action: 'scope.all', description: 'Record scope: see all parties' },
+  { code: 'financialresponsibility.manage', module: 'financialresponsibility', action: 'manage', description: 'Manage financial responsibility groups' },
+  { code: 'timeline.view', module: 'timeline', action: 'view', description: 'View party timeline (incl. hidden events with audit rights)' },
 ];
 
 const ROLE_DEFS: {
@@ -110,13 +127,26 @@ const ROLE_DEFS: {
     code: 'salesperson',
     nameFa: 'کارمند فروش',
     nameEn: 'Salesperson',
-    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view'],
+    // Record scope: OWN implied (no parties.scope.* held).
+    permissions: [
+      'files.view', 'files.upload', 'files.download', 'queue.view',
+      'claims.view', 'claims.create', 'loading.view',
+      'parties.view', 'parties.create', 'parties.edit',
+      'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
+    ],
   },
   {
     code: 'sales_manager',
     nameFa: 'مدیر فروش',
     nameEn: 'Sales Manager',
-    permissions: ['teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view', 'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create'],
+    // Record scope: TEAM via parties.scope.team.
+    permissions: [
+      'teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view',
+      'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create',
+      'parties.view', 'parties.create', 'parties.edit',
+      'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
+      'parties.archive', 'parties.owner.change', 'parties.score.compute', 'parties.scope.team',
+    ],
   },
   {
     code: 'buyer',

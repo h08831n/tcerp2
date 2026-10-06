@@ -1,10 +1,11 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { PermissionsService } from './permissions.service';
 
 /**
- * Shared permissions module: provides PermissionsService to the guards
- * (PermissionsGuard) and to auth (GET /auth/me).
+ * Global shared permissions service: used by PermissionsGuard, auth (/auth/me)
+ * and feature modules that resolve record scopes (e.g. parties).
  */
+@Global()
 @Module({
   providers: [PermissionsService],
   exports: [PermissionsService],

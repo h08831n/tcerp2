@@ -30,7 +30,7 @@ function NavIcon({ d }: { d: string }) {
 
 const NAV_ITEMS: NavItem[] = [
   { label: "داشبورد", href: "/dashboard", icon: <NavIcon d="M3 12h4l2-7 4 14 2-7h6" /> },
-  { label: "مشتریان و تامین‌کنندگان", href: "#", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM21 21v-2a4 4 0 00-3-3.87M15 3.13a4 4 0 010 7.75" /> },
+  { label: "مشتریان و تامین‌کنندگان", href: "/parties", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM21 21v-2a4 4 0 00-3-3.87M15 3.13a4 4 0 010 7.75" /> },
   { label: "محصولات", href: "#", icon: <NavIcon d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16zM3.3 7L12 12l8.7-5M12 22V12" /> },
   { label: "فروش", href: "#", icon: <NavIcon d="M12 8c-1.66 0-3 .9-3 2s1.34 2 3 2 3 .9 3 2-1.34 2-3 2m0-8V7m0 10v1m9-6a9 9 0 11-18 0 9 9 0 0118 0z" /> },
   { label: "خرید", href: "#", icon: <NavIcon d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4H6zM3 6h18M16 10a4 4 0 01-8 0" /> },
@@ -48,6 +48,8 @@ const NAV_ITEMS: NavItem[] = [
 
 const TITLES: Record<string, string> = {
   "/dashboard": "داشبورد",
+  "/parties": "مشتریان و تامین‌کنندگان",
+  "/parties/new": "ثبت مشتری جدید",
 };
 
 /** Blocks rendering until /auth/me resolves; redirects to /login on failure. */
@@ -155,7 +157,9 @@ function AppShell({ children }: { children: ReactNode }) {
           <nav className="flex-1 overflow-y-auto px-2 py-3">
             <ul className="space-y-0.5">
               {NAV_ITEMS.map((item) => {
-                const isActive = item.href !== "#" && pathname === item.href;
+                const isActive =
+                  item.href !== "#" &&
+                  (pathname === item.href || pathname.startsWith(`${item.href}/`));
                 return (
                   <li key={item.label}>
                     {item.href === "#" ? (

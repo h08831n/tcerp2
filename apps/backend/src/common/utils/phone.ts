@@ -41,3 +41,27 @@ export function normalizeIranMobile(input: string): string {
   }
   return s;
 }
+
+/**
+ * Kind-aware normalization used when persisting phone rows (Phase 3A):
+ *   - MOBILE → strict Iranian mobile canonical form (`09XXXXXXXXX`);
+ *   - every other kind → digits unified to ASCII, cosmetic separators
+ *     removed, leading `+` preserved (landlines may repeat across parties).
+ */
+export function normalizePhone(
+  kind: 'MOBILE' | 'PHONE' | 'FAX' | 'WHATSAPP',
+  input: string,
+): string {
+  if (kind === 'MOBILE') {
+    return normalizeIranMobile(input);
+  }
+  if (typeof input !== 'string' || input.trim().length === 0) {
+    throw new ValidationError('Phone number is required');
+  }
+  const s = toAsciiDigits(input.replace(/\u200c/g, '')).trim();
+  const normalized = s.replace(/[\s\-().]/g, '');
+  if (normalized.length === 0) {
+    throw new ValidationError('Invalid phone number', { received: input });
+  }
+  return normalized;
+}
