@@ -33,6 +33,10 @@ import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PortalModule } from './portal/portal.module';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { PricingModule } from './pricing/pricing.module';
+import { PublishingModule } from './publishing/publishing.module';
+import { AutomationModule } from './automation/automation.module';
+import { PublicApiModule } from './public-api/public-api.module';
 import { HealthModule } from './health/health.module';
 
 /**
@@ -76,6 +80,10 @@ import { HealthModule } from './health/health.module';
     NotificationsModule,
     PortalModule,
     IntegrationsModule,
+    PricingModule,
+    PublishingModule,
+    AutomationModule,
+    PublicApiModule,
     HealthModule,
   ],
   providers: [

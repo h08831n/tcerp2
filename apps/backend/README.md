@@ -16,7 +16,11 @@ Phase 3: parties/CRM core + product catalog. Phase 4: CRM funnel
 (leads/opportunities/lost reasons/payment terms), sales documents
 (quotation = sales order — ONE id, ONE number), purchase documents,
 M:N line allocations, price requests + supplier offers (daily-lowest
-intelligence), document-flow relations.
+intelligence), document-flow relations. Phase 5: daily pricing engine
+(one audited price row per variant/day/uom; history immutable), price
+publishing (batch → per-channel queue items through mock channel
+adapters + templates), automation engine (PRICE_UPDATED + daily scans,
+idempotent runs), public website/portal API.
 
 ## Setup
 
@@ -49,6 +53,12 @@ Redis-only; `db` is polling-only. PostgreSQL (`queue_jobs` + `job_executions`)
 always stays the durable source of truth for history, status, retries and
 idempotency; BullMQ jobs use `jobId = queue_jobs.id` and a custom backoff
 (60s ×4^n capped at 6h, same curve as the DB fallback).
+
+Phase 5 job types handled through this queue: `publish.batch_item` (one
+publish item — mock channel adapter), `sms.send` (mock SMS bridge for the
+automation SEND_SMS action), `automation.run` (executes one AutomationRun —
+idempotent on run status) and `automation.daily_scan` (daily 06:00 scan,
+self-rescheduling via `automation.daily_scan:{date}` idempotency keys).
 
 ## Scripts
 
@@ -96,6 +106,19 @@ src/
   price-request/   Phase 4 price requests, supplier offers, worklist,
                    daily-lowest intelligence, create sale/purchase from request
   document-flow/   Phase 4 DocumentRelation service + related-documents endpoint
+  pricing/         Phase 5 daily pricing engine: DailyPriceService
+                   (upsert/history/grid/bulk), TODAY_PRICE_PROVIDER binding,
+                   cheapest-supplier endpoint
+  publishing/      Phase 5 publish batches + per-channel items, queue handlers
+                   (`publish.batch_item`, `sms.send`), PublishingTemplate CRUD +
+                   renderPreview, mock channel adapters (PUBLISHING_ADAPTERS)
+  automation/      Phase 5 automation rules + runs: PRICE_UPDATED trigger,
+                   daily scans (inactive customers / pending quotations),
+                   handlers (`automation.run`, `automation.daily_scan`),
+                   06:00 self-rescheduling scan
+  public-api/      Phase 5 @Public() website/portal API under /api/public
+                   (prices, price history, portal lookup) with the
+                   `publicapi.key` placeholder auth
 ```
 
 Company context: scoped controllers resolve the active company via
@@ -154,6 +177,94 @@ routes accept `x-company-id`.
 | GET/POST | `/api/workflow-timers`, `POST /api/workflow-timers/:id/cancel` | `workflowtimer.view` / `edit` |
 | GET/POST/PATCH/DELETE | `/api/notifications/rules` | `notifications.view` / `edit` |
 | GET/POST/PATCH/DELETE | `/api/integrations` | `integrations.view` / `create` / `edit` / `delete` |
+
+### Daily pricing · Publishing · Automation · Public API (Phase 5)
+
+The daily pricing engine keeps ONE row per (company, variant, date, uom).
+TODAY upserts are free and audited (`PRICE_CHANGED`, old/new); PAST days are
+immutable — 403 `PRICE_HISTORY_IMMUTABLE` without `pricing.edit_history`
+(with the permission the edit is allowed and still audited); FUTURE dates are
+allowed (pre-pricing) and audited. Rows are never deleted. After every price
+write commits the engine fires the automation `PRICE_UPDATED` trigger
+(async through the queue — the user action never blocks). The price-request
+worklist now shows the real daily price through the `TODAY_PRICE_PROVIDER`
+binding (`DailyPriceTodayPriceProvider`; `NullTodayPriceProvider` remains for
+tests). Day semantics: a day is the server-local calendar day, stored as UTC
+midnight — the DailyPrice unique key is timezone-stable.
+
+| Method | Path | Notes | Permission |
+| --- | --- | --- | --- |
+| POST | `/api/pricing/daily` `{productVariantId, date, uomId, price, supplierPartyId?, notes?}` — upsert one day | past dates need `pricing.edit_history` | `pricing.create` |
+| GET | `/api/pricing/daily?date&categoryId&brandId&search&page&pageSize` — grid with TODAY's + YESTERDAY's price (delta), ≤3 queries | | `pricing.view` |
+| GET | `/api/pricing/daily/today?variantId&uomId?` | today's row or null | `pricing.view` |
+| GET | `/api/pricing/daily/history?variantId&from&to` — rows desc (audit via `/api/audit`) | | `pricing.view` |
+| POST | `/api/pricing/daily/bulk` `{date, variantIds[] \| filter{categoryId?,brandId?}, mode: PERCENT_UP\|PERCENT_DOWN\|FIXED_UP\|FIXED_DOWN, amount}` — exact Decimal math, ≤500-row chunks/tx, per-row + one `BULK_PRICE_UPDATE` summary audit | today only; rows that would go negative or have no uom are skipped with a reason | `pricing.edit` |
+| GET | `/api/pricing/suppliers/cheapest?variantId&days=30&uomId?` — per supplier `winCount` (days the supplier was daily-lowest; ties count for ALL co-lowest; no averages) | reuses the §15 RANK() offer pattern | `pricing.view` |
+
+Publishing: `POST /api/publishing/batches` fans out one item per
+(channel, destination) — duplicate publishing is prevented by the DB unique
+`(batchId, channel, destination)` (duplicates are SKIPPED with a report).
+Each item renders the day's price rows through the channel's
+`PublishingTemplate` (placeholders `{product} {variantSku} {size} {grade}
+{brand} {price} {date} {uom}`; lines grouped by product template; missing
+attributes/unknown placeholders render empty + warnings) and gets one queue
+job (`publish.batch_item`, idempotencyKey `publish:{itemId}`). The handler
+resolves the adapter from `PUBLISHING_ADAPTERS` by channel and the config
+from the company's ACTIVE `IntegrationConfig` of that type; missing config →
+item FAILED `NO_ADAPTER_CONFIG`. Batch status recomputes: all success →
+`COMPLETED`, all failed → `FAILED`, all cancelled → `CANCELLED`, mixed →
+`PARTIAL`. One channel failing never blocks the others. All adapters are
+MOCK-backed in Phase 5 (`IntegrationConfig.config`:
+`{ mode: 'mock', forceFail?: boolean, failFirst?: number }`); real
+Telegram/WhatsApp/… HTTP impls land later as additional adapter classes
+without service changes, and the full SMS engine (send logs, resend,
+fallback) is a later phase (`sms.send` is a mock bridge — note above).
+
+| Method | Path | Notes | Permission |
+| --- | --- | --- | --- |
+| GET | `/api/publishing/batches?status&channel&date&page&pageSize` | | `publishing.view` |
+| GET | `/api/publishing/batches/:id` — items with ALL failure details (`lastError`, `providerResponse`, `attemptCount`) | | `publishing.view` |
+| POST | `/api/publishing/batches` `{priceDate?, channels:[{channel, destination?, templateCode?}], variantIds? \| categoryId, notes?}` | variants without a price that day are skipped | `pricing.publish` |
+| POST | `/api/publishing/items/:id/retry` — FAILED/CANCELLED → PENDING, attempt preserved, NEW queue job (retry keys `publish:{itemId}:a{attempt}` — the queue's `(companyId, idempotencyKey)` unique forbids reusing the first key) | | `publishing.retry` |
+| POST | `/api/publishing/items/:id/cancel` — PENDING/FAILED → CANCELLED (+ best-effort queue cancel) | | `publishing.cancel` |
+| GET/POST/PATCH/DELETE | `/api/publishing/templates(+:id)` — per (company, channel, code) unique | | `publishing.view` / `publishing.templates.manage` |
+| POST | `/api/publishing/templates/render-preview` `{templateId?\|bodyTemplate?, variantId, date?}` → `{text, warnings, vars}` | | `publishing.view` |
+
+Automation (REQUIREMENTS §52 lean subset): rules are company-scoped and
+versioned; conditions reuse the notification-condition evaluator
+(`{all:[…]}`/`{any:[…]}` over `field/equals/in/gt/lt`). `PRICE_UPDATED` runs
+are created per event with idempotencyKey
+`auto:{ruleId}:{variantId}:{date}` — a DUPLICATE event becomes a `SKIPPED`
+run row (`DUPLICATE_EVENT`) and never double-publishes; the action executes
+ASYNC via the `automation.run` queue job (idempotent: a re-delivered job
+never re-runs a non-PENDING run). Daily scans
+(`CUSTOMER_INACTIVE_DAYS` — last purchase from `sales_documents` per party,
+operational data swap documented in code; `QUOTATION_PENDING_DAYS` — status
+QUOTATION/SENT older than N days) run through the `automation.daily_scan`
+queue job at 06:00 (self-rescheduling, one row per date via
+`automation.daily_scan:{date}`) and write per-record run rows
+`daily:{ruleId}:{date}:{partyId|documentId}`. Actions: `PUBLISH_PRICE`
+(auto batch), `SEND_SMS` (enqueues the `sms.send` mock bridge), 
+`CREATE_NOTIFICATION` / `CREATE_ACTIVITY` (no Activity model yet → a
+reminder notification tagged `automation_activity`).
+
+| Method | Path | Notes | Permission |
+| --- | --- | --- | --- |
+| GET | `/api/automation/rules` | | `automation.view` |
+| POST/PATCH/DELETE | `/api/automation/rules(+:id)` | update bumps `version` | `automation.manage` |
+| GET | `/api/automation/rules/:id/runs?status&page&pageSize` | | `automation.view` |
+| POST | `/api/automation/rules/:id/run` `{entityId?, date?}` — manual run on one record (variantId / partyId / documentId per trigger) or a full scan of the rule | | `automation.manage` |
+| POST | `/api/automation/daily-scan/run` `{date?}` — manual scan for this company | | `automation.manage` |
+
+Public API (`@Public()` under `/api/public`; auth PLACEHOLDER — the optional
+`X-API-KEY` header is matched against the company Setting `publicapi.key`
+when set, otherwise an explicit `companyId` param scopes the request):
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/public/prices?date&companyId` — the day's prices (variant sku/name, template, category, brand, price, uom, lastUpdatedAt) | Setting `publicapi.website_only_published=true` restricts to variants with a SUCCESS WEBSITE publish item |
+| GET | `/api/public/prices/:variantId/history?days=30&companyId` — last N days, newest first | |
+| GET | `/api/public/portal/lookup?mobile&companyId` → `{matched, linked}` ONLY — never exposes customer data (§75) | normalizes 09…/+98…/0098…/Persian digits to the canonical mobile |
 
 ### Parties / CRM core (Phase 3A)
 
@@ -418,11 +529,22 @@ text, never the product master.
 - Payment terms (Phase 4, per company): `CASH` نقدی, `PRE_LOADING` تسویه قبل
   از بارگیری, `7DAYS` تسویه ۷ روزه, `30DAYS` تسویه ۳۰ روزه.
 - One inactive sample `IntegrationConfig` (SMS).
+- Phase 5: sequence `PUBLISH_BATCH(PB)`; 4 sample publishing templates
+  (`DEFAULT` for WEBSITE/TELEGRAM/WHATSAPP/SMS); 2 sample automation rules
+  (both DISABLED): `AUTO-PUBLISH-PRICE` (PRICE_UPDATED → PUBLISH_PRICE via
+  WEBSITE+TELEGRAM) and `AUTO-INACTIVE-CUSTOMER` (CUSTOMER_INACTIVE_DAYS 60 →
+  CREATE_NOTIFICATION).
+- Phase 5 permission catalog additions: `pricing.*` (view / create / edit /
+  edit_history / publish), `publishing.*` (view / retry / cancel /
+  templates.manage), `automation.*` (view / manage). `salesperson` gains
+  `pricing.view`; `pricing_user` gains the full pricing stack
+  (pricing.\* incl. audited history edits + publishing.\* + automation.view).
+  `admin` holds everything (ALL).
 
 ## Tests
 
-`npm test` — 484 tests across 103 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, all 484 run against Postgres
+`npm test` — 541 tests across 124 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, all 541 run against Postgres
 and clean up after themselves). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
@@ -435,7 +557,15 @@ id/number … `p4-34` grid without N+1 — numbering, role requirements, exact
 Decimal totals, matrix cells, confirmation lock/override/audit atomicity,
 version conflicts, M:N allocations incl. the concurrent over-allocation race,
 price-request worklist/lowest-supplier intelligence, company isolation,
-restart persistence) and Jalali conversion, phone
+restart persistence), the Phase 5 acceptance tests (`p5-01` price
+upsert+audit … `p5-18` template render — audited today-upserts, immutable
+history, bulk percent/fixed math, real today-price on request lines,
+batch fan-out, mock success/failure + retry, duplicate-publish prevention,
+idempotent queue + no-double-send, item cancel, PRICE_UPDATED automation
+with SKIPPED duplicates, inactive-customer + pending-quotation daily scans,
+public prices/history/lookup without data leaks, cheapest-supplier win
+counts with ties, company isolation, permission catalog/roles/routes,
+template placeholders+warnings) and Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

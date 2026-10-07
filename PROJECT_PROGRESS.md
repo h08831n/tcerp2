@@ -219,6 +219,14 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   grid) + seed/permission extensions (`sales.*`, `purchase.*`, `price_request.*`,
   `allocations.manage`, `crm.*`, `paymentterm.manage`).
 
+### Phase 5 — Daily Pricing + Publishing Engine (COMPLETED — commit pending)
+- DailyPrice engine: today-only upsert with old/new audit, past days immutable (pricing.edit_history override), bulk percent/fixed updates, grid with yesterday delta, today-price provider bound into price requests
+- Publishing: batch → per-channel queue items (7 channels, all mock adapters via IntegrationConfig), BullMQ execution, retry/cancel with attempt history + providerResponse, duplicate publish prevention (unique batch+channel+destination), 5s-poll admin dashboard
+- Automation foundation: PRICE_UPDATED / CUSTOMER_INACTIVE_DAYS / QUOTATION_PENDING_DAYS rules with condition evaluator, idempotent runs (auto:/daily: keys), async via queue, manual run
+- Public API: /api/public/prices(+history), portal lookup {matched,linked} only
+- Supplier intelligence: cheapest-report (win counts + lastWonAt, ties included, no averages)
+- Tests: 124 suites — 541/541 integration; fixed cheapestReport SQL alias bug + DailyPriceService optional-hook DI + pricing.module export wiring at smoke
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

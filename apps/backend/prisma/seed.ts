@@ -152,6 +152,20 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'crm.manage', module: 'crm', action: 'manage', description: 'Manage leads, opportunities and lost reasons' },
   // payment terms (Phase 4)
   { code: 'paymentterm.manage', module: 'paymentterm', action: 'manage', description: 'Manage payment terms' },
+  // daily pricing engine (Phase 5, REQUIREMENTS §17)
+  { code: 'pricing.view', module: 'pricing', action: 'view', description: 'View daily prices, price grid/history and cheapest-supplier reports' },
+  { code: 'pricing.create', module: 'pricing', action: 'create', description: 'Enter today\'s daily prices (upsert)' },
+  { code: 'pricing.edit', module: 'pricing', action: 'edit', description: 'Bulk daily-price update (percent/fixed)' },
+  { code: 'pricing.edit_history', module: 'pricing', action: 'edit_history', description: 'Edit PAST daily prices (audited; history is immutable without it)' },
+  { code: 'pricing.publish', module: 'pricing', action: 'publish', description: 'Create price publish batches' },
+  // publishing engine (Phase 5, REQUIREMENTS §18, §72-73)
+  { code: 'publishing.view', module: 'publishing', action: 'view', description: 'View publish batches/items (incl. failure details) and templates' },
+  { code: 'publishing.retry', module: 'publishing', action: 'retry', description: 'Retry failed publish items' },
+  { code: 'publishing.cancel', module: 'publishing', action: 'cancel', description: 'Cancel pending/failed publish items' },
+  { code: 'publishing.templates.manage', module: 'publishing', action: 'templates.manage', description: 'Manage per-channel publishing templates' },
+  // automation engine (Phase 5, REQUIREMENTS §52 lean subset)
+  { code: 'automation.view', module: 'automation', action: 'view', description: 'View automation rules and their runs' },
+  { code: 'automation.manage', module: 'automation', action: 'manage', description: 'Create/edit/enable automation rules and trigger manual runs' },
 ];
 
 const ROLE_DEFS: {
@@ -175,6 +189,7 @@ const ROLE_DEFS: {
       'crm.view', 'crm.manage',
       'sales.view', 'sales.create', 'sales.edit',
       'price_request.view', 'price_request.create',
+      'pricing.view',
     ],
   },
   {
@@ -229,8 +244,14 @@ const ROLE_DEFS: {
     code: 'pricing_user',
     nameFa: 'کارمند قیمت‌گذاری',
     nameEn: 'Pricing User',
+    // Phase 5: full pricing stack — daily prices (incl. audited history edits
+    // and bulk update), publishing (batches/items/templates) and read-only
+    // automation visibility.
     permissions: ['files.view', 'files.download', 'queue.view',
-      'price_request.view', 'price_request.create', 'price_request.manage_offers'],
+      'price_request.view', 'price_request.create', 'price_request.manage_offers',
+      'pricing.view', 'pricing.create', 'pricing.edit', 'pricing.edit_history', 'pricing.publish',
+      'publishing.view', 'publishing.retry', 'publishing.cancel', 'publishing.templates.manage',
+      'automation.view'],
   },
 ];
 
@@ -245,6 +266,8 @@ const SEQUENCE_DEFS = [
   { documentType: 'JOURNAL_ENTRY', name: 'Journal entry', prefix: 'JE' },
   { documentType: 'CHECK', name: 'Check', prefix: 'CHK' },
   { documentType: 'BANK_TRANSFER', name: 'Bank transfer', prefix: 'BT' },
+  // Phase 5
+  { documentType: 'PUBLISH_BATCH', name: 'Publish batch', prefix: 'PB' },
 ];
 
 const CHART_OF_ACCOUNTS = [
@@ -517,6 +540,91 @@ async function seedPaymentTerms(companyId: string): Promise<void> {
   }
 }
 
+/**
+ * Phase 5 sample publishing templates (REQUIREMENTS §18) — one DEFAULT body
+ * per major channel. Placeholders: {product} {variantSku} {size} {grade}
+ * {brand} {price} {date} {uom}. Upserts are idempotent; existing bodies are
+ * never modified on re-seed.
+ */
+const PUBLISHING_TEMPLATE_SEEDS: { channel: 'WEBSITE' | 'TELEGRAM' | 'WHATSAPP' | 'SMS'; code: string; nameFa: string; bodyTemplate: string }[] = [
+  {
+    channel: 'WEBSITE',
+    code: 'DEFAULT',
+    nameFa: 'قالب پیش‌فرض وب‌سایت',
+    bodyTemplate: '{product} {size} {grade} {brand} — {price} {uom} ({date})',
+  },
+  {
+    channel: 'TELEGRAM',
+    code: 'DEFAULT',
+    nameFa: 'قیمت روزانه تلگرام',
+    bodyTemplate: '📍 قیمت امروز {date}\n{product} {size} {grade} {brand}: {price} {uom}',
+  },
+  {
+    channel: 'WHATSAPP',
+    code: 'DEFAULT',
+    nameFa: 'قیمت روزانه واتساپ',
+    bodyTemplate: 'قیمت {date}: {product} {size} {grade} {brand} = {price} {uom}',
+  },
+  {
+    channel: 'SMS',
+    code: 'DEFAULT',
+    nameFa: 'پیامک قیمت روز',
+    bodyTemplate: '{product} {size} {brand}: {price} {uom}',
+  },
+];
+
+async function seedPublishingTemplates(companyId: string): Promise<void> {
+  for (const template of PUBLISHING_TEMPLATE_SEEDS) {
+    await prisma.publishingTemplate.upsert({
+      where: { companyId_channel_code: { companyId, channel: template.channel, code: template.code } },
+      create: { companyId, channel: template.channel, code: template.code, nameFa: template.nameFa, bodyTemplate: template.bodyTemplate },
+      update: {},
+    });
+  }
+}
+
+/**
+ * Phase 5 sample automation rules (REQUIREMENTS §52 lean subset) — both
+ * DISABLED so enabling is an explicit operator decision. Upserts are
+ * idempotent (existing rows untouched on re-seed).
+ */
+async function seedAutomationRules(companyId: string): Promise<void> {
+  await prisma.automationRule.upsert({
+    where: { companyId_code: { companyId, code: 'AUTO-PUBLISH-PRICE' } },
+    create: {
+      companyId,
+      code: 'AUTO-PUBLISH-PRICE',
+      nameFa: 'انتشار خودکار قیمت روز',
+      triggerType: 'PRICE_UPDATED',
+      triggerConfig: { channels: ['WEBSITE', 'TELEGRAM'] },
+      conditionConfig: { all: [{ field: 'priceChanged', equals: true }] },
+      actionType: 'PUBLISH_PRICE',
+      actionConfig: { channels: ['WEBSITE', 'TELEGRAM'] },
+      enabled: false,
+    },
+    update: {},
+  });
+  await prisma.automationRule.upsert({
+    where: { companyId_code: { companyId, code: 'AUTO-INACTIVE-CUSTOMER' } },
+    create: {
+      companyId,
+      code: 'AUTO-INACTIVE-CUSTOMER',
+      nameFa: 'یادآوری مشتری راکد (۶۰ روز)',
+      triggerType: 'CUSTOMER_INACTIVE_DAYS',
+      triggerConfig: { days: 60 },
+      conditionConfig: undefined,
+      actionType: 'CREATE_NOTIFICATION',
+      actionConfig: {
+        title: 'مشتری راکد',
+        body: 'مشتری {partyName} بیش از ۶۰ روز خرید نداشته است.',
+        recipients: [{ type: 'RECORD_OWNER', value: '' }],
+      },
+      enabled: false,
+    },
+    update: {},
+  });
+}
+
 async function main(): Promise<void> {
   console.log('Seeding company…');
   const companyId = await seedCompany();
@@ -555,6 +663,13 @@ async function main(): Promise<void> {
   console.log('Seeding payment terms (Phase 4)…');
   await seedPaymentTerms(companyId);
   console.log(`  ${PAYMENT_TERM_SEEDS.length} payment terms`);
+
+  console.log('Seeding publishing templates (Phase 5)…');
+  await seedPublishingTemplates(companyId);
+  console.log(`  ${PUBLISHING_TEMPLATE_SEEDS.length} templates`);
+
+  console.log('Seeding sample automation rules (Phase 5, disabled)…');
+  await seedAutomationRules(companyId);
 }
 
 main()

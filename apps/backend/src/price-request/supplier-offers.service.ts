@@ -361,6 +361,71 @@ export class SupplierOffersService {
       })),
     };
   }
+
+  /**
+   * Phase 5 cheapest-supplier report for ONE variant (§15 Supplier
+   * Intelligence): per supplier how many DAYS in the last `days` it was the
+   * daily-lowest offer for that variant (+ optional uom). Uses the same
+   * RANK() pattern as supplierLowestReport — ties count for ALL co-lowest
+   * suppliers (rnk = 1 keeps every minimum). No average price anywhere.
+   */
+  async cheapestReport(
+    companyId: string,
+    options: { variantId: string; days?: number; uomId?: string },
+  ) {
+    const days = options.days ?? 30;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const rows = await this.prisma.$queryRaw<Array<{
+      supplier_party_id: string;
+      supplier_name_fa: string | null;
+      uom_id: string;
+      uom_symbol: string;
+      win_count: BigInt | number;
+      last_won_at: Date | null;
+    }>>(Prisma.sql`
+      SELECT supplier_party_id, supplier_name_fa, uom_id, uom_symbol,
+             COUNT(*)::int AS win_count,
+             MAX(date_trunc('second', ranked.offered_at)) AS last_won_at
+      FROM (
+        SELECT o.supplier_party_id,
+               p.name_fa AS supplier_name_fa,
+               o.uom_id,
+               u.symbol AS uom_symbol,
+               o.offered_at,
+               date_trunc('day', o.offered_at) AS day,
+               RANK() OVER (
+                 PARTITION BY date_trunc('day', o.offered_at), o.uom_id
+                 ORDER BY o.offered_price ASC
+               ) AS rnk
+        FROM supplier_offers o
+        JOIN price_request_lines l ON l.id = o.price_request_line_id
+        JOIN uoms u ON u.id = o.uom_id
+        LEFT JOIN parties p ON p.id = o.supplier_party_id
+        WHERE o.company_id = ${companyId}::uuid
+          AND l.product_variant_id = ${options.variantId}::uuid
+          AND o.offered_at >= ${since}
+          ${options.uomId ? Prisma.sql`AND o.uom_id = ${options.uomId}::uuid` : Prisma.empty}
+      ) ranked
+      WHERE ranked.rnk = 1
+      GROUP BY supplier_party_id, supplier_name_fa, uom_id, uom_symbol
+      ORDER BY win_count DESC, supplier_name_fa NULLS LAST
+    `);
+
+    return {
+      variantId: options.variantId,
+      days,
+      ...(options.uomId ? { uomId: options.uomId } : {}),
+      items: rows.map((r) => ({
+        supplierPartyId: r.supplier_party_id,
+        supplierNameFa: r.supplier_name_fa ?? r.supplier_party_id,
+        uomId: r.uom_id,
+        uomSymbol: r.uom_symbol,
+        winCount: Number(r.win_count),
+        lastWonAt: r.last_won_at ? new Date(r.last_won_at).toISOString() : null,
+      })),
+    };
+  }
 }
 
 function dayStartOf(date: Date): Date {
