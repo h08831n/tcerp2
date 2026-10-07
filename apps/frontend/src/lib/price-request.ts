@@ -110,6 +110,9 @@ export interface PriceRequestDetail {
   customer: { id: string; nameFa: string } | null;
   requester: UserRef;
   lines: PriceRequestLineDto[];
+  /** Conversion-history navigation (Phase 4 correction #2) — offers are never destroyed by convert. */
+  salesDocuments?: { id: string; documentNumber: string; status: string; documentDate: string }[];
+  purchaseDocuments?: { id: string; documentNumber: string; status: string; documentDate: string }[];
 }
 
 /** GET /price-requests worklist projection (no offers/todayPrice). */

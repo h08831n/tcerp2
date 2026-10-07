@@ -18,12 +18,14 @@ export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
 export type DocumentRelationType = "CREATED_FROM" | "GENERATED_FROM" | "RELATED" | "BASED_ON";
 
-export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
+export const DOCUMENT_TYPE_LABELS: Record<DocumentType | "loading", string> = {
   sales_document: "سند فروش",
   purchase_document: "سند خرید",
   price_request: "درخواست قیمت",
   lead: "سرنخ",
   opportunity: "فرصت فروش",
+  // Phase 6 placeholder group (count 0) so the UI slot stays stable.
+  loading: "بارگیری‌ها",
 };
 
 export const RELATION_TYPE_LABELS: Record<DocumentRelationType, string> = {

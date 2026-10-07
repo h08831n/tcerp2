@@ -195,6 +195,49 @@ export class DocumentRelationService {
       });
     }
 
+    // Derived relations (explicit FKs, not DocumentRelation rows):
+    // sales/purchase documents know their originating price request via
+    // price_request_id — expose it for navigation (Phase 4 correction #3).
+    if (type === 'sales_document' || type === 'purchase_document') {
+      const doc =
+        type === 'sales_document'
+          ? await this.prisma.salesDocument.findFirst({
+              where: { id, companyId },
+              select: { priceRequestId: true },
+            })
+          : await this.prisma.purchaseDocument.findFirst({
+              where: { id, companyId },
+              select: { priceRequestId: true },
+            });
+      const pairKey = `price_request:${doc?.priceRequestId ?? ''}:GENERATED_FROM`;
+      if (doc?.priceRequestId && !seen.has(pairKey)) {
+        const prLabel = await this.resolveLabels(companyId, [
+          { type: 'price_request', id: doc.priceRequestId },
+        ]);
+        groups.set(`price_request:GENERATED_FROM`, {
+          type: 'price_request',
+          relationType: 'GENERATED_FROM',
+          count: 1,
+          items: [
+            {
+              id: doc.priceRequestId,
+              label: prLabel.get(`price_request:${doc.priceRequestId}`) ?? doc.priceRequestId,
+              relationType: 'GENERATED_FROM',
+              createdAt: new Date(0),
+            },
+          ],
+        });
+        seen.add(pairKey);
+      }
+      // Future Loadings placeholder (Phase 6) so UI slots stay stable.
+      groups.set('loading:PLANNED', {
+        type: 'loading',
+        relationType: 'RELATED',
+        count: 0,
+        items: [],
+      });
+    }
+
     const relations = [...groups.values()];
     const totals: Record<string, number> = {};
     for (const group of relations) {

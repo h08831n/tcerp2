@@ -198,6 +198,16 @@ export class PriceRequestsService {
             },
           },
         },
+        // Conversion history stays navigable (Phase 4 correction #2):
+        // PriceRequest → SalesDocuments → PurchaseDocuments → SupplierOffers.
+        salesDocuments: {
+          select: { id: true, documentNumber: true, status: true, documentDate: true },
+          orderBy: { createdAt: 'desc' as const },
+        },
+        purchaseDocuments: {
+          select: { id: true, documentNumber: true, status: true, documentDate: true },
+          orderBy: { createdAt: 'desc' as const },
+        },
       },
     });
     if (!request) throw new NotFoundError('Price request not found', { id });

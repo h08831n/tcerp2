@@ -353,8 +353,7 @@ export class PurchaseDocumentsService {
         data: {
           documentDate: dto.documentDate ? new Date(dto.documentDate) : undefined,
           paymentTermId: dto.paymentTermId,
-          // NOTE: dto.notes accepted but NOT persisted — the Phase 4 schema
-          // has no purchase_documents.notes column (mismatch reported).
+          notes: dto.notes,
           version: { increment: 1 },
         },
       });
@@ -364,8 +363,8 @@ export class PurchaseDocumentsService {
         action: AuditAction.UPDATE,
         companyId,
         actor,
-        oldValues: { paymentTermId: doc.paymentTermId },
-        newValues: { paymentTermId: row.paymentTermId },
+        oldValues: { paymentTermId: doc.paymentTermId, notes: doc.notes },
+        newValues: { paymentTermId: row.paymentTermId, notes: row.notes },
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });

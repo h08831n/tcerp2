@@ -54,7 +54,10 @@ describeIntegration('p4-19 previous-day requests keep the same record', () => {
     const service = priceRequestService(prisma);
     const worklist = await service.worklist(INTEGRATION_COMPANY_ID);
 
-    expect(worklist.today).toHaveLength(0);
+    // The shared dev DB can carry same-day manual rows — the guarantee under
+    // test is that OUR yesterday request is NOT re-rendered as today's and
+    // appears under previousDays exactly once (same record, no duplicate).
+    expect(worklist.today.some((r: { id: string }) => r.id === requestId)).toBe(false);
     const inPrevious = worklist.previousDays.filter((r: { id: string }) => r.id === requestId);
     expect(inPrevious).toHaveLength(1); // same record, no duplicate
     const requestNumber = inPrevious[0].requestNumber as string;

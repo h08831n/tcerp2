@@ -372,6 +372,9 @@ export class SalesDocumentsService {
           language: dto.language,
           quotationTemplateCode: dto.quotationTemplateCode,
           lines: dto.lines ?? [],
+          // Per-line printable overrides at create (same semantics as addLine:
+          // undefined → compute the «template + attribute values» default).
+          printableOverrides: dto.lines?.map((l) => l.printableDescription),
         },
         actor,
         ctx,
@@ -758,9 +761,7 @@ export class SalesDocumentsService {
           shippingAddressId: dto.shippingAddressId,
           language: dto.language,
           quotationTemplateCode: dto.quotationTemplateCode,
-          // NOTE: dto.notes is accepted but NOT persisted — the Phase 4
-          // schema has no sales_documents.notes column (mismatch reported;
-          // REQUIREMENTS §9 lists notes as a header field).
+          notes: dto.notes,
           version: { increment: 1 },
         },
       });
@@ -773,11 +774,13 @@ export class SalesDocumentsService {
         oldValues: {
           expirationDate: doc.expirationDate,
           paymentTermId: doc.paymentTermId,
+          notes: doc.notes,
           shippingAddressId: doc.shippingAddressId,
         },
         newValues: {
           expirationDate: row.expirationDate,
           paymentTermId: row.paymentTermId,
+          notes: row.notes,
           shippingAddressId: row.shippingAddressId,
         },
         ip: ctx.ip,

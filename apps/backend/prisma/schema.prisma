@@ -1450,6 +1450,7 @@ model SalesDocument {
   total          Decimal            @default(0) @db.Decimal(20, 4)
   operationalOrderedAmount Decimal?  @map("operational_ordered_amount") @db.Decimal(20, 4)
   operationalLoadedAmount  Decimal?  @map("operational_loaded_amount") @db.Decimal(20, 4)
+  notes          String?
   lostReasonId   String?            @map("lost_reason_id") @db.Uuid
   version        Int                @default(1)
   createdBy      String?            @map("created_by") @db.Uuid
@@ -1531,6 +1532,7 @@ model PurchaseDocument {
   total          Decimal               @default(0) @db.Decimal(20, 4)
   operationalOrderedAmount Decimal?    @map("operational_ordered_amount") @db.Decimal(20, 4)
   operationalLoadedAmount  Decimal?    @map("operational_loaded_amount") @db.Decimal(20, 4)
+  notes          String?
   version        Int                   @default(1)
   createdBy      String?               @map("created_by") @db.Uuid
   createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)

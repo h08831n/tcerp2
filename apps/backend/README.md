@@ -271,11 +271,13 @@ Phase 4 party timeline events (written in the same tx): `QUOTATION_CREATED`,
 `QUOTATION_SENT`, `SALE_CONFIRMED`, `SALE_LOST`, `ORDER_OVERRIDDEN`,
 `PURCHASE_CREATED`, `PRICE_REQUEST_CREATED`.
 
-**Schema mismatch (reported, not worked around silently)**: REQUIREMENTS §9
-lists `notes` among the quotation header fields, but the frozen Phase 4 schema
-has no `sales_documents.notes` / `purchase_documents.notes` column. The DTOs
-accept `notes` for forward-compatibility but it is not persisted; adding the
-column is recommended for the next schema change.
+**Header notes (p4 corrective pass)**: REQUIREMENTS §9 lists `notes` among the
+quotation header fields — `sales_documents.notes` / `purchase_documents.notes`
+now exist (migration `20241008150000_p4_document_notes`) and are persisted via
+the optimistic header PATCH (audit rows carry old/new notes). Line-level
+`notes` + `printableDescription` (sales) and `notes` (purchase) were already
+stored; editing a line's printable description changes only the STORED print
+text, never the product master.
 
 ### Parties — corrective pass notes (corr-01…corr-06)
 
