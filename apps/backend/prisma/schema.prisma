@@ -1208,6 +1208,7 @@ model ProductVariant {
   // must belong to the company's Weight category (service-validated).
   weightUomId   String?  @map("weight_uom_id") @db.Uuid
   defaultUomId  String?  @map("default_uom_id") @db.Uuid
+  isPublic      Boolean  @default(true) @map("is_public") // website price API visibility (Phase 5 review)
   active        Boolean  @default(true)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -1489,7 +1490,9 @@ model SalesLine {
   printableDescription String?  @map("printable_description")
   orderedQuantity      Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
   uomId                String   @map("uom_id") @db.Uuid
-  unitPrice            Decimal  @map("unit_price") @db.Decimal(20, 4)
+  unitPrice            Decimal  @map("unit_price") @db.Decimal(20, 4) // snapshot at document time — DailyPrice changes never touch it
+  priceSource          String?  @map("price_source") // MANUAL | DAILY_PRICE | TEMPLATE_DEFAULT
+  priceDate            DateTime? @map("price_date") @db.Date // reference to the DailyPrice day when applicable
   discountAmount       Decimal  @default(0) @map("discount_amount") @db.Decimal(20, 4)
   taxDefinitionId      String?  @map("tax_definition_id") @db.Uuid
   taxRateSnapshot      Decimal? @map("tax_rate_snapshot") @db.Decimal(9, 4)
@@ -1565,7 +1568,9 @@ model PurchaseLine {
   productVariantId   String   @map("product_variant_id") @db.Uuid
   orderedQuantity    Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
   uomId              String   @map("uom_id") @db.Uuid
-  unitPrice          Decimal  @map("unit_price") @db.Decimal(20, 4)
+  unitPrice          Decimal  @map("unit_price") @db.Decimal(20, 4) // snapshot at document time
+  priceSource        String?  @map("price_source") // MANUAL | TEMPLATE_DEFAULT (purchase daily prices optional)
+  priceDate          DateTime? @map("price_date") @db.Date
   lineTotal          Decimal  @map("line_total") @db.Decimal(20, 4)
   notes              String?
   lineOrder          Int      @default(0) @map("line_order")
