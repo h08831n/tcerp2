@@ -89,6 +89,10 @@ model Company {
   priceRequests      PriceRequest[]
   supplierOffers     SupplierOffer[]
   documentRelations  DocumentRelation[]
+  dailyPrices        DailyPrice[]
+  publishBatches     PublishBatch[]
+  publishingTemplates PublishingTemplate[]
+  automationRules    AutomationRule[]
 
   @@map("companies")
 }
@@ -173,6 +177,7 @@ model Party {
   purchaseDocuments PurchaseDocument[] @relation("PurchaseSupplier")
   priceRequests     PriceRequest[] @relation("PriceRequestCustomer")
   supplierOffers    SupplierOffer[] @relation("OfferSupplier")
+  pricedAsSupplier  DailyPrice[] @relation("PricedAsSupplier")
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -1080,6 +1085,7 @@ model Uom {
   purchaseLines     PurchaseLine[]
   priceRequestLines PriceRequestLine[]
   supplierOffers    SupplierOffer[]
+  dailyPrices       DailyPrice[]
 
   @@unique([companyId, symbol])
   @@index([companyId, categoryId])
@@ -1216,6 +1222,7 @@ model ProductVariant {
   salesLines SalesLine[]
   purchaseLines PurchaseLine[]
   priceRequestLines PriceRequestLine[]
+  dailyPrices       DailyPrice[]
 
   @@unique([companyId, sku])
   @@unique([templateId, combinationKey])
@@ -1703,6 +1710,204 @@ model DocumentRelation {
   @@index([fromType, fromId])
   @@index([toType, toId])
   @@map("document_relations")
+}
+
+// ─────────────── Phase 5: Daily Pricing + Publishing Engine ───────────────
+// Price is DAILY — never averaged. History is append/audit based: one row per
+// (variant, date, uom); edits of TODAY are allowed and audited old/new;
+// previous days are immutable (REQUIREMENTS §17, §7 tax-rate-style rule).
+
+enum DailyPriceSource {
+  MANUAL
+  SUPPLIER_OFFER
+  IMPORTED
+  API
+}
+
+model DailyPrice {
+  id               String           @id @default(uuid()) @db.Uuid
+  companyId        String           @map("company_id") @db.Uuid
+  productVariantId String           @map("product_variant_id") @db.Uuid
+  date             DateTime         @db.Date
+  price            Decimal          @db.Decimal(20, 4)
+  uomId            String           @map("uom_id") @db.Uuid
+  supplierPartyId  String?          @map("supplier_party_id") @db.Uuid // optional: cheapest supplier of the day
+  source           DailyPriceSource @default(MANUAL)
+  notes            String?
+  enteredBy        String?          @map("entered_by") @db.Uuid
+  version          Int              @default(1)
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company   Company        @relation(fields: [companyId], references: [id])
+  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
+  uom       Uom            @relation(fields: [uomId], references: [id])
+  supplier  Party?         @relation("PricedAsSupplier", fields: [supplierPartyId], references: [id])
+
+  @@unique([companyId, productVariantId, date, uomId])
+  @@index([companyId, date])
+  @@index([productVariantId, date])
+  @@map("daily_prices")
+}
+
+// ─────────────── Publishing: batch → per-channel queue items ───────────────
+// Every external communication goes through the central queue (BullMQ/Redis
+// runtime + QueueJob history). A batch fans out one item per channel;
+// each item carries attempt count, provider response and error for the
+// admin queue dashboard.
+
+enum PublishChannel {
+  WEBSITE
+  TELEGRAM
+  WHATSAPP
+  EITAA
+  BALE
+  RUBIKA
+  SMS
+}
+
+enum PublishBatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+  CANCELLED
+}
+
+enum PublishItemStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model PublishBatch {
+  id         String            @id @default(uuid()) @db.Uuid
+  companyId  String            @map("company_id") @db.Uuid
+  batchNumber String           @map("batch_number")
+  priceDate  DateTime          @map("price_date") @db.Date
+  status     PublishBatchStatus @default(PENDING)
+  notes      String?
+  createdBy  String?           @map("created_by") @db.Uuid
+  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt DateTime?         @map("finished_at") @db.Timestamptz(6)
+
+  company Company           @relation(fields: [companyId], references: [id])
+  items   PublishBatchItem[]
+
+  @@unique([companyId, batchNumber])
+  @@index([companyId, status, createdAt])
+  @@map("publish_batches")
+}
+
+model PublishBatchItem {
+  id               String            @id @default(uuid()) @db.Uuid
+  companyId        String            @map("company_id") @db.Uuid
+  batchId          String            @map("batch_id") @db.Uuid
+  channel          PublishChannel
+  destination      String? // channel id / chat id / webhook target
+  templateId       String?           @map("template_id") @db.Uuid
+  renderedPayload  Json?             @map("rendered_payload")
+  status           PublishItemStatus @default(PENDING)
+  attemptCount     Int               @default(0) @map("attempt_count")
+  maxAttempts      Int               @default(5) @map("max_attempts")
+  lastError        String?           @map("last_error")
+  providerResponse Json?             @map("provider_response")
+  queuedJobId      String?           @map("queued_job_id") @db.Uuid
+  priceDate        DateTime          @map("price_date") @db.Date
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt        DateTime?         @map("started_at") @db.Timestamptz(6)
+  finishedAt       DateTime?         @map("finished_at") @db.Timestamptz(6)
+
+  batch   PublishBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  template PublishingTemplate? @relation(fields: [templateId], references: [id])
+
+  @@unique([batchId, channel, destination])
+  @@index([companyId, status])
+  @@index([queuedJobId])
+  @@map("publish_batch_items")
+}
+
+// Configurable per-channel message templates with placeholders
+// ({product} {size} {brand} {price} {date} {uom}).
+
+model PublishingTemplate {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @map("company_id") @db.Uuid
+  channel     PublishChannel
+  code        String
+  nameFa      String   @map("name_fa")
+  bodyTemplate String  @map("body_template")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company            @relation(fields: [companyId], references: [id])
+  items   PublishBatchItem[]
+
+  @@unique([companyId, channel, code])
+  @@map("publishing_templates")
+}
+
+// ─────────────── Automation foundation (IF condition THEN action) ───────────────
+// Lean Phase 5 subset of REQUIREMENTS §52: triggers the pricing/publishing
+// flow needs now; Workflow/Notification engines stay the executors where used.
+
+enum AutomationTriggerType {
+  PRICE_UPDATED
+  CUSTOMER_INACTIVE_DAYS
+  QUOTATION_PENDING_DAYS
+  MANUAL
+}
+
+enum AutomationActionType {
+  PUBLISH_PRICE
+  SEND_SMS
+  CREATE_ACTIVITY
+  CREATE_NOTIFICATION
+}
+
+model AutomationRule {
+  id             String                @id @default(uuid()) @db.Uuid
+  companyId      String                @map("company_id") @db.Uuid
+  code           String
+  nameFa         String                @map("name_fa")
+  triggerType    AutomationTriggerType @map("trigger_type")
+  triggerConfig  Json                  @map("trigger_config") // {channels:[...], days:N, ...}
+  conditionConfig Json?                @map("condition_config") // reuse notification-conditions evaluator
+  actionType     AutomationActionType  @map("action_type")
+  actionConfig   Json                  @map("action_config")
+  enabled        Boolean               @default(true)
+  version        Int                   @default(1)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company         @relation(fields: [companyId], references: [id])
+  runs    AutomationRun[]
+
+  @@unique([companyId, code])
+  @@index([triggerType, enabled])
+  @@map("automation_rules")
+}
+
+model AutomationRun {
+  id             String   @id @default(uuid()) @db.Uuid
+  ruleId         String   @map("rule_id") @db.Uuid
+  ruleVersion    Int      @map("rule_version")
+  triggerPayload Json?    @map("trigger_payload")
+  status         String // SUCCESS | FAILED | SKIPPED
+  conditionsResult Json?  @map("conditions_result")
+  error          String?
+  idempotencyKey String?  @unique @map("idempotency_key")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId, createdAt])
+  @@map("automation_runs")
 }
 
 // ───────────────────────── Loading ─────────────────────────
