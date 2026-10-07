@@ -93,6 +93,9 @@ model Company {
   publishBatches     PublishBatch[]
   publishingTemplates PublishingTemplate[]
   automationRules    AutomationRule[]
+  warehouses         Warehouse[]
+  stockMovements     StockMovement[]
+  approvalRequests   ApprovalRequest[]
 
   @@map("companies")
 }
@@ -178,6 +181,9 @@ model Party {
   priceRequests     PriceRequest[] @relation("PriceRequestCustomer")
   supplierOffers    SupplierOffer[] @relation("OfferSupplier")
   pricedAsSupplier  DailyPrice[] @relation("PricedAsSupplier")
+  loadingAsCustomer Loading[]    @relation("LoadingCustomer")
+  loadingAsDriver   Loading[]    @relation("LoadingDriver")
+  loadingAsCarrier  Loading[]    @relation("LoadingCarrier")
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -1086,6 +1092,7 @@ model Uom {
   priceRequestLines PriceRequestLine[]
   supplierOffers    SupplierOffer[]
   dailyPrices       DailyPrice[]
+  stockMovements    StockMovement[]
 
   @@unique([companyId, symbol])
   @@index([companyId, categoryId])
@@ -1224,6 +1231,7 @@ model ProductVariant {
   purchaseLines PurchaseLine[]
   priceRequestLines PriceRequestLine[]
   dailyPrices       DailyPrice[]
+  stockMovements    StockMovement[]
 
   @@unique([companyId, sku])
   @@unique([templateId, combinationKey])
@@ -1509,6 +1517,7 @@ model SalesLine {
   uom           Uom            @relation(fields: [uomId], references: [id])
   taxDefinition TaxDefinition? @relation(fields: [taxDefinitionId], references: [id])
   salesAllocations SalesPurchaseAllocation[]
+  loadingAllocations LoadingAllocation[]
 
   @@index([salesDocumentId])
   @@index([productVariantId])
@@ -1581,6 +1590,7 @@ model PurchaseLine {
   productVariant ProductVariant  @relation(fields: [productVariantId], references: [id])
   uom           Uom              @relation(fields: [uomId], references: [id])
   purchaseAllocations SalesPurchaseAllocation[]
+  loadingAllocations LoadingAllocation[]
 
   @@index([purchaseDocumentId])
   @@index([productVariantId])
@@ -1916,25 +1926,136 @@ model AutomationRun {
 }
 
 // ───────────────────────── Loading ─────────────────────────
+
+// ─────────────── Phase 6: Warehouse, Stock Movements, Approvals ───────────────
+// Movements are AUTO-GENERATED from operational documents (Purchase confirmed →
+// IN, Loading confirmed → OUT) — no manual stock entry (boundaries doc rule 5).
+// warehouse_id on every movement keeps multi-warehouse open (rule 6).
+
+model Warehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String
+  nameFa    String   @map("name_fa")
+  nameEn    String?  @map("name_en")
+  isDefault Boolean  @default(false) @map("is_default")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company   Company        @relation(fields: [companyId], references: [id])
+  movements StockMovement[]
+  loadings  Loading[]
+
+  @@unique([companyId, code])
+  @@map("warehouses")
+}
+
+enum StockDirection {
+  IN
+  OUT
+}
+
+model StockMovement {
+  id               String        @id @default(uuid()) @db.Uuid
+  companyId        String        @map("company_id") @db.Uuid
+  warehouseId      String        @map("warehouse_id") @db.Uuid
+  productVariantId String        @map("product_variant_id") @db.Uuid
+  direction        StockDirection
+  quantity         Decimal       @db.Decimal(18, 4) // stored in the variant's uom context of the source document
+  uomId            String        @map("uom_id") @db.Uuid
+  movementDate     DateTime      @map("movement_date") @db.Timestamptz(6)
+  sourceEntityType String        @map("source_entity_type") // PURCHASE | LOADING
+  sourceEntityId   String        @map("source_entity_id") @db.Uuid
+  idempotencyKey   String        @unique @map("idempotency_key") // e.g. loading:{id} — document re-confirm can never double-count
+  createdBy        String?       @map("created_by") @db.Uuid
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company        Company        @relation(fields: [companyId], references: [id])
+  warehouse      Warehouse      @relation(fields: [warehouseId], references: [id])
+  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
+  uom            Uom            @relation(fields: [uomId], references: [id])
+  loading        Loading?       @relation(fields: [sourceEntityId], references: [id])
+
+  @@index([companyId, productVariantId, movementDate])
+  @@index([warehouseId, productVariantId])
+  @@index([sourceEntityType, sourceEntityId])
+  @@map("stock_movements")
+}
+
+// ─────────────── Lean approval engine (debt gate + reusable) ───────────────
+// Minimal Phase 6 subset of REQUIREMENTS §51: single approver requests used by
+// the Loading debt gate; sequential/multi-approver lands with Workflow (Phase 9).
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model ApprovalRequest {
+  id          String         @id @default(uuid()) @db.Uuid
+  companyId   String         @map("company_id") @db.Uuid
+  entityType  String         @map("entity_type") // loading | ...
+  entityId    String         @map("entity_id") @db.Uuid
+  approvalType String         @map("approval_type") // RELEASE_DRIVER_INFO | ...
+  requestedBy String?        @map("requested_by") @db.Uuid
+  approverId  String?        @map("approver_id") @db.Uuid // resolved approver (manager)
+  status      ApprovalStatus @default(PENDING)
+  reason      String?
+  decisionNote String?       @map("decision_note")
+  decidedBy   String?        @map("decided_by") @db.Uuid
+  decidedAt   DateTime?      @map("decided_at") @db.Timestamptz(6)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company  Company  @relation(fields: [companyId], references: [id])
+  loading  Loading? @relation("LoadingApprovals", fields: [entityId], references: [id])
+
+  @@index([companyId, status, createdAt])
+  @@index([entityType, entityId])
+  @@map("approval_requests")
+}
+
 // Header + lines: one bill of lading may carry several products; each line
 // records the explicit product and actual quantity. Allocations link lines
 // to sales/purchase lines; a loading is registered ONCE and shown on both sides.
 
+enum LoadingStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
 model Loading {
-  id             String   @id @default(uuid()) @db.Uuid
-  companyId      String   @map("company_id") @db.Uuid
-  loadingDate    DateTime @map("loading_date") @db.Timestamptz(6)
-  driverPartyId  String?  @map("driver_party_id") @db.Uuid // Phase 3 FK (Party role DRIVER)
-  carrierPartyId String?  @map("carrier_party_id") @db.Uuid // Phase 3 FK (Party role CARRIER)
+  id             String       @id @default(uuid()) @db.Uuid
+  companyId      String       @map("company_id") @db.Uuid
+  loadingDate    DateTime     @map("loading_date") @db.Timestamptz(6)
+  status         LoadingStatus @default(DRAFT)
+  // Debt gate (REQUIREMENTS §20): driver/carrier info stays hidden from
+  // customer-facing surfaces while driverInfoRestricted = true.
+  driverInfoRestricted Boolean @default(false) @map("driver_info_restricted")
+  warehouseId    String?      @map("warehouse_id") @db.Uuid // null = company default warehouse
+  customerPartyId String?     @map("customer_party_id") @db.Uuid // customer-facing side (debt gate + portal)
+  driverPartyId  String?      @map("driver_party_id") @db.Uuid
+  carrierPartyId String?      @map("carrier_party_id") @db.Uuid
   notes          String?
-  createdBy      String?  @map("created_by") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdBy      String?      @map("created_by") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company       @relation(fields: [companyId], references: [id])
+  warehouse Warehouse?  @relation(fields: [warehouseId], references: [id])
+  customer Party?       @relation("LoadingCustomer", fields: [customerPartyId], references: [id])
+  driver  Party?        @relation("LoadingDriver", fields: [driverPartyId], references: [id])
+  carrier Party?        @relation("LoadingCarrier", fields: [carrierPartyId], references: [id])
+  approvals ApprovalRequest[] @relation("LoadingApprovals")
   lines   LoadingLine[]
+  movements StockMovement[]
 
   @@index([companyId, loadingDate])
+  @@index([companyId, status])
+  @@index([customerPartyId])
   @@map("loadings")
 }
 
@@ -1955,14 +2076,19 @@ model LoadingLine {
 
 model LoadingAllocation {
   id                String  @id @default(uuid()) @db.Uuid
+  companyId         String  @map("company_id") @db.Uuid
   loadingLineId     String  @map("loading_line_id") @db.Uuid
-  salesLineId       String? @map("sales_line_id") @db.Uuid // Phase 4 FK
-  purchaseLineId    String? @map("purchase_line_id") @db.Uuid // Phase 4 FK
+  salesLineId       String? @map("sales_line_id") @db.Uuid
+  purchaseLineId    String? @map("purchase_line_id") @db.Uuid
   allocatedQuantity Decimal @map("allocated_quantity") @db.Decimal(18, 4)
 
   loadingLine LoadingLine @relation(fields: [loadingLineId], references: [id], onDelete: Cascade)
+  salesLine   SalesLine?   @relation(fields: [salesLineId], references: [id])
+  purchaseLine PurchaseLine? @relation(fields: [purchaseLineId], references: [id])
 
   @@index([loadingLineId])
+  @@index([salesLineId])
+  @@index([purchaseLineId])
   @@map("loading_allocations")
 }
 
