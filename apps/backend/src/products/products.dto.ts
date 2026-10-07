@@ -635,6 +635,15 @@ export class UpdateVariantDto {
   @IsBoolean()
   active?: boolean;
 
+  /**
+   * p5c pricing-integrity review — public price-API visibility. false hides
+   * the variant from every public price endpoint (ALL / PUBLISHED_ONLY
+   * modes); see PublicApiService.
+   */
+  @IsOptional()
+  @IsBoolean()
+  isPublic?: boolean;
+
   @IsInt()
   version!: number;
 }

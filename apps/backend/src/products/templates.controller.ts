@@ -246,7 +246,7 @@ export class TemplatesController {
     return this.templates.generateVariants(companyId, id, dto, actor, this.ctx(request));
   }
 
-  /** PATCH one variant (weight per 3B correction #3, default UOM, name, active). */
+  /** PATCH one variant (weight per 3B correction #3, default UOM, name, active, isPublic). */
   @Patch(':id/variants/:variantId')
   @RequirePermissions('products.edit')
   async updateVariant(

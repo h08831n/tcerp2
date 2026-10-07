@@ -160,6 +160,10 @@ export interface SalesLineDto {
   orderedQuantity: string;
   uomId: string;
   unitPrice: string;
+  /** p5c price provenance: MANUAL | DAILY_PRICE | TEMPLATE_DEFAULT. */
+  priceSource: string | null;
+  /** ISO date of the snapshotted DailyPrice day (DAILY_PRICE lines only). */
+  priceDate: string | null;
   discountAmount: string;
   taxDefinitionId: string | null;
   taxRateSnapshot: string | null;

@@ -127,12 +127,14 @@ export function priceRequestServiceWithPricing(prisma: PrismaClient): PriceReque
   const audit = makeAudit(prisma);
   const timeline = new TimelineService(prisma as never);
   const relations = new DocumentRelationService(prisma as never, audit);
+  const dailyPrices = new DailyPriceService(prisma as never, audit);
   const sales = new SalesDocumentsService(
     prisma as never,
     new SequencesService(prisma as never, audit),
     audit,
     timeline,
     relations,
+    dailyPrices,
   );
   const purchase = new PurchaseDocumentsService(
     prisma as never,
@@ -140,6 +142,7 @@ export function priceRequestServiceWithPricing(prisma: PrismaClient): PriceReque
     audit,
     timeline,
     relations,
+    dailyPrices,
   );
   return new PriceRequestsService(
     prisma as never,

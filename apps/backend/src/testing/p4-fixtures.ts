@@ -9,6 +9,7 @@ import { PriceRequestsService } from '../price-request/price-requests.service';
 import { SupplierOffersService } from '../price-request/supplier-offers.service';
 import { AllocationsService } from '../allocations/allocations.service';
 import { NullTodayPriceProvider } from '../price-request/today-price.provider';
+import { DailyPriceService } from '../pricing/daily-price.service';
 import { INTEGRATION_COMPANY_ID } from './integration';
 
 /**
@@ -38,6 +39,7 @@ export function salesService(prisma: PrismaClient): SalesDocumentsService {
     audit,
     timeline,
     new DocumentRelationService(prisma as never, audit),
+    new DailyPriceService(prisma as never, audit), // p5c line price snapshot
   );
 }
 
@@ -50,6 +52,7 @@ export function purchaseService(prisma: PrismaClient): PurchaseDocumentsService 
     audit,
     timeline,
     new DocumentRelationService(prisma as never, audit),
+    new DailyPriceService(prisma as never, audit), // p5c price-source wiring
   );
 }
 

@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { Prisma, SalesDocumentStatus } from '@prisma/client';
+import { DailyPrice, Prisma, SalesDocumentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
@@ -25,6 +25,7 @@ import {
 } from './sales.dto';
 import { ActorScope, assertSalesInScope, salesScopeWhere } from './sales-scope';
 import { buildPrintableDescriptions } from './printable-description';
+import { DailyPriceService } from '../pricing/daily-price.service';
 
 /**
  * Sales documents (REQUIREMENTS §9-10): ONE entity for quotation → sales
@@ -32,6 +33,15 @@ import { buildPrintableDescriptions } from './printable-description';
  * (SD-1405-00001); only the status changes. Totals are server-authoritative
  * (Prisma.Decimal math, `common/utils/money`). Confirmed-order lock +
  * manager override are enforced here (p4-10..p4-13).
+ *
+ * p5c pricing-integrity review — line price snapshots: every SalesLine
+ * records WHERE its unitPrice came from:
+ *   - `MANUAL`           — the caller sent an explicit non-zero unitPrice;
+ *   - `DAILY_PRICE`      — no explicit price: TODAY's DailyPrice row for
+ *                          (variant, uom) was snapshotted (priceDate = that
+ *                          row's day; later price edits never touch it);
+ *   - `TEMPLATE_DEFAULT` — no explicit price and no DailyPrice row: the
+ *                          template's defaultSalesPrice (legacy behavior).
  */
 
 type Client = Prisma.TransactionClient;
@@ -92,6 +102,11 @@ export class SalesDocumentsService {
     private readonly auditService: AuditService,
     private readonly timeline: TimelineService,
     private readonly relations: DocumentRelationService,
+    // Optional so hand-built test instances keep working; SalesModule provides
+    // DailyPriceService directly (importing PricingModule would be circular:
+    // PricingModule → PriceRequestModule → SalesModule).
+    @Optional() @Inject(DailyPriceService)
+    private readonly dailyPrices?: DailyPriceService,
   ) {}
 
   // ───────────────────── scope helpers (party-scope precedent) ─────────────────────
@@ -164,54 +179,98 @@ export class SalesDocumentsService {
     });
     const taxMap = new Map(taxDefs.map((t) => [t.id, t]));
 
-    return inputs.map((input, idx) => {
-      const variant = variantMap.get(input.productVariantId);
-      if (!variant) {
-        throw new NotFoundError('Product variant not found', { productVariantId: input.productVariantId });
+    // Today's DailyPrice per (variant, uom) — memoized per normalizeLines call
+    // so a matrix batch resolves each pair with ONE query (no N×M). Absent
+    // DailyPriceService (hand-built test instances) → template fallback.
+    const todayPriceCache = new Map<string, Promise<DailyPrice | null>>();
+    const todayPriceFor = (variantId: string, uomId: string): Promise<DailyPrice | null> => {
+      const key = `${variantId}::${uomId}`;
+      let cached = todayPriceCache.get(key);
+      if (!cached) {
+        cached = this.dailyPrices
+          ? this.dailyPrices.getToday(companyId, variantId, uomId)
+          : Promise.resolve(null);
+        todayPriceCache.set(key, cached);
       }
-      const uomId = input.uomId ?? variant.defaultUomId ?? variant.template.defaultSalesUomId;
-      if (!uomId || !uomSet.has(uomId)) {
-        throw new ValidationError('UOM_REQUIRED', { productVariantId: input.productVariantId });
-      }
+      return cached;
+    };
 
-      const taxDefinitionId = input.taxDefinitionId ?? variant.template.defaultTaxDefinitionId ?? null;
-      let taxRateSnapshot: Prisma.Decimal | null = null;
-      if (taxDefinitionId) {
-        const def = taxMap.get(taxDefinitionId);
-        if (!def) throw new NotFoundError('Tax definition not found', { taxDefinitionId });
-        taxRateSnapshot = def.rate;
-      }
+    return Promise.all(
+      inputs.map(async (input, idx) => {
+        const variant = variantMap.get(input.productVariantId);
+        if (!variant) {
+          throw new NotFoundError('Product variant not found', { productVariantId: input.productVariantId });
+        }
+        const uomId = input.uomId ?? variant.defaultUomId ?? variant.template.defaultSalesUomId;
+        if (!uomId || !uomSet.has(uomId)) {
+          throw new ValidationError('UOM_REQUIRED', { productVariantId: input.productVariantId });
+        }
 
-      // Default price: the template's default sales price (buyers fill later on copies).
-      const unitPrice = input.unitPrice ?? variant.template.defaultSalesPrice;
-      const { subtotal, taxAmount, lineTotal } = calcLineTotals({
-        quantity: input.quantity,
-        unitPrice,
-        discountAmount: input.discountAmount ?? 0,
-        taxRate: taxRateSnapshot,
-      });
+        const taxDefinitionId = input.taxDefinitionId ?? variant.template.defaultTaxDefinitionId ?? null;
+        let taxRateSnapshot: Prisma.Decimal | null = null;
+        if (taxDefinitionId) {
+          const def = taxMap.get(taxDefinitionId);
+          if (!def) throw new NotFoundError('Tax definition not found', { taxDefinitionId });
+          taxRateSnapshot = def.rate;
+        }
 
-      return {
-        companyId,
-        salesDocumentId,
-        productVariantId: input.productVariantId,
-        printableDescription:
-          printableOverrides[idx] !== undefined
-            ? (printableOverrides[idx] as string | null)
-            : printable.get(input.productVariantId) ?? null,
-        orderedQuantity: roundQuantity(D(input.quantity)),
-        uomId,
-        unitPrice: roundMoney(D(unitPrice)),
-        discountAmount: roundMoney(D(input.discountAmount ?? 0)),
-        taxDefinitionId,
-        taxRateSnapshot,
-        subtotal,
-        taxAmount,
-        lineTotal,
-        notes: input.notes ?? null,
-        lineOrder: idx,
-      } satisfies Prisma.SalesLineUncheckedCreateInput;
-    });
+        // Price snapshot (see class doc): explicit non-zero price → MANUAL;
+        // absent/null/0 → today's DailyPrice for (variant, uom), else the
+        // template default. Kept on the line forever after — later DailyPrice
+        // changes never touch stored documents (pricing integrity).
+        const explicitPrice =
+          input.unitPrice !== undefined && input.unitPrice !== null && !D(input.unitPrice).isZero();
+        let unitPrice: Prisma.Decimal;
+        let priceSource: 'MANUAL' | 'DAILY_PRICE' | 'TEMPLATE_DEFAULT';
+        let priceDate: Date | null;
+        if (explicitPrice) {
+          unitPrice = roundMoney(D(input.unitPrice));
+          priceSource = 'MANUAL';
+          priceDate = null;
+        } else {
+          const daily = await todayPriceFor(variant.id, uomId);
+          if (daily) {
+            unitPrice = roundMoney(daily.price);
+            priceSource = 'DAILY_PRICE';
+            priceDate = daily.date;
+          } else {
+            unitPrice = variant.template.defaultSalesPrice;
+            priceSource = 'TEMPLATE_DEFAULT';
+            priceDate = null;
+          }
+        }
+
+        const { subtotal, taxAmount, lineTotal } = calcLineTotals({
+          quantity: input.quantity,
+          unitPrice,
+          discountAmount: input.discountAmount ?? 0,
+          taxRate: taxRateSnapshot,
+        });
+
+        return {
+          companyId,
+          salesDocumentId,
+          productVariantId: input.productVariantId,
+          printableDescription:
+            printableOverrides[idx] !== undefined
+              ? (printableOverrides[idx] as string | null)
+              : printable.get(input.productVariantId) ?? null,
+          orderedQuantity: roundQuantity(D(input.quantity)),
+          uomId,
+          unitPrice,
+          priceSource,
+          priceDate,
+          discountAmount: roundMoney(D(input.discountAmount ?? 0)),
+          taxDefinitionId,
+          taxRateSnapshot,
+          subtotal,
+          taxAmount,
+          lineTotal,
+          notes: input.notes ?? null,
+          lineOrder: idx,
+        } satisfies Prisma.SalesLineUncheckedCreateInput;
+      }),
+    );
   }
 
   private async recomputeDocumentTotals(tx: Client, salesDocumentId: string): Promise<void> {
@@ -579,11 +638,33 @@ export class SalesDocumentsService {
 
     await this.prisma.$transaction(async (tx) => {
       const lineData = await this.normalizeLines(tx, companyId, doc.id, [effective], [printableOverride]);
-      // Never touch lineOrder/salesDocumentId on edit.
-      const { lineOrder: _lo, salesDocumentId: _sid, ...updateData } = lineData[0];
+      // Never touch lineOrder/salesDocumentId on edit. p5c snapshot semantics
+      // on PATCH:
+      //   - unitPrice PATCHed to a non-zero value that CHANGES the line
+      //     (confirmed-order override) → snapshot becomes MANUAL, priceDate
+      //     null (the daily reference no longer applies);
+      //   - unitPrice PATCHed as 0/null → "re-resolve the default": adopt the
+      //     freshly resolved snapshot (DAILY_PRICE/TEMPLATE_DEFAULT);
+      //   - unitPrice untouched → keep the stored snapshot (quantity/notes/…
+      //     edits never rewrite the price provenance).
+      const explicitPatch =
+        dto.unitPrice !== undefined && dto.unitPrice !== null && !D(dto.unitPrice).isZero();
+      const priceChanged = explicitPatch && !D(dto.unitPrice).equals(line.unitPrice);
+      const reResolve = dto.unitPrice !== undefined && dto.unitPrice !== null && !explicitPatch;
+      const {
+        lineOrder: _lo,
+        salesDocumentId: _sid,
+        priceSource: _ps,
+        priceDate: _pd,
+        ...updateData
+      } = lineData[0];
       await tx.salesLine.update({
         where: { id: line.id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...(reResolve ? { priceSource: lineData[0].priceSource, priceDate: lineData[0].priceDate } : {}),
+          ...(priceChanged ? { priceSource: 'MANUAL', priceDate: null } : {}),
+        },
       });
       await this.recomputeDocumentTotals(tx, doc.id);
       await this.auditService.recordTx(tx, {
@@ -1151,7 +1232,9 @@ export class SalesDocumentsService {
             productVariantId: line.productVariantId,
             quantity: line.orderedQuantity,
             uomId: line.uomId,
-            // Price fields are for the salesperson to fill — copies stay 0.
+            // No explicit price → the line snapshots TODAY's DailyPrice for
+            // (variant, uom), else the template default (p5c pricing
+            // integrity); the salesperson can still override per line.
             unitPrice: 0,
           })),
         },

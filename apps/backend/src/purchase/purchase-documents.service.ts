@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { Prisma, PurchaseDocumentStatus } from '@prisma/client';
+import { DailyPrice, Prisma, PurchaseDocumentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
@@ -21,6 +21,7 @@ import {
   UpdatePurchaseLineDto,
 } from './purchase.dto';
 import { CreatePurchaseFromSaleDto } from '../sales/sales.dto';
+import { DailyPriceService } from '../pricing/daily-price.service';
 
 /**
  * Purchase documents (REQUIREMENTS §11): fully INDEPENDENT — no price
@@ -28,6 +29,19 @@ import { CreatePurchaseFromSaleDto } from '../sales/sales.dto';
  * (PO-1405-00001). Buyers see the whole company's documents (no record
  * scope). Purchase lines carry quantity × unitPrice totals only
  * (server-authoritative Prisma.Decimal math).
+ *
+ * p5c pricing-integrity review — line price-source wiring: PurchaseLine
+ * records WHERE its unitPrice came from:
+ *   - `MANUAL`      — the buyer sent an explicit non-zero unitPrice
+ *                     (purchase pricing is typically manual);
+ *   - `DAILY_PRICE` — no explicit price (absent/null/0) and a DailyPrice row
+ *                     exists for (variant, uom) today: its price is used as
+ *                     the REFERENCE prefill for the buyer. DailyPrice rows
+ *                     carry whatever price was entered (a sales-side row) —
+ *                     treat it as a hint, the committed purchase price stays
+ *                     freely editable;
+ *   - `null`        — no explicit price and no DailyPrice row: the line
+ *                     stays at 0 for the buyer to fill (no provenance yet).
  */
 
 type Client = Prisma.TransactionClient;
@@ -48,6 +62,11 @@ export class PurchaseDocumentsService {
     private readonly auditService: AuditService,
     private readonly timeline: TimelineService,
     private readonly relations: DocumentRelationService,
+    // Optional so hand-built test instances keep working; PurchaseModule
+    // provides DailyPriceService directly (importing PricingModule would be
+    // circular: PricingModule → PriceRequestModule → PurchaseModule).
+    @Optional() @Inject(DailyPriceService)
+    private readonly dailyPrices?: DailyPriceService,
   ) {}
 
   private async normalizeLines(
@@ -75,28 +94,70 @@ export class PurchaseDocumentsService {
     });
     const uomSet = new Set(uoms.map((u) => u.id));
 
-    return inputs.map((input, idx) => {
-      const variant = variantMap.get(input.productVariantId);
-      if (!variant) {
-        throw new NotFoundError('Product variant not found', { productVariantId: input.productVariantId });
+    // Today's DailyPrice per (variant, uom) — memoized per call (see class
+    // doc: purchase treats it as a REFERENCE prefill, pricing stays manual).
+    const todayPriceCache = new Map<string, Promise<DailyPrice | null>>();
+    const todayPriceFor = (variantId: string, uomId: string): Promise<DailyPrice | null> => {
+      const key = `${variantId}::${uomId}`;
+      let cached = todayPriceCache.get(key);
+      if (!cached) {
+        cached = this.dailyPrices
+          ? this.dailyPrices.getToday(companyId, variantId, uomId)
+          : Promise.resolve(null);
+        todayPriceCache.set(key, cached);
       }
-      const uomId = input.uomId ?? variant.defaultUomId ?? variant.template.defaultPurchaseUomId;
-      if (!uomId || !uomSet.has(uomId)) {
-        throw new ValidationError('UOM_REQUIRED', { productVariantId: input.productVariantId });
-      }
-      const lineTotal = calcPurchaseLineTotal({ quantity: input.quantity, unitPrice: input.unitPrice ?? 0 });
-      return {
-        companyId,
-        purchaseDocumentId,
-        productVariantId: input.productVariantId,
-        orderedQuantity: roundQuantity(D(input.quantity)),
-        uomId,
-        unitPrice: roundMoney(D(input.unitPrice ?? 0)),
-        lineTotal,
-        notes: input.notes ?? null,
-        lineOrder: idx,
-      } satisfies Prisma.PurchaseLineUncheckedCreateInput;
-    });
+      return cached;
+    };
+
+    return Promise.all(
+      inputs.map(async (input, idx) => {
+        const variant = variantMap.get(input.productVariantId);
+        if (!variant) {
+          throw new NotFoundError('Product variant not found', { productVariantId: input.productVariantId });
+        }
+        const uomId = input.uomId ?? variant.defaultUomId ?? variant.template.defaultPurchaseUomId;
+        if (!uomId || !uomSet.has(uomId)) {
+          throw new ValidationError('UOM_REQUIRED', { productVariantId: input.productVariantId });
+        }
+
+        const explicitPrice =
+          input.unitPrice !== undefined && input.unitPrice !== null && !D(input.unitPrice).isZero();
+        let unitPrice: Prisma.Decimal;
+        let priceSource: string | null;
+        let priceDate: Date | null;
+        if (explicitPrice) {
+          unitPrice = roundMoney(D(input.unitPrice));
+          priceSource = 'MANUAL';
+          priceDate = null;
+        } else {
+          const daily = await todayPriceFor(variant.id, uomId);
+          if (daily) {
+            unitPrice = roundMoney(daily.price);
+            priceSource = 'DAILY_PRICE';
+            priceDate = daily.date;
+          } else {
+            unitPrice = roundMoney(D(0));
+            priceSource = null;
+            priceDate = null;
+          }
+        }
+
+        const lineTotal = calcPurchaseLineTotal({ quantity: input.quantity, unitPrice });
+        return {
+          companyId,
+          purchaseDocumentId,
+          productVariantId: input.productVariantId,
+          orderedQuantity: roundQuantity(D(input.quantity)),
+          uomId,
+          unitPrice,
+          priceSource,
+          priceDate,
+          lineTotal,
+          notes: input.notes ?? null,
+          lineOrder: idx,
+        } satisfies Prisma.PurchaseLineUncheckedCreateInput;
+      }),
+    );
   }
 
   private async recomputeDocumentTotals(tx: Client, purchaseDocumentId: string): Promise<void> {
@@ -438,8 +499,28 @@ export class PurchaseDocumentsService {
     };
     await this.prisma.$transaction(async (tx) => {
       const lineData = await this.normalizeLines(tx, companyId, doc.id, [effective]);
-      const { lineOrder: _ignored, purchaseDocumentId: _pid, ...updateData } = lineData[0];
-      await tx.purchaseLine.update({ where: { id: line.id }, data: updateData });
+      // p5c: unitPrice PATCHed non-zero + changed → MANUAL; PATCHed 0/null →
+      // re-resolve the default (adopt the fresh snapshot); untouched → keep
+      // the stored source/date.
+      const explicitPatch =
+        dto.unitPrice !== undefined && dto.unitPrice !== null && !D(dto.unitPrice).isZero();
+      const priceChanged = explicitPatch && !D(dto.unitPrice).equals(line.unitPrice);
+      const reResolve = dto.unitPrice !== undefined && dto.unitPrice !== null && !explicitPatch;
+      const {
+        lineOrder: _ignored,
+        purchaseDocumentId: _pid,
+        priceSource: _ps,
+        priceDate: _pd,
+        ...updateData
+      } = lineData[0];
+      await tx.purchaseLine.update({
+        where: { id: line.id },
+        data: {
+          ...updateData,
+          ...(reResolve ? { priceSource: lineData[0].priceSource, priceDate: lineData[0].priceDate } : {}),
+          ...(priceChanged ? { priceSource: 'MANUAL', priceDate: null } : {}),
+        },
+      });
       await this.recomputeDocumentTotals(tx, doc.id);
       await this.auditService.recordTx(tx, {
         entityType: 'purchase_line',
@@ -622,7 +703,7 @@ export class PurchaseDocumentsService {
             productVariantId: line.productVariantId,
             quantity: line.orderedQuantity,
             uomId: line.uomId,
-            unitPrice: 0, // buyer fills prices
+            unitPrice: 0, // no explicit price → DAILY_PRICE reference prefill if a daily row exists, else 0 (p5c)
           })),
         },
         actor,

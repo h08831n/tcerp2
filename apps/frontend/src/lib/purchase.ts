@@ -100,6 +100,10 @@ export interface PurchaseLineDto {
   orderedQuantity: string;
   uomId: string;
   unitPrice: string;
+  /** p5c price provenance: MANUAL | DAILY_PRICE | null (no price yet). */
+  priceSource: string | null;
+  /** ISO date of the referenced DailyPrice day (DAILY_PRICE lines only). */
+  priceDate: string | null;
   lineTotal: string;
   notes: string | null;
   lineOrder: number;

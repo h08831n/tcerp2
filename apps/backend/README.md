@@ -258,13 +258,79 @@ reminder notification tagged `automation_activity`).
 
 Public API (`@Public()` under `/api/public`; auth PLACEHOLDER — the optional
 `X-API-KEY` header is matched against the company Setting `publicapi.key`
-when set, otherwise an explicit `companyId` param scopes the request):
+when set, otherwise an explicit `companyId` param scopes the request).
+**Visibility levels (p5c)** — the company Setting `publicapi.visibility`
+selects what the price endpoints expose: `ALL` (default) → every ACTIVE
+variant's day prices; `PUBLISHED_ONLY` → only variants covered by a SUCCESS
+WEBSITE `PublishBatchItem` for that day (the legacy Setting
+`publicapi.website_only_published=true` aliases to this); `PORTAL_ONLY` →
+`/api/public/prices*` answer 403 `{code:'FORBIDDEN', message:'PORTAL_REQUIRED'}`
+while the portal lookup stays open (it exposes nothing). Additionally every
+variant carries `isPublic` (default true; toggle via PATCH
+`/api/products/templates/:id/variants/:variantId` `{isPublic}`, permission
+`products.edit`) — `isPublic=false` variants are excluded from the price
+endpoints in ALL/PUBLISHED_ONLY modes and their history is indistinguishable
+from an unknown variant:
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/public/prices?date&companyId` — the day's prices (variant sku/name, template, category, brand, price, uom, lastUpdatedAt) | Setting `publicapi.website_only_published=true` restricts to variants with a SUCCESS WEBSITE publish item |
-| GET | `/api/public/prices/:variantId/history?days=30&companyId` — last N days, newest first | |
-| GET | `/api/public/portal/lookup?mobile&companyId` → `{matched, linked}` ONLY — never exposes customer data (§75) | normalizes 09…/+98…/0098…/Persian digits to the canonical mobile |
+| GET | `/api/public/prices?date&companyId` — the day's prices (variant sku/name, template, category, brand, price, uom, lastUpdatedAt) | visibility Setting `publicapi.visibility` (ALL / PUBLISHED_ONLY / PORTAL_ONLY; legacy `publicapi.website_only_published=true` alias) + `isPublic` filter |
+| GET | `/api/public/prices/:variantId/history?days=30&companyId` — last N days, newest first | hidden (`isPublic=false`) variants answer like unknown ones; PORTAL_ONLY → 403 `PORTAL_REQUIRED` |
+| GET | `/api/public/portal/lookup?mobile&companyId` → `{matched, linked}` ONLY — never exposes customer data (§75) | normalizes 09…/+98…/0098…/Persian digits to the canonical mobile; stays open in every visibility level |
+
+#### p5c pricing-integrity review — line price snapshots, adapter contract, SMS audiences
+
+**Line price snapshots (sales + purchase).** Every `SalesLine` records where
+its `unitPrice` came from in `priceSource` (`MANUAL` | `DAILY_PRICE` |
+`TEMPLATE_DEFAULT`) + `priceDate` (the DailyPrice day when applicable):
+an explicit non-zero price → `MANUAL`; NO explicit price (absent, null or 0)
+→ TODAY's `DailyPrice` row for (variant, uom) snapshotted as `DAILY_PRICE`
+(with `priceDate` = that row's day), falling back to the template's
+`defaultSalesPrice` as `TEMPLATE_DEFAULT`. The snapshot is written once —
+later DailyPrice changes NEVER rewrite existing documents (the core
+regression `p5c-01`); a NEW document picks the new price. PATCHing a line's
+unitPrice to a changed non-zero value re-stamps `MANUAL` (priceDate null);
+PATCHing 0/null re-resolves the default; untouched unitPrice keeps the
+original snapshot (quantity/notes edits never rewrite provenance). Purchase
+lines carry the same wiring (`p5c-02`): purchase pricing is typically
+MANUAL; without an explicit price a DailyPrice row is used as a REFERENCE
+prefill (`DAILY_PRICE` — the row carries whatever price was entered; the
+committed purchase price stays freely editable) and with neither the line
+stays 0 with `priceSource` null. Copy flows (`create-sale-from-purchase`,
+`create-purchase-from-sale`, price-request conversions) carry no explicit
+price and therefore resolve the same snapshot defaults. DI note:
+`SalesModule`/`PurchaseModule` PROVIDE `DailyPriceService` directly
+(importing `PricingModule` would be circular:
+PricingModule → PriceRequestModule → Sales/PurchaseModule).
+
+**Adapter architecture (§72).** The publishing engine consumes ONLY the
+`PublishingAdapter` interface (`send(rendered, config, destination) →
+{ok, providerResponse}`) resolved from the `PUBLISHING_ADAPTERS` registry —
+`PublishingService`/`PublishBatchItemHandler` never touch a concrete adapter
+(proved by `p5c-04`, which drives a batch to SUCCESS with a fake adapter).
+To implement a REAL channel (e.g. Telegram): 1) write one class implementing
+`PublishingAdapter` for that `PublishChannel`; 2) register it in the
+`PUBLISHING_ADAPTERS` factory (`publishing.module.ts`, today
+`defaultPublishingAdapters()` in `adapters/mock-publishing.adapter.ts` —
+replace the channel's mock entry, keep `adapterMapOf` 1:1 by channel);
+3) settings arrive from the company's ACTIVE `IntegrationConfig.config` of
+that type (`mode`/`forceFail`/`failFirst` are mock conventions). ZERO
+changes elsewhere: no batch/item/queue/automation edits.
+
+**SEND_SMS audience (extension point).** `actionConfig.audience` =
+`{type: 'ALL_CUSTOMERS' | 'INACTIVE_DAYS' | 'PRODUCT_BUYERS', days?,
+productVariantId?}`: `ALL_CUSTOMERS` → every non-archived CUSTOMER party;
+`INACTIVE_DAYS` → CUSTOMER parties whose last non-cancelled sales_document
+is older than `days` (default 60; never-purchasers count as inactive);
+`PRODUCT_BUYERS` → distinct customers with a sales line on
+`productVariantId`. The daily scan runs an audience rule ONCE per date
+(idempotencyKey `daily:{ruleId}:{date}:audience`) and fans out ONE
+`sms.send` job per resolved member with a mobile, capped at 200 per run
+(`SMS_AUDIENCE_CAP`); the resolved count + queued count are logged on the
+run row. Job keys `sms:{runKey}:{partyId}` make re-runs no-ops. This is the
+clean seam for future favorite-products / behavior rules (AI later): new
+audience types slot into `AutomationService.resolveAudience` and every
+caller keeps working.
 
 ### Parties / CRM core (Phase 3A)
 
@@ -360,10 +426,10 @@ line count — no N+1).
 | GET | `/api/sales/:id` | lines with variant (sku/nameFa/template), uom symbol, printable description, tax snapshot | `sales.view` |
 | PATCH | `/api/sales/:id` (optimistic; 409 `VERSION_CONFLICT`) | header fields (expiration/paymentTerm/notes/shippingAddress) stay editable on confirmed orders | `sales.edit` |
 | POST | `/api/sales/:id/send` · `/:id/confirm` · `/:id/activate` · `/:id/lost` · `/:id/cancel` | send DRAFT/QUOTATION→SENT; confirm →CUSTOMER_CONFIRMED; activate →SALES_ORDER (same id+number); lost requires the reason per Setting `sales.lost_reason_required` (default true) | `sales.edit` / `sales.confirm` / `sales.edit` / `sales.cancel` |
-| POST | `/api/sales/:id/lines` · PATCH/DELETE `:id/lines/:lineId` | server-side totals; locked fields need override (above) | `sales.edit` |
+| POST | `/api/sales/:id/lines` · PATCH/DELETE `:id/lines/:lineId` | server-side totals; locked fields need override (above); lines snapshot `priceSource`/`priceDate` provenance (p5c — see Phase 5) | `sales.edit` |
 | POST | `/api/sales/:id/lines/matrix` `{cells:[{productVariantId, quantity, …}]}` | ONE line per NON-EMPTY cell (quantity absent/≤0 skipped); `printableDescription` defaults to «template nameFa + attribute values ' / '» | `sales.edit` |
 | POST | `/api/sales/:id/create-purchase` `{supplierPartyId, …}` | copies lines 1:1 (unitPrice 0 for the buyer), status ORDER_PLACED, CREATED_FROM relations both ways | `purchase.create` |
-| POST/GET/GET :id/PATCH/POST lines/PATCH/DELETE | `/api/purchase` — mirror of sales (no matrix); transitions `/:id/place`, `/:id/complete`, `/:id/cancel` | supplier must hold SUPPLIER role (422 `NOT_A_SUPPLIER`); buyer must be an active company member (`BUYER_NOT_COMPANY_MEMBER`); company-wide visibility (no record scope) | `purchase.view` / `create` / `edit` / `cancel` |
+| POST/GET/GET :id/PATCH/POST lines/PATCH/DELETE | `/api/purchase` — mirror of sales (no matrix); transitions `/:id/place`, `/:id/complete`, `/:id/cancel` | supplier must hold SUPPLIER role (422 `NOT_A_SUPPLIER`); buyer must be an active company member (`BUYER_NOT_COMPANY_MEMBER`); company-wide visibility (no record scope); lines carry `priceSource`/`priceDate` provenance (p5c — see Phase 5) | `purchase.view` / `create` / `edit` / `cancel` |
 | POST | `/api/purchase/:id/create-sale` `{customerPartyId, …}` | copies lines into a QUOTATION (unitPrice 0), CREATED_FROM relations both ways | `sales.create` |
 | POST/GET/PATCH/DELETE | `/api/allocations` `{salesLineId, purchaseLineId, allocatedQuantity}` | same company + same variant on BOTH lines (422 `ALLOCATION_VARIANT_MISMATCH`); over-allocation → 409 `ALLOCATION_EXCEEDS_QUANTITY`; SERIALIZABLE tx + `FOR UPDATE` on both lines (consistent id order) → concurrent over-allocation: exactly one wins | `allocations.manage` |
 | POST | `/api/price-requests` `{customerPartyId?, lines[]}` → `PRQ-1405-00001` | customer optional (must hold CUSTOMER role when given) | `price_request.create` |
@@ -543,8 +609,8 @@ text, never the product master.
 
 ## Tests
 
-`npm test` — 541 tests across 124 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, all 541 run against Postgres
+`npm test` — 573 tests across 129 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`; with it, all 573 run against Postgres
 and clean up after themselves). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
@@ -565,7 +631,13 @@ idempotent queue + no-double-send, item cancel, PRICE_UPDATED automation
 with SKIPPED duplicates, inactive-customer + pending-quotation daily scans,
 public prices/history/lookup without data leaks, cheapest-supplier win
 counts with ties, company isolation, permission catalog/roles/routes,
-template placeholders+warnings) and Jalali conversion, phone
+template placeholders+warnings) and the p5c pricing-integrity acceptance
+tests (`p5c-01` line price snapshots — DAILY_PRICE/MANUAL/TEMPLATE_DEFAULT
+with the price-change-never-rewrites regression, `p5c-02` purchase
+price-source wiring, `p5c-03` public-API visibility levels + isPublic
+toggle, `p5c-04` publishing-adapter contract + fake-adapter end-to-end,
+`p5c-05` SEND_SMS audience resolution + idempotent audience scan) and
+Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after
 themselves; unit tests need neither Postgres nor Redis.

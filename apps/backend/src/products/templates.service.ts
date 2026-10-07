@@ -1266,8 +1266,9 @@ export class TemplatesService {
   }
 
   /**
-   * PATCH variant — weight (weightPerUnit/weightUomId), default UOM, name and
-   * active flag with optimistic locking. Weight rules per 3B correction #3.
+   * PATCH variant — weight (weightPerUnit/weightUomId), default UOM, name,
+   * active flag and isPublic (public price-API visibility, p5c) with
+   * optimistic locking. Weight rules per 3B correction #3.
    */
   async updateVariant(
     companyId: string,
@@ -1289,6 +1290,7 @@ export class TemplatesService {
         weightPerUnit: true,
         weightUomId: true,
         active: true,
+        isPublic: true,
         version: true,
       },
     });
@@ -1333,6 +1335,9 @@ export class TemplatesService {
               : {}),
             ...(dto.weightUomId !== undefined ? { weightUomId: dto.weightUomId } : {}),
             ...(dto.active !== undefined ? { active: dto.active } : {}),
+            // p5c: hides the variant from the public price API (false) —
+            // see PublicApiService visibility levels.
+            ...(dto.isPublic !== undefined ? { isPublic: dto.isPublic } : {}),
             version: { increment: 1 },
           },
         });
@@ -1348,6 +1353,7 @@ export class TemplatesService {
             weightPerUnit: variant.weightPerUnit,
             weightUomId: variant.weightUomId,
             active: variant.active,
+            isPublic: variant.isPublic,
             version: variant.version,
           },
           newValues: {
@@ -1356,6 +1362,7 @@ export class TemplatesService {
             weightPerUnit: updated.weightPerUnit,
             weightUomId: updated.weightUomId,
             active: updated.active,
+            isPublic: updated.isPublic,
             version: updated.version,
           },
           ip: ctx.ip,

@@ -12,7 +12,28 @@ import { parseDayKey, shiftDayKey, todayKey } from '../pricing/day';
  *
  * Privacy (REQUIREMENTS §75): the portal lookup NEVER leaks customer data —
  * it answers only {matched, linked} for a normalized mobile.
+ *
+ * p5c pricing-integrity review — visibility levels. The company Setting
+ * `publicapi.visibility` selects what the price endpoints expose:
+ *   - `ALL`            (default) every ACTIVE variant's day prices;
+ *   - `PUBLISHED_ONLY` only variants covered by a SUCCESS WEBSITE
+ *                      PublishBatchItem for that day;
+ *   - `PORTAL_ONLY`    /api/public/prices* answer 403 PORTAL_REQUIRED —
+ *                      customers use the portal; /api/public/portal/lookup
+ *                      stays open (it exposes nothing).
+ * The legacy Setting `publicapi.website_only_published=true` is honored as
+ * an alias for PUBLISHED_ONLY. In ALL and PUBLISHED_ONLY modes a variant
+ * with `isPublic=false` (ProductVariant, toggled via PATCH
+ * /api/products/templates/:id/variants/:variantId, products.edit) is
+ * excluded from every public endpoint.
  */
+/** The three visibility levels (Setting `publicapi.visibility`). */
+export type PublicVisibility = 'ALL' | 'PUBLISHED_ONLY' | 'PORTAL_ONLY';
+
+export const PUBLIC_VISIBILITY_SETTING = 'publicapi.visibility';
+export const LEGACY_WEBSITE_ONLY_SETTING = 'publicapi.website_only_published';
+const VISIBILITY_VALUES: PublicVisibility[] = ['ALL', 'PUBLISHED_ONLY', 'PORTAL_ONLY'];
+
 @Injectable()
 export class PublicApiService {
   constructor(private readonly prisma: PrismaService) {}
@@ -58,12 +79,30 @@ export class PublicApiService {
     return first.id;
   }
 
-  private async websiteOnlyVariantIds(companyId: string, day: Date): Promise<string[] | null> {
-    const flag = await this.prisma.setting.findFirst({
-      where: { companyId, key: 'publicapi.website_only_published' },
+  /**
+   * Resolve the visibility level for a company (see class doc): the Setting
+   * `publicapi.visibility` wins; the legacy `publicapi.website_only_published=true`
+   * aliases to PUBLISHED_ONLY; anything else defaults to ALL.
+   */
+  async resolveVisibility(companyId: string): Promise<PublicVisibility> {
+    const setting = await this.prisma.setting.findFirst({
+      where: { companyId, key: PUBLIC_VISIBILITY_SETTING },
       select: { value: true },
     });
-    if (flag?.value !== true) return null;
+    const raw = setting?.value;
+    if (typeof raw === 'string' && (VISIBILITY_VALUES as string[]).includes(raw)) {
+      return raw as PublicVisibility;
+    }
+    const legacy = await this.prisma.setting.findFirst({
+      where: { companyId, key: LEGACY_WEBSITE_ONLY_SETTING },
+      select: { value: true },
+    });
+    if (legacy?.value === true) return 'PUBLISHED_ONLY';
+    return 'ALL';
+  }
+
+  /** Variant ids covered by a SUCCESS WEBSITE publish item for `day`. */
+  private async publishedVariantIds(companyId: string, day: Date): Promise<string[]> {
     const items = await this.prisma.publishBatchItem.findMany({
       where: { companyId, channel: 'WEBSITE', status: 'SUCCESS', priceDate: day },
       select: { renderedPayload: true },
@@ -81,8 +120,15 @@ export class PublicApiService {
     const dayKey = input.date ?? todayKey();
     const day = parseDayKey(dayKey);
 
-    const variantIdFilter = await this.websiteOnlyVariantIds(companyId, day);
-    if (variantIdFilter && variantIdFilter.length === 0) {
+    const visibility = await this.resolveVisibility(companyId);
+    if (visibility === 'PORTAL_ONLY') {
+      // Portal-only companies expose NO open price API; the portal lookup
+      // endpoint stays up (it leaks nothing — see portalLookup).
+      throw new ForbiddenError('PORTAL_REQUIRED');
+    }
+    const publishedIds =
+      visibility === 'PUBLISHED_ONLY' ? await this.publishedVariantIds(companyId, day) : null;
+    if (publishedIds && publishedIds.length === 0) {
       return { date: dayKey, items: [] };
     }
 
@@ -90,7 +136,10 @@ export class PublicApiService {
       where: {
         companyId,
         date: day,
-        ...(variantIdFilter ? { productVariantId: { in: variantIdFilter } } : {}),
+        ...(publishedIds ? { productVariantId: { in: publishedIds } } : {}),
+        // isPublic=false variants are hidden from the open price API in every
+        // mode that serves prices (p5c review); inactive variants too.
+        productVariant: { isPublic: true, active: true },
       },
       orderBy: { productVariant: { sku: 'asc' } },
       include: {
@@ -131,15 +180,21 @@ export class PublicApiService {
 
   /** Last N days of one variant's price history (newest first). */
   async priceHistory(companyId: string, variantId: string, days = 30) {
+    // PORTAL_ONLY companies answer 403 on ALL /api/public/prices* routes.
+    if ((await this.resolveVisibility(companyId)) === 'PORTAL_ONLY') {
+      throw new ForbiddenError('PORTAL_REQUIRED');
+    }
     const boundedDays = Math.min(Math.max(days, 1), 365);
     const today = todayKey();
     const from = parseDayKey(shiftDayKey(today, -(boundedDays - 1)));
 
     const variant = await this.prisma.productVariant.findFirst({
       where: { id: variantId, companyId },
-      select: { id: true, sku: true, nameFa: true },
+      select: { id: true, sku: true, nameFa: true, isPublic: true },
     });
-    if (!variant) {
+    // Unknown AND isPublic=false variants are indistinguishable (p5c: hidden
+    // variants must not be enumerable through the public API).
+    if (!variant || !variant.isPublic) {
       throw new ForbiddenError('Product variant not found', { variantId });
     }
 

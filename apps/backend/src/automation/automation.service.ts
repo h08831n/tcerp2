@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AutomationRule, AutomationRun, Prisma, PublishChannel } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { NotFoundError } from '../common/errors';
+import { NotFoundError, ValidationError } from '../common/errors';
 import { QueueService } from '../queue/queue.service';
 import { PublishingService } from '../publishing/publishing.service';
 import {
@@ -38,6 +38,44 @@ export interface ScanRuleSummary {
   conditionSkipped: number;
 }
 
+// ───────────────────── SEND_SMS audience (p5c extension point) ─────────────────────
+
+/** Max sms.send jobs ONE audience run enqueues — protects the daily scan. */
+export const SMS_AUDIENCE_CAP = 200;
+
+export type SmsAudienceType = 'ALL_CUSTOMERS' | 'INACTIVE_DAYS' | 'PRODUCT_BUYERS';
+
+/**
+ * SEND_SMS `actionConfig.audience` (p5c pricing-integrity review): when set,
+ * the action targets a RESOLVED CUSTOMER AUDIENCE instead of the single
+ * record's mobile. This is the clean extension point for future
+ * favorite-products / behavior-driven rules (AI later): new audience types
+ * slot into `resolveAudience` and every caller (daily scan, manual run,
+ * future rule UI) keeps working unchanged.
+ */
+export interface SmsAudienceConfig {
+  type: SmsAudienceType;
+  /** INACTIVE_DAYS: last sales_document older than N days (default 60). */
+  days?: number;
+  /** PRODUCT_BUYERS: distinct customers with a sales line on this variant. */
+  productVariantId?: string;
+}
+
+/** One resolved audience member (party + best mobile for the sms.send job). */
+export interface SmsAudienceMember {
+  partyId: string;
+  nameFa: string;
+  mobile: string | null;
+  ownerUserId: string | null;
+  /** YYYY-MM-DD of the last (non-cancelled) sale — null when never purchased. */
+  lastPurchaseDate: string | null;
+}
+
+function hasAudience(rule: AutomationRule): boolean {
+  const config = (rule.actionConfig ?? {}) as { audience?: SmsAudienceConfig };
+  return typeof config.audience?.type === 'string' && config.audience.type.length > 0;
+}
+
 /**
  * Automation runner (Phase 5 lean subset of REQUIREMENTS §52):
  *   - PRICE_UPDATED: fired by the pricing engine AFTER the price write
@@ -50,6 +88,10 @@ export interface ScanRuleSummary {
  *     by the `automation.daily_scan` queue job (06:00, self-rescheduling) or
  *     the manual run endpoint. Per-record run keys
  *     `daily:{ruleId}:{date}:{partyId|documentId}` make re-runs no-ops.
+ *     p5c: a SEND_SMS rule with `actionConfig.audience` instead runs ONCE
+ *     per date (`daily:{ruleId}:{date}:audience`) and fans out one capped
+ *     sms.send per resolved customer — the extension point for future
+ *     favorite-products / behavior rules (see resolveAudience + README).
  *
  * Note on purchase activity: CUSTOMER_INACTIVE_DAYS derives the last purchase
  * from sales_documents (max documentDate per party, CANCELLED excluded).
@@ -214,15 +256,148 @@ export class AutomationService implements PriceUpdatedHook {
     return { notifications: notifications.length, userIds };
   }
 
+  // ───────────────────── SEND_SMS audience resolution (p5c) ─────────────────────
+
+  /**
+   * Resolve a SEND_SMS audience to customers (p5c — see SmsAudienceConfig).
+   * Members without a MOBILE phone are returned with mobile=null; the action
+   * skips them (they surface in the run result counters).
+   */
+  async resolveAudience(companyId: string, audience: SmsAudienceConfig): Promise<SmsAudienceMember[]> {
+    if (!audience || !audience.type) throw new ValidationError('AUDIENCE_TYPE_REQUIRED');
+
+    const customers = await this.prisma.party.findMany({
+      where: { companyId, archivedAt: null, roles: { some: { role: 'CUSTOMER' } } },
+      select: {
+        id: true,
+        nameFa: true,
+        ownerUserId: true,
+        phones: { where: { kind: 'MOBILE' }, select: { normalizedValue: true }, take: 1 },
+      },
+    });
+
+    if (audience.type === 'INACTIVE_DAYS') {
+      const days = Number(audience.days ?? 60);
+      if (!Number.isFinite(days) || days <= 0) {
+        throw new ValidationError('AUDIENCE_DAYS_REQUIRED', { days: audience.days });
+      }
+      const cutoff = new Date(parseDayKey(todayKey()).getTime() - days * 24 * 60 * 60 * 1000);
+      // Last purchase per party from sales_documents (CANCELLED excluded) —
+      // customers with NO sale at all count as inactive (matches the
+      // CUSTOMER_INACTIVE_DAYS scan semantics).
+      const lastSales = await this.prisma.salesDocument.groupBy({
+        by: ['customerPartyId'],
+        where: { companyId, status: { not: 'CANCELLED' } },
+        _max: { documentDate: true },
+      });
+      const lastByParty = new Map(
+        lastSales
+          .filter((row) => row._max.documentDate !== null)
+          .map((row) => [row.customerPartyId, row._max.documentDate as Date]),
+      );
+      return customers
+        .filter((customer) => {
+          const last = lastByParty.get(customer.id);
+          return !last || last.getTime() < cutoff.getTime();
+        })
+        .map((customer) => this.toAudienceMember(customer, lastByParty.get(customer.id) ?? null));
+    }
+
+    if (audience.type === 'PRODUCT_BUYERS') {
+      if (!audience.productVariantId) {
+        throw new ValidationError('AUDIENCE_VARIANT_REQUIRED');
+      }
+      const buyers = await this.prisma.salesDocument.findMany({
+        where: {
+          companyId,
+          status: { not: 'CANCELLED' },
+          lines: { some: { productVariantId: audience.productVariantId } },
+        },
+        select: { customerPartyId: true },
+        distinct: ['customerPartyId'],
+      });
+      const buyerIds = new Set(buyers.map((buyer) => buyer.customerPartyId));
+      return customers
+        .filter((customer) => buyerIds.has(customer.id))
+        .map((customer) => this.toAudienceMember(customer, null));
+    }
+
+    // ALL_CUSTOMERS
+    return customers.map((customer) => this.toAudienceMember(customer, null));
+  }
+
+  private toAudienceMember(
+    customer: {
+      id: string;
+      nameFa: string;
+      ownerUserId: string | null;
+      phones: { normalizedValue: string }[];
+    },
+    lastSale: Date | null,
+  ): SmsAudienceMember {
+    return {
+      partyId: customer.id,
+      nameFa: customer.nameFa,
+      mobile: customer.phones[0]?.normalizedValue ?? null,
+      ownerUserId: customer.ownerUserId ?? null,
+      lastPurchaseDate: lastSale ? lastSale.toISOString().slice(0, 10) : null,
+    };
+  }
+
   private async actionSendSms(
     rule: AutomationRule,
     companyId: string,
     event: Record<string, unknown>,
     run: AutomationRun,
   ) {
+    const actionConfig = (rule.actionConfig ?? {}) as { text?: string; audience?: SmsAudienceConfig };
+    const audience = actionConfig.audience;
+
+    if (hasAudience(rule)) {
+      // p5c audience mode: one run fans out one sms.send per resolved member
+      // (capped). The scan passes the resolved members through the run's
+      // trigger payload so the count is logged ON the run row.
+      const resolved = Array.isArray(event.audienceMembers)
+        ? (event.audienceMembers as SmsAudienceMember[])
+        : await this.resolveAudience(companyId, audience as SmsAudienceConfig);
+      const members = resolved.slice(0, SMS_AUDIENCE_CAP);
+      const keyBase = run.idempotencyKey ?? run.id;
+      let queued = 0;
+      let skippedNoMobile = 0;
+      for (const member of members) {
+        if (!member.mobile) {
+          skippedNoMobile += 1;
+          continue;
+        }
+        const memberEvent: Record<string, unknown> = {
+          ...event,
+          partyId: member.partyId,
+          partyName: member.nameFa,
+          mobile: member.mobile,
+          recordOwnerId: member.ownerUserId ?? '',
+        };
+        delete memberEvent.audienceMembers;
+        await this.queueService.enqueue({
+          jobType: 'sms.send',
+          companyId,
+          payload: { companyId, to: member.mobile, text: interpolate(actionConfig.text ?? rule.nameFa, memberEvent) },
+          idempotencyKey: `sms:${keyBase}:${member.partyId}`,
+          priority: 'HIGH',
+        });
+        queued += 1;
+      }
+      return {
+        queued: true,
+        audienceType: audience?.type,
+        audienceResolved: resolved.length,
+        smsQueued: queued,
+        skippedNoMobile,
+        cap: SMS_AUDIENCE_CAP,
+      };
+    }
+
     const to = String(event.mobile ?? '') || null;
     if (!to) return { queued: false, reason: 'NO_MOBILE' };
-    const actionConfig = (rule.actionConfig ?? {}) as { text?: string };
     const text = interpolate(actionConfig.text ?? rule.nameFa, event);
     await this.queueService.enqueue({
       jobType: 'sms.send',
@@ -258,12 +433,50 @@ export class AutomationService implements PriceUpdatedHook {
     const summaries: ScanRuleSummary[] = [];
     for (const rule of rules) {
       const summary =
-        rule.triggerType === 'CUSTOMER_INACTIVE_DAYS'
-          ? await this.scanInactiveCustomers(rule, dateKey)
-          : await this.scanPendingQuotations(rule, dateKey);
+        rule.actionType === 'SEND_SMS' && hasAudience(rule)
+          ? await this.scanSmsAudience(rule, dateKey)
+          : rule.triggerType === 'CUSTOMER_INACTIVE_DAYS'
+            ? await this.scanInactiveCustomers(rule, dateKey)
+            : await this.scanPendingQuotations(rule, dateKey);
       summaries.push(summary);
     }
     return summaries;
+  }
+
+  /**
+   * p5c: a SEND_SMS rule with an `actionConfig.audience` runs ONCE per scan
+   * date (idempotencyKey `daily:{ruleId}:{date}:audience`) instead of once
+   * per record — the resolved audience members travel in the run's trigger
+   * payload and the action fans out ONE capped sms.send job per member
+   * (`sms:{runKey}:{partyId}`), so re-runs of the same date are no-ops.
+   * conditionConfig (when present) evaluates against the audience summary
+   * event {date, audienceType, audienceCount}.
+   */
+  private async scanSmsAudience(rule: AutomationRule, dateKey: string): Promise<ScanRuleSummary> {
+    const audience = ((rule.actionConfig ?? {}) as { audience?: SmsAudienceConfig }).audience;
+    if (!audience) throw new ValidationError('AUDIENCE_TYPE_REQUIRED');
+    const members = await this.resolveAudience(rule.companyId, audience);
+    const summary: ScanRuleSummary = {
+      ruleId: rule.id,
+      code: rule.code,
+      triggerType: rule.triggerType,
+      candidates: members.length,
+      executed: 0,
+      skippedDuplicates: 0,
+      conditionSkipped: 0,
+    };
+    const event = {
+      date: dateKey,
+      scanType: 'SMS_AUDIENCE',
+      audienceType: audience.type,
+      audienceCount: members.length,
+      audienceMembers: members,
+    };
+    const outcome = await this.runRuleInline(rule, event, `daily:${rule.id}:${dateKey}:audience`);
+    if (outcome === 'executed') summary.executed = 1;
+    else if (outcome === 'duplicate') summary.skippedDuplicates = 1;
+    else summary.conditionSkipped = 1;
+    return summary;
   }
 
   private async scanInactiveCustomers(rule: AutomationRule, dateKey: string): Promise<ScanRuleSummary> {
@@ -519,6 +732,12 @@ export class AutomationService implements PriceUpdatedHook {
 
     if (rule.triggerType === 'CUSTOMER_INACTIVE_DAYS' || rule.triggerType === 'QUOTATION_PENDING_DAYS') {
       const dateKey = input.date ?? todayKey();
+      // p5c: audience-based SEND_SMS rules are bulk actions — they always run
+      // as the once-per-date audience scan (entityId is not applicable).
+      if (rule.actionType === 'SEND_SMS' && hasAudience(rule)) {
+        const summaries = await this.scanSmsAudience(rule, dateKey);
+        return { runs: [], summaries: [summaries] };
+      }
       // Single-record manual run OR a full scan of this rule.
       if (input.entityId && rule.triggerType === 'CUSTOMER_INACTIVE_DAYS') {
         const customer = await this.prisma.party.findFirst({
