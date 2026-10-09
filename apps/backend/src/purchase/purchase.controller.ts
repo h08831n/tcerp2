@@ -126,6 +126,14 @@ export class PurchaseController {
     return this.purchaseService.place(companyId, id, actor, this.ctx(request));
   }
 
+  /** Phase 6 goods receipt: IN stock movements (idempotent no-op on re-receive). */
+  @Post(':id/receive')
+  @RequirePermissions('purchase.edit')
+  async receive(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() actor: { id: string; username: string }, @Req() request: Request) {
+    const companyId = await this.companyIdOf(actor, request);
+    return this.purchaseService.receive(companyId, id, actor, this.ctx(request));
+  }
+
   @Post(':id/complete')
   @RequirePermissions('purchase.edit')
   async complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() actor: { id: string; username: string }, @Req() request: Request) {

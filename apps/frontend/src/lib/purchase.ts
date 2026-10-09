@@ -125,6 +125,8 @@ export interface PurchaseDocumentDetail {
   discountTotal: string;
   taxTotal: string;
   total: string;
+  /** Phase 6: Σ(allocatedQuantity × line.unitPrice) of confirmed loading allocations. */
+  operationalLoadedAmount?: string | null;
   version: number;
   lines: PurchaseLineDto[];
 }
@@ -278,4 +280,14 @@ export function createSaleFromPurchase(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** Phase 6 goods receipt: IN stock movements (idempotent no-op on re-receive). */
+export interface ReceivePurchaseResult {
+  moved: boolean;
+  movedCount?: number;
+}
+
+export function receivePurchase(id: string): Promise<ReceivePurchaseResult> {
+  return apiJson<ReceivePurchaseResult>(`/purchase/${id}/receive`, { method: "POST" });
 }

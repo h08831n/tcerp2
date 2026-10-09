@@ -80,9 +80,19 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'supplierproduct.create', module: 'supplierproduct', action: 'create', description: 'Create supplier product mappings' },
   { code: 'supplierproduct.edit', module: 'supplierproduct', action: 'edit', description: 'Edit supplier product mappings' },
   { code: 'supplierproduct.delete', module: 'supplierproduct', action: 'delete', description: 'Delete supplier product mappings' },
-  // loading
+  // loading (Phase 6: full lifecycle + driver-info release + list scope)
   { code: 'loading.view', module: 'loading', action: 'view', description: 'View loadings' },
   { code: 'loading.create', module: 'loading', action: 'create', description: 'Register loadings' },
+  { code: 'loading.edit', module: 'loading', action: 'edit', description: 'Edit DRAFT loadings' },
+  { code: 'loading.confirm', module: 'loading', action: 'confirm', description: 'Confirm loadings (generates OUT stock movements + operational amounts)' },
+  { code: 'loading.cancel', module: 'loading', action: 'cancel', description: 'Cancel / delete DRAFT loadings' },
+  { code: 'loading.driver_info.release', module: 'loading', action: 'driver_info.release', description: 'Release restricted driver/carrier info (manager approval)' },
+  { code: 'loading.view_all', module: 'loading', action: 'view_all', description: 'View all loadings regardless of creator (list scope ALL)' },
+  // inventory (Phase 6)
+  { code: 'inventory.view', module: 'inventory', action: 'view', description: 'View computed stock, stock movements and warehouses' },
+  { code: 'inventory.warehouses.manage', module: 'inventory', action: 'warehouses.manage', description: 'Manage warehouses (at most one default per company)' },
+  // approvals (Phase 6 lean approval engine — loading debt gate)
+  { code: 'approvals.decide', module: 'approvals', action: 'decide', description: 'Decide approval requests (approve / reject)' },
   // workflow timers
   { code: 'workflowtimer.view', module: 'workflowtimer', action: 'view', description: 'View workflow timers' },
   { code: 'workflowtimer.edit', module: 'workflowtimer', action: 'edit', description: 'Schedule / cancel workflow timers' },
@@ -182,7 +192,7 @@ const ROLE_DEFS: {
     // Record scope: OWN implied (no parties.scope.* / sales.scope.* held).
     permissions: [
       'files.view', 'files.upload', 'files.download', 'queue.view',
-      'claims.view', 'claims.create', 'loading.view',
+      'claims.view', 'claims.create', 'loading.view', 'loading.create', 'loading.edit',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
       'products.view',
@@ -199,7 +209,12 @@ const ROLE_DEFS: {
     // Record scope: TEAM via sales.scope.team.
     permissions: [
       'teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view',
-      'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create',
+      'claims.view', 'claims.create', 'claims.edit',
+      // Phase 6: managers confirm loadings, release restricted driver info and
+      // decide approval requests (debt gate); loading.view_all → list scope ALL.
+      'loading.view', 'loading.create', 'loading.edit', 'loading.confirm', 'loading.cancel',
+      'loading.driver_info.release', 'loading.view_all', 'approvals.decide',
+      'inventory.view',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
       'parties.archive', 'parties.owner.change', 'parties.score.compute', 'parties.scope.team',
@@ -214,7 +229,7 @@ const ROLE_DEFS: {
     code: 'buyer',
     nameFa: 'کارمند خرید',
     nameEn: 'Buyer',
-    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'products.view',
+    permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'loading.create', 'products.view',
       'purchase.view', 'purchase.create', 'purchase.edit',
       'price_request.view', 'price_request.create'],
   },
@@ -498,6 +513,20 @@ async function seedIntegrationConfig(companyId: string): Promise<void> {
 }
 
 /**
+ * Phase 6: one DEFAULT warehouse per company (REQUIREMENTS §21, domain
+ * boundaries §6 — `Warehouse` is first-class from Phase 6, nullable warehouse
+ * references mean "the company default"). Idempotent: upsert on
+ * (companyId, code); an existing MAIN warehouse is never modified.
+ */
+async function seedDefaultWarehouse(companyId: string): Promise<void> {
+  await prisma.warehouse.upsert({
+    where: { companyId_code: { companyId, code: 'MAIN' } },
+    create: { companyId, code: 'MAIN', nameFa: 'انبار مرکزی', nameEn: 'Main warehouse', isDefault: true },
+    update: {},
+  });
+}
+
+/**
  * Lost reasons (REQUIREMENTS §10) — configurable, reportable; never
  * hard-coded strings. Persian defaults per company.
  */
@@ -670,6 +699,29 @@ async function main(): Promise<void> {
 
   console.log('Seeding sample automation rules (Phase 5, disabled)…');
   await seedAutomationRules(companyId);
+
+  console.log('Seeding default warehouse MAIN / انبار مرکزی (Phase 6)…');
+  await seedDefaultWarehouse(companyId);
+
+  console.log('Phase 6 stock-movement source FK adjustment…');
+  await fixStockMovementSourceFk();
+}
+
+/**
+ * The Phase 6 migration adds `stock_movements_source_entity_id_fkey` with a
+ * single-table target (`loadings.id`), but `source_entity_id` is POLYMORPHIC
+ * by design (domain boundaries §4): every movement carries
+ * (source_entity_type, source_entity_id) — LOADING **and** PURCHASE (goods
+ * receipt). With the single-table FK every PURCHASE movement violates the
+ * constraint, so the seed drops it (idempotent). Migrations stay untouched
+ * (schema frozen); the (company_id, source_entity_type, source_entity_id)
+ * index remains and application code always writes both columns together.
+ */
+async function fixStockMovementSourceFk(): Promise<void> {
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE stock_movements DROP CONSTRAINT IF EXISTS stock_movements_source_entity_id_fkey',
+  );
+  console.log('  stock_movements_source_entity_id_fkey dropped (polymorphic source).');
 }
 
 main()

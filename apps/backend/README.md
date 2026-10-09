@@ -21,6 +21,11 @@ intelligence), document-flow relations. Phase 5: daily pricing engine
 publishing (batch → per-channel queue items through mock channel
 adapters + templates), automation engine (PRICE_UPDATED + daily scans,
 idempotent runs), public website/portal API.
+Phase 6: loading operational lifecycle (confirm generates OUT stock
+movements + operational loaded amounts + the customer-debt driver-info
+gate), purchase goods receipt (IN movements), computed inventory
+(SUM(IN) − SUM(OUT) per variant), warehouses (one default per company)
+and a lean approval-request engine (RELEASE_DRIVER_INFO).
 
 ## Setup
 
@@ -94,7 +99,17 @@ src/
   products/         Phase 3B catalog: categories, brands, UOM engine +
                     conversions, dynamic attributes, templates/variants,
                     supplier mappings
-  loading/         loading header + lines + allocations
+  loading/         Phase 6 loading lifecycle: DRAFT → CONFIRMED (+ cancel);
+                   confirm = ONE serializable tx (allocation re-validation
+                   under FOR UPDATE, OUT StockMovements, operational loaded
+                   amounts, debt gate, relations, audit) + driver-info
+                   release; responses strip driver/carrier while restricted
+  inventory/       Phase 6 computed stock (single aggregate query, negative
+                   flagged), movement ledger, warehouses CRUD (at most one
+                   default — `ensureDefaultWarehouse` resolves/seeds MAIN)
+  approvals/       Phase 6 ApprovalRequest engine: list/get/decide; APPROVED
+                   RELEASE_DRIVER_INFO clears loading.driverInfoRestricted
+                   in the same tx; requester notified
   workflow-timer/  durable timers executed by the queue (action registry)
   notifications/   notification rules (condition engine) + dispatch service
   integrations/    integration adapter configs (SMS/…)
@@ -331,6 +346,66 @@ run row. Job keys `sms:{runKey}:{partyId}` make re-runs no-ops. This is the
 clean seam for future favorite-products / behavior rules (AI later): new
 audience types slot into `AutomationService.resolveAudience` and every
 caller keeps working.
+
+### Loading · Inventory · Operational settlement (Phase 6)
+
+The Loading (header + lines + optional allocations) is the SINGLE operational
+event of the domain (boundaries doc §2): it is registered once and shared by
+the sale and purchase sides. `POST /api/loadings/:id/confirm` runs ONE
+SERIALIZABLE transaction that (a) re-validates every allocation with `FOR
+UPDATE` row locks in consistent id order — loading allocations consume
+ordered quantity on BOTH sales and purchase lines (over-allocation → 409
+`ALLOCATION_EXCEEDS_QUANTITY`, cross-variant → 422
+`ALLOCATION_VARIANT_MISMATCH`); (b) generates one OUT `StockMovement` per
+loading line into the loading's warehouse (or the company default,
+`ensureDefaultWarehouse`) with idempotencyKey
+`loading:{loadingId}:line:{lineId}` (P2002 = already moved — never
+duplicated); (c) adds `allocatedQuantity × line.unitPrice` (exact Decimal)
+to each allocated document's `operationalLoadedAmount` and recomputes the
+document status → `PARTIALLY_LOADED` / `COMPLETED` (only from
+SALES_ORDER / ORDER_PLACED+; never downgraded); (d) applies the DEBT GATE
+(§20): a customer whose `PartyOperationalBalance.balance > 0` gets a PENDING
+`RELEASE_DRIVER_INFO` ApprovalRequest and `driverInfoRestricted = true` —
+debt never blocks the loading, it only hides driver/carrier details; (e)
+writes loading ↔ sales_document RELATED DocumentRelations + audit + party
+timeline (`LOADING_CONFIRMED`) — audit failure rolls the whole confirmation
+back (p6-13).
+
+Driver-info visibility: while restricted, `GET /api/loadings/:id` strips
+driver/carrier details (`driver: null, carrier: null, restricted: true`)
+unless the caller holds `loading.driver_info.release` OR `approvals.decide`;
+list responses NEVER carry driver/carrier details. Release/reject
+(`loading.driver_info.release`) decides the PENDING approval — APPROVED
+clears the restriction, REJECTED keeps it; the requester is notified.
+
+Purchase goods receipt: `POST /api/purchase/:id/receive` (`purchase.edit`,
+from ORDER_PLACED) generates one IN movement per purchase line
+(idempotencyKey `purchase:{id}:line:{lineId}`) into the default warehouse;
+re-receive is a no-op success (`moved: false`).
+
+Inventory: stock per variant = SUM(IN) − SUM(OUT) in ONE aggregate SQL query
+(display joins + `COUNT(*) OVER()` pagination; negative stock allowed and
+flagged `negative: true` — warning semantics, nothing is blocked). There is
+NO manual stock entry and none will be added (boundary §5). Warehouses
+enforce at most one default per company (UOM base-unit precedent); the seed
+creates one `MAIN` انبار مرکزی default per company.
+
+| Method | Path | Notes | Permission |
+| --- | --- | --- | --- |
+| POST/GET | `/api/loadings` (+ GET/PATCH/DELETE `:id`) — create DRAFT (role-validated driver/carrier/customer parties, same-company variant/uom, allocation guards), paginated list (`status`/date/`customerPartyId` filters; ALL with `loading.view_all` else creator-own) | `loading.view` / `create` / `edit` / `cancel` |
+| POST | `/api/loadings/:id/confirm` — the operational event (a)–(e) above; double confirm → 403 `LOADING_CONFIRMED` | `loading.confirm` |
+| POST | `/api/loadings/:id/cancel` — DRAFT → CANCELLED; CONFIRMED → 403 `LOADING_CONFIRMED` | `loading.cancel` |
+| POST | `/api/loadings/:id/driver-info/release` · `/:id/driver-info/reject` — manager decision on the debt-gate approval | `loading.driver_info.release` |
+| GET | `/api/loadings/:id/relations` — related documents (document-flow; loading labelled «بارگیری {date}») | `loading.view` |
+| POST | `/api/purchase/:id/receive` — IN movements per line, idempotent (`moved:false` on re-receive) | `purchase.edit` |
+| GET | `/api/inventory/stock?warehouseId&variantId&categoryId&search&page&pageSize` — computed stock per variant | `inventory.view` |
+| GET | `/api/inventory/movements?warehouseId&variantId&sourceEntityType&sourceEntityId&from&to` — ledger desc | `inventory.view` |
+| GET/POST/PATCH/DELETE | `/api/inventory/warehouses(+:id)` (+ POST `:id/default` — flips the single default) | `inventory.view` / `inventory.warehouses.manage` |
+| GET | `/api/approvals?status&approvalType&entityType` · `/api/approvals/:id` | `approvals.decide` |
+| POST | `/api/approvals/:id/decide` `{decision: APPROVED\|REJECTED, note?}` — 409 `APPROVAL_ALREADY_DECIDED` on re-decide | `approvals.decide` |
+| GET | `/api/parties/:id/operational-balance` — the debt-gate input (claims module) | `claims.view` |
+
+Phase 6 party timeline events: `LOADING_CONFIRMED`, `DRIVER_INFO_RELEASED`.
 
 ### Parties / CRM core (Phase 3A)
 
@@ -580,6 +655,16 @@ text, never the product master.
   `sales.scope.team` / `sales.scope.all`), `purchase.*` (view / create / edit /
   cancel), `price_request.*` (view / create / manage_offers),
   `allocations.manage`, `crm.view` / `crm.manage`, `paymentterm.manage`.
+- Phase 6 permission catalog additions: `loading.*` (view / create / edit /
+  confirm / cancel / driver_info.release / view_all), `inventory.*` (view /
+  warehouses.manage), `approvals.decide`. Roles: `salesperson` keeps
+  loading.view/create/edit; `sales_manager` gains the full loading stack
+  (confirm/cancel/driver_info.release/view_all) + `approvals.decide` +
+  `inventory.view`; `buyer` and `purchase_manager` gain loading.view/create
+  (purchase side); `admin` holds all.
+- One DEFAULT warehouse per company: `MAIN` انبار مرکزی (upsert on
+  `(companyId, code)` — never modified on re-seed); the service-level
+  `ensureDefaultWarehouse` also self-heals companies with none.
 - System roles: `admin` (all), `salesperson` (OWN sales scope),
   `sales_manager` (`sales.scope.team`), `buyer`, `purchase_manager`,
   `accountant`, `financial_manager`, `pricing_user`.
@@ -637,6 +722,19 @@ with the price-change-never-rewrites regression, `p5c-02` purchase
 price-source wiring, `p5c-03` public-API visibility levels + isPublic
 toggle, `p5c-04` publishing-adapter contract + fake-adapter end-to-end,
 `p5c-05` SEND_SMS audience resolution + idempotent audience scan) and
+the Phase 6 acceptance tests (`p6-01` confirm generates OUT movements with
+`loading:{id}:line:{lineId}` idempotency keys into the default warehouse,
+`p6-02` double confirm → 403 `LOADING_CONFIRMED` + no duplicate movements
+on re-run, `p6-03` purchase receive IN movements + no-op re-receive,
+`p6-04` computed stock IN 50 / OUT 20 → 30 with negative flagging,
+`p6-05` operational loaded amounts + PARTIALLY_LOADED → COMPLETED,
+`p6-06` over-allocation guard, `p6-07` variant mismatch guard, `p6-08`
+debt gate restricts driver info (approval + restricted payload rules),
+`p6-09` release/reject approval flow with notifications, `p6-10` no debt →
+no restriction, `p6-11` company isolation, `p6-12` permissions
+(loading.confirm / approvals.decide / inventory.warehouses.manage),
+`p6-13` audit atomicity on confirm, `p6-14` warehouse default resolution,
+`p6-15` restart persistence, `p6-16` driver role guard `NOT_A_DRIVER`) and
 Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after

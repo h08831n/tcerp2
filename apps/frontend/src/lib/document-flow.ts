@@ -58,6 +58,8 @@ export function documentHref(type: string, id?: string): string {
       return id ? `/sales/${id}` : "/sales";
     case "purchase_document":
       return id ? `/purchases/${id}` : "/purchases";
+    case "loading":
+      return id ? `/loadings/${id}` : "/loadings";
     case "price_request":
       return "/price-requests";
     case "lead":

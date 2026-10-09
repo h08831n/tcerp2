@@ -193,6 +193,8 @@ export interface SalesDocumentDetail {
   discountTotal: string;
   taxTotal: string;
   total: string;
+  /** Phase 6: Σ(allocatedQuantity × line.unitPrice) of confirmed loading allocations. */
+  operationalLoadedAmount?: string | null;
   version: number;
   lines: SalesLineDto[];
 }

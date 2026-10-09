@@ -37,8 +37,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: "درخواست قیمت", href: "/price-requests", icon: <NavIcon d="M9 14l6-6m-5.5.5l1 1M14 13l1 1M3 3h18v18H3zM8 8h.01M16 16h.01" /> },
   { label: "قیمت روز", href: "/pricing", icon: <NavIcon d="M3 3v18h18M8 17V9m4 8V5m4 12v-6" /> },
   { label: "صف انتشار", href: "/publishing", icon: <NavIcon d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /> },
-  { label: "بارگیری", href: "#", icon: <NavIcon d="M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 21a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm13 0a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" /> },
-  { label: "انبار", href: "#", icon: <NavIcon d="M4 21V8l8-5 8 5v13M9 21v-6h6v6M9 11h.01M15 11h.01" /> },
+  { label: "بارگیری", href: "/loadings", icon: <NavIcon d="M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 21a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm13 0a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" /> },
+  { label: "انبار", href: "/inventory", icon: <NavIcon d="M4 21V8l8-5 8 5v13M9 21v-6h6v6M9 11h.01M15 11h.01" /> },
   { label: "حسابداری", href: "#", icon: <NavIcon d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" /> },
   { label: "فاکتور مالیاتی", href: "#", icon: <NavIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M9 13h6M9 17h4" /> },
   { label: "مؤدیان", href: "#", icon: <NavIcon d="M9 12l2 2 4-4M12 22a10 10 0 100-20 10 10 0 000 20z" /> },
@@ -72,6 +72,10 @@ const TITLES: Record<string, string> = {
   "/allocations": "تخصیص بار",
   "/crm/leads": "سرنخ‌ها",
   "/crm/opportunities": "فرصت‌های فروش",
+  "/loadings": "بارگیری",
+  "/loadings/new": "بارگیری جدید",
+  "/inventory": "انبار",
+  "/approvals": "تاییدها",
 };
 
 /** Blocks rendering until /auth/me resolves; redirects to /login on failure. */

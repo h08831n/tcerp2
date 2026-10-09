@@ -30,6 +30,7 @@ describe('p4-06 buyer-company-membership', () => {
       audit as unknown as AuditService,
       new TimelineService(prisma as never),
       new DocumentRelationService(prisma as never, audit as unknown as AuditService),
+      { ensureDefaultWarehouse: jest.fn() } as never, // Phase 6 receive seam (unused here)
     );
     return { service, prisma, audit };
   }

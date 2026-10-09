@@ -22,6 +22,7 @@ import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { SalesDocumentsService } from '../sales/sales-documents.service';
 import { PurchaseDocumentsService } from '../purchase/purchase-documents.service';
+import { InventoryService } from '../inventory/inventory.service';
 
 /**
  * Phase 5 integration fixtures: real services wired over the shared
@@ -142,6 +143,7 @@ export function priceRequestServiceWithPricing(prisma: PrismaClient): PriceReque
     audit,
     timeline,
     relations,
+    new InventoryService(prisma as never, audit), // Phase 6: receive → IN movements
     dailyPrices,
   );
   return new PriceRequestsService(

@@ -18,6 +18,11 @@ export const DOCUMENT_TYPES = [
   'price_request',
   'lead',
   'opportunity',
+  // Phase 6: loadings join the navigation layer (loading ↔ sales_document
+  // RELATED relations are written when a loading with sale allocations is
+  // confirmed). A loading has no document number — it is labelled
+  // `بارگیری {date}` (see resolveLabels).
+  'loading',
 ] as const;
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -70,6 +75,7 @@ export class DocumentRelationService {
       price_request: () => client.priceRequest.findFirst({ where: { id, companyId }, select: { id: true } }),
       lead: () => client.lead.findFirst({ where: { id, companyId }, select: { id: true } }),
       opportunity: () => client.opportunity.findFirst({ where: { id, companyId }, select: { id: true } }),
+      loading: () => client.loading.findFirst({ where: { id, companyId }, select: { id: true } }),
     } as const;
     const row = await delegates[type]();
     if (!row) {
@@ -229,13 +235,18 @@ export class DocumentRelationService {
         });
         seen.add(pairKey);
       }
-      // Future Loadings placeholder (Phase 6) so UI slots stay stable.
-      groups.set('loading:PLANNED', {
-        type: 'loading',
-        relationType: 'RELATED',
-        count: 0,
-        items: [],
-      });
+      // Phase 6: loadings are REAL navigation endpoints now — keep the
+      // placeholder group only for sales/purchase documents that have no
+      // loading relations yet, so the UI slot stays stable either way.
+      const hasLoadingGroup = [...groups.keys()].some((key) => key.startsWith('loading:'));
+      if (!hasLoadingGroup) {
+        groups.set('loading:PLANNED', {
+          type: 'loading',
+          relationType: 'RELATED',
+          count: 0,
+          items: [],
+        });
+      }
     }
 
     const relations = [...groups.values()];
@@ -293,6 +304,16 @@ export class DocumentRelationService {
         select: { id: true, title: true },
       });
       rows.forEach((r) => labels.set(`opportunity:${r.id}`, r.title));
+    }
+    if (byType.has('loading')) {
+      // Loadings have no document number — label as `بارگیری {date}`.
+      const rows = await this.prisma.loading.findMany({
+        where: { companyId, id: { in: byType.get('loading') } },
+        select: { id: true, loadingDate: true },
+      });
+      rows.forEach((r) =>
+        labels.set(`loading:${r.id}`, `بارگیری ${r.loadingDate.toISOString().slice(0, 10)}`),
+      );
     }
     return labels;
   }

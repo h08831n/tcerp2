@@ -16,6 +16,7 @@ import {
   addPurchaseLine,
   cancelPurchase,
   completePurchase,
+  receivePurchase,
   deletePurchaseLine,
   fetchPurchase,
   placePurchase,
@@ -34,6 +35,7 @@ export default function PurchaseDocumentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [receiveNote, setReceiveNote] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   // New line editor.
@@ -79,6 +81,20 @@ export default function PurchaseDocumentDetailPage() {
       const updated =
         action === "place" ? await placePurchase(doc.id) : await completePurchase(doc.id);
       setDoc(updated);
+    } catch (err) {
+      handleActionError(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleReceive() {
+    if (!doc) return;
+    setBusy("receive");
+    setActionError(null);
+    try {
+      const res = await receivePurchase(doc.id);
+      setReceiveNote(res.moved === false ? "قبلاً دریافت شده — گردش جدیدی ثبت نشد." : "دریافت به انبار ثبت شد (گردش ورود).");
     } catch (err) {
       handleActionError(err);
     } finally {
@@ -228,6 +244,11 @@ export default function PurchaseDocumentDetailPage() {
 
   return (
     <div className="space-y-4">
+      {receiveNote && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+          {receiveNote}
+        </div>
+      )}
       {actionError && (
         <div
           className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700"
@@ -277,6 +298,11 @@ export default function PurchaseDocumentDetailPage() {
                   {busy === "complete" ? "در حال تکمیل…" : "تکمیل"}
                 </Button>
               )}
+              {doc.status === "ORDER_PLACED" && (
+                <Button size="sm" variant="secondary" onClick={() => void handleReceive()} disabled={busy !== null}>
+                  {busy === "receive" ? "در حال دریافت…" : "دریافت به انبار"}
+                </Button>
+              )}
               {!CLOSED_STATUSES.includes(doc.status) && (
                 <Button
                   size="sm"
@@ -290,7 +316,7 @@ export default function PurchaseDocumentDetailPage() {
             </div>
           </div>
 
-          <dl className="mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <dl className="mt-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
             <div>
               <dt className="text-xs text-slate-500">تاریخ سند</dt>
               <dd className="tabular-nums text-slate-800">{jalali(doc.documentDate)}</dd>
@@ -302,6 +328,14 @@ export default function PurchaseDocumentDetailPage() {
             <div>
               <dt className="text-xs text-slate-500">استعلام مرجع</dt>
               <dd className="text-slate-800">{doc.priceRequest?.requestNumber ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">مبلغ بارگیری‌شده</dt>
+              <dd className="tabular-nums text-slate-700">
+                {doc.operationalLoadedAmount !== null && doc.operationalLoadedAmount !== undefined
+                  ? `${faDigits(thousandSeparate(toNum(doc.operationalLoadedAmount) ?? 0))} ریال`
+                  : "—"}
+              </dd>
             </div>
             <div>
               <dt className="text-xs font-medium text-slate-600">مبلغ کل</dt>

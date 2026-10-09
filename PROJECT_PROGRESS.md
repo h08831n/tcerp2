@@ -227,6 +227,16 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Supplier intelligence: cheapest-report (win counts + lastWonAt, ties included, no averages)
 - Tests: 124 suites — 541/541 integration; fixed cheapestReport SQL alias bug + DailyPriceService optional-hook DI + pricing.module export wiring at smoke
 
+### Phase 6 — Loading + Inventory + Operational Settlement (COMPLETED — commit pending)
+- Architecture checkpoint: docs/04-domain-boundaries.md (ratified: DailyPrice never creates stock/cost; Loading is THE physical event; invoice independent; movements auto-generated; no manual stock entry; multi-warehouse open)
+- Loading lifecycle: DRAFT→CONFIRMED→(CANCELLED); one-transaction confirm = allocation re-validation (FOR UPDATE) + StockMovement OUT per line (idempotencyKey loading:{id}:line:{n}) + operationalLoadedAmount on Sales/Purchase docs (Decimal) + doc status PARTIALLY_LOADED/COMPLETED + DEBT GATE (balance>0 → ApprovalRequest RELEASE_DRIVER_INFO + driverInfoRestricted) + audit/timeline
+- Driver-info visibility: restricted payload for callers without release/decide permission; manager release/reject flow with notifications
+- Purchase receive: POST /purchase/:id/receive → IN movements (idempotent no-op re-receive)
+- Inventory: computed stock (SUM IN-OUT, negative flagged), movements ledger, warehouses CRUD with at-most-one default, MAIN warehouse seeded
+- Approvals: lean ApprovalRequest engine (single approver) — foundation for Workflow Phase 9
+- Frontend: /loadings (list/new/detail with confirm + release modal + related docs), /inventory (3 tabs), /approvals, receive button on purchase detail
+- Tests: 145 suites — 595/595 integration; live smoke: purchase 40t receive → IN movement (re-receive no-op), loading 40t confirm → OUT movement + operationalLoadedAmount 14.2B + debt gate restricted → manager release → visible; stock 0; DTO fix ArrayMinSize found by smoke
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

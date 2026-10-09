@@ -560,7 +560,7 @@ export default function SalesDocumentDetailPage() {
             )}
 
             {/* Totals */}
-            <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 text-sm md:grid-cols-4">
+            <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 text-sm md:grid-cols-5">
               <div>
                 <p className="text-xs text-slate-500">جمع اقلام</p>
                 <p className="tabular-nums">
@@ -585,6 +585,14 @@ export default function SalesDocumentDetailPage() {
                 <p className="text-xs font-medium text-slate-600">مبلغ کل</p>
                 <p className="font-bold tabular-nums text-primary-700">
                   {totals?.total !== null ? `${faDigits(thousandSeparate(totals!.total!))} ریال` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500">مبلغ بارگیری‌شده</p>
+                <p className="tabular-nums text-slate-700">
+                  {doc.operationalLoadedAmount !== null && doc.operationalLoadedAmount !== undefined
+                    ? `${faDigits(thousandSeparate(toNum(doc.operationalLoadedAmount) ?? 0))} ریال`
+                    : "—"}
                 </p>
               </div>
             </div>

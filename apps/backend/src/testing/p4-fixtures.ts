@@ -10,6 +10,7 @@ import { SupplierOffersService } from '../price-request/supplier-offers.service'
 import { AllocationsService } from '../allocations/allocations.service';
 import { NullTodayPriceProvider } from '../price-request/today-price.provider';
 import { DailyPriceService } from '../pricing/daily-price.service';
+import { InventoryService } from '../inventory/inventory.service';
 import { INTEGRATION_COMPANY_ID } from './integration';
 
 /**
@@ -52,6 +53,7 @@ export function purchaseService(prisma: PrismaClient): PurchaseDocumentsService 
     audit,
     timeline,
     new DocumentRelationService(prisma as never, audit),
+    new InventoryService(prisma as never, audit), // Phase 6: receive → IN movements
     new DailyPriceService(prisma as never, audit), // p5c price-source wiring
   );
 }
