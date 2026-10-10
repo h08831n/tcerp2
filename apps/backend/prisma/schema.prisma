@@ -1092,6 +1092,7 @@ model Uom {
   variants          ProductVariant[]
   movementSourceUoms    StockMovement[] @relation("MovementSourceUom")
   movementInventoryUoms StockMovement[] @relation("MovementInventoryUom")
+  lineFulfillments      PurchaseLineFulfillment[]
   goodsReceiptLines GoodsReceiptLine[]
   salesLines        SalesLine[]
   purchaseLines     PurchaseLine[]
@@ -1603,6 +1604,7 @@ model PurchaseLine {
   purchaseAllocations SalesPurchaseAllocation[]
   loadingAllocations LoadingAllocation[]
   goodsReceiptLines GoodsReceiptLine[]
+  fulfillments      PurchaseLineFulfillment[]
 
   @@index([purchaseDocumentId])
   @@index([productVariantId])
@@ -1611,6 +1613,35 @@ model PurchaseLine {
 
 // Line-level M:N supply allocation; over-allocation prevented with
 // transaction + row locks (service).
+// Purchase fulfillment ledger (final correction #1): GoodsReceipt receipts and
+// direct Loading allocations are SEPARATE contribution rows (never overwrite
+// each other). Quantities recorded in the purchase line's own UOM so
+// received/directLoaded/fulfilled sum directly.
+enum PurchaseFulfillmentType {
+  GOODS_RECEIPT
+  DIRECT_LOADING
+}
+
+model PurchaseLineFulfillment {
+  id            String                 @id @default(uuid()) @db.Uuid
+  companyId     String                 @map("company_id") @db.Uuid
+  purchaseLineId String                @map("purchase_line_id") @db.Uuid
+  type          PurchaseFulfillmentType
+  sourceId      String                 @map("source_id") @db.Uuid // goodsReceiptId | loadingId
+  quantity      Decimal                @db.Decimal(18, 4) // in purchaseLine.uomId
+  uomId         String                 @map("uom_id") @db.Uuid // purchaseLine uom
+  amount        Decimal?               @db.Decimal(20, 4) // quantity × line.unitPrice snapshot
+  reversedAt    DateTime?              @map("reversed_at") @db.Timestamptz(6)
+  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  purchaseLine PurchaseLine @relation(fields: [purchaseLineId], references: [id], onDelete: Cascade)
+  uom          Uom          @relation(fields: [uomId], references: [id])
+
+  @@unique([purchaseLineId, type, sourceId])
+  @@index([purchaseLineId])
+  @@map("purchase_line_fulfillments")
+}
+
 model SalesPurchaseAllocation {
   id                String   @id @default(uuid()) @db.Uuid
   companyId         String   @map("company_id") @db.Uuid
@@ -2023,6 +2054,11 @@ model StockMovement {
   sourceEntityId   String        @map("source_entity_id") @db.Uuid
   idempotencyKey   String        @unique @map("idempotency_key")
   reversalOfMovementId String?   @map("reversal_of_movement_id") @db.Uuid // compensating movement linkage
+  // Valuation foundation for Accounting (final correction #3): immutable cost
+  // snapshot per movement, in the variant's inventoryUom context. Rows are
+  // never updated — cost history stays append-only.
+  unitCostSnapshot  Decimal?      @map("unit_cost_snapshot") @db.Decimal(20, 6)
+  totalCostSnapshot Decimal?      @map("total_cost_snapshot") @db.Decimal(20, 4)
   createdBy        String?       @map("created_by") @db.Uuid
   createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -2084,6 +2120,12 @@ model GoodsReceiptLine {
   purchaseLineId  String  @map("purchase_line_id") @db.Uuid
   actualQuantity  Decimal @map("actual_quantity") @db.Decimal(18, 4)
   uomId           String  @map("uom_id") @db.Uuid
+  // Over-receipt snapshot as of THIS receipt's confirmation (final #2):
+  // ordered (line UOM), receivedBefore + this receipt, overReceived —
+  // persistent, survives recalculation-free reporting.
+  orderedQuantitySnapshot  Decimal? @map("ordered_quantity_snapshot") @db.Decimal(18, 4)
+  receivedQuantitySnapshot Decimal? @map("received_quantity_snapshot") @db.Decimal(18, 4)
+  overReceivedSnapshot     Decimal? @map("over_received_snapshot") @db.Decimal(18, 4)
   notes           String?
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
