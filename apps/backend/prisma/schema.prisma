@@ -95,6 +95,7 @@ model Company {
   automationRules    AutomationRule[]
   fiscalYears        FiscalYear[]
   postingRules       PostingRule[]
+  openingBalanceEntries OpeningBalanceEntry[]
   accountingEvents   AccountingEvent[]
   warehouses         Warehouse[]
   stockLocations     StockLocation[]
@@ -1241,6 +1242,7 @@ model ProductVariant {
   inventoryUom Uom?          @relation("VariantInventoryUom", fields: [inventoryUomId], references: [id])
   values     VariantAttributeValue[]
   supplierMappings SupplierProduct[]
+  openingBalanceEntries OpeningBalanceEntry[]
   salesLines SalesLine[]
   purchaseLines PurchaseLine[]
   priceRequestLines PriceRequestLine[]
@@ -2235,6 +2237,40 @@ model AccountingEvent {
   @@index([companyId, status, createdAt])
   @@index([eventType, sourceEntityId])
   @@map("accounting_events")
+}
+
+// ─────────────── Phase 7C: Opening balances (report foundation) ───────────────
+// Staged opening-balance rows; generation produces one balanced OPENING
+// journal entry per company per fiscal year (Dr/Cr OPENING_EQUITY balancing).
+
+enum OpeningBalanceStatus {
+  STAGED
+  GENERATED
+}
+
+model OpeningBalanceEntry {
+  id           String              @id @default(uuid()) @db.Uuid
+  companyId    String              @map("company_id") @db.Uuid
+  fiscalYearId String?             @map("fiscal_year_id") @db.Uuid
+  accountCode  String              @map("account_code")
+  partyId      String?             @map("party_id") @db.Uuid // analytic for AR/AP
+  partyName    String?             @map("party_name") // legacy import label
+  productVariantId String?         @map("product_variant_id") @db.Uuid // inventory rows
+  quantity     Decimal?            @db.Decimal(18, 4)
+  unitCost     Decimal?            @map("unit_cost") @db.Decimal(20, 6)
+  debit        Decimal             @default(0) @db.Decimal(20, 4)
+  credit       Decimal             @default(0) @db.Decimal(20, 4)
+  status       OpeningBalanceStatus @default(STAGED)
+  journalEntryId String?           @map("journal_entry_id") @db.Uuid
+  note         String?
+  createdBy    String?             @map("created_by") @db.Uuid
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  productVariant ProductVariant? @relation(fields: [productVariantId], references: [id])
+
+  @@index([companyId, status])
+  @@map("opening_balance_entries")
 }
 
 // ─────────────── Lean approval engine (debt gate + reusable) ───────────────
