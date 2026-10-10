@@ -253,6 +253,9 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - operationalLoadedAmount now recomputed from the fulfillment ledger under FOR UPDATE (no last-write-wins)
 - Tests: 173 suites — 629/629 integration (g6f-01..03); live smoke: PO 100t = GRN 60t + direct loading 40t → fulfilled 100t COMPLETED, ledger rows verified
 
+### Accounting Architecture Checkpoint (2026-10-12 — docs only, no code)
+- docs/05-accounting-architecture.md ratified: accounting docs independent from operational; profit = fulfillment ledger + loading allocations + cost snapshots + price snapshots (never tax invoices); valuation = Specific Identification linked to purchase fulfillment (FIFO/Average documented as future); double-entry design on existing schema (posting rules, immutable posted, reversal); treasury boundary confirmed in code (only Receipt/Payment/Transfer/Check clear/write bank); tax/Moadian M:N boundary; financial records immutability rules. Phase 7 checklist included.
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.
