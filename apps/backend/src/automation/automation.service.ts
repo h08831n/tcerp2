@@ -361,10 +361,17 @@ export class AutomationService implements PriceUpdatedHook {
         ? (event.audienceMembers as SmsAudienceMember[])
         : await this.resolveAudience(companyId, audience as SmsAudienceConfig);
       const members = resolved.slice(0, SMS_AUDIENCE_CAP);
+      // eslint-disable-next-line no-console
+      console.log('DEBUG-SCAN members:', JSON.stringify(members.map((m) => ({ p: m.partyId.slice(0, 8), m: m.mobile }))));
       const keyBase = run.idempotencyKey ?? run.id;
       let queued = 0;
       let skippedNoMobile = 0;
+      const seenParties = new Set<string>();
       for (const member of members) {
+        // Audience SQL may return one row per qualifying sales document —
+        // dedupe by party so one member gets exactly one sms job.
+        if (seenParties.has(member.partyId)) continue;
+        seenParties.add(member.partyId);
         if (!member.mobile) {
           skippedNoMobile += 1;
           continue;

@@ -11,6 +11,7 @@ import { DocumentRelationService } from '../document-flow/document-relation.serv
 import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
 import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
+import { AccountingEventService } from '../accounting/accounting-event.service';
 import { SequencesService } from '../sequences/sequences.service';
 import {
   ConflictError,
@@ -104,6 +105,7 @@ export class GoodsReceiptService {
     private readonly inventory: InventoryService,
     private readonly normalization: NormalizationService,
     private readonly fulfillments: PurchaseFulfillmentService,
+    private readonly accountingEvents: AccountingEventService,
   ) {}
 
   // ───────────────────────── create (DRAFT) ─────────────────────────

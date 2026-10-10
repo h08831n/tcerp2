@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { PartiesModule } from '../parties/parties.module';
 import { DocumentFlowModule } from '../document-flow/document-flow.module';
 import { InventoryModule } from '../inventory/inventory.module';
@@ -13,7 +14,7 @@ import { GoodsReceiptService } from './goods-receipt.service';
  * SequencesService is global (GRN numbering).
  */
 @Module({
-  imports: [PartiesModule, DocumentFlowModule, InventoryModule, PurchaseModule],
+  imports: [PartiesModule, DocumentFlowModule, InventoryModule, PurchaseModule, AccountingModule],
   controllers: [GoodsReceiptController],
   providers: [GoodsReceiptService],
   exports: [GoodsReceiptService],

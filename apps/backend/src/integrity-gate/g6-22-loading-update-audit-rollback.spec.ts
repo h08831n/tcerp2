@@ -9,6 +9,11 @@ import { AuditService } from '../audit/audit.service';
 import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { LoadingService } from '../loading/loading.service';
+import { JournalService } from '../accounting/journal.service';
+import { SequencesService } from '../sequences/sequences.service';
+import { AccountingEventService } from '../accounting/accounting-event.service';
+
+
 import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
 import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
@@ -52,6 +57,10 @@ describeIntegration('g6-22 loading-update-audit-rollback', () => {
       approvals,
       new NormalizationService(prisma as never),
       new PurchaseFulfillmentService(prisma as never, new NormalizationService(prisma as never)),
+      new AccountingEventService(
+        prisma as never,
+        new JournalService(prisma as never, new SequencesService(prisma as never, new AuditService(prisma as never))),
+      ),
     );
   }
 

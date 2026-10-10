@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { LoadingController } from './loading.controller';
 import { LoadingService } from './loading.service';
 import { PartiesModule } from '../parties/parties.module';
@@ -14,7 +15,7 @@ import { PurchaseModule } from '../purchase/purchase.module';
  * resolution + stock), ApprovalsModule (debt-gate release decisions).
  */
 @Module({
-  imports: [PartiesModule, DocumentFlowModule, InventoryModule, ApprovalsModule, PurchaseModule],
+  imports: [PartiesModule, DocumentFlowModule, InventoryModule, ApprovalsModule, PurchaseModule, AccountingModule],
   controllers: [LoadingController],
   providers: [LoadingService],
   exports: [LoadingService],

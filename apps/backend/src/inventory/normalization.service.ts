@@ -95,6 +95,9 @@ export class NormalizationService {
     variantId: string,
     quantity: Prisma.Decimal | number | string,
     sourceUomId: string,
+    /** Optional explicit target (e.g. a sales line's pricing UOM). When
+     *  omitted the variant's inventory UOM is the target. */
+    targetUomId?: string,
   ): Promise<Prisma.Decimal> {
     const variant = await this.prisma.productVariant.findFirst({
       where: { id: variantId, companyId },
@@ -124,6 +127,21 @@ export class NormalizationService {
     }
 
     const decimal = D(quantity);
+    if (targetUomId && targetUomId !== target.id) {
+      const dest = await this.prisma.uom.findUnique({ where: { id: targetUomId }, select: UOM_COLUMNS });
+      if (!dest || dest.companyId !== companyId) {
+        throw new ValidationError(NORMALIZATION_MESSAGES.uomNotInCompany, { targetUomId });
+      }
+      if (dest.id === source.id) return roundQuantity(decimal);
+      if (source.categoryId === dest.categoryId) {
+        return roundQuantity(applyConversion(source, dest, decimal).value);
+      }
+      throw new ValidationError('ALLOCATION_UOM_INCOMPATIBLE', {
+        sourceUomId,
+        targetUomId,
+        hint: 'cross-category requires product weight conversion on the variant',
+      });
+    }
     if (source.id === target.id) return roundQuantity(decimal);
 
     // Same category → the pure ratio rule.

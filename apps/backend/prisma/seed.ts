@@ -34,6 +34,8 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'roles.view', module: 'roles', action: 'view', description: 'View roles and the permission catalog' },
   { code: 'roles.create', module: 'roles', action: 'create', description: 'Create roles' },
   { code: 'roles.edit', module: 'roles', action: 'edit', description: 'Edit roles and their permissions' },
+  { code: 'accounting.posting.manage', module: 'accounting', action: 'manage', description: 'Manage posting rules and retry accounting events' },
+  { code: 'accounting.fiscal.manage', module: 'accounting', action: 'manage', description: 'Manage fiscal years and periods' },
   { code: 'roles.delete', module: 'roles', action: 'delete', description: 'Delete non-system roles' },
   // teams
   { code: 'teams.view', module: 'teams', action: 'view', description: 'View teams and members' },
@@ -688,6 +690,41 @@ async function main(): Promise<void> {
 
   console.log('Seeding chart of accounts…');
   await seedChartOfAccounts(companyId);
+
+  console.log('Seeding posting rules…');
+  const defaultRules = [
+    { code: 'SALE_POSTING', nameFa: 'ثبت فروش', eventType: 'SALES_COMPLETED_LOADING' as const, lines: [
+      { side: 'DEBIT' as const, accountCode: 'RECEIVABLE', measure: 'RECEIVABLE' as const, memo: 'بدهکار حساب دریافتنی', order: 1 },
+      { side: 'CREDIT' as const, accountCode: 'SALES_REVENUE', measure: 'REVENUE' as const, memo: 'بستانکار درآمد فروش', order: 2 },
+      { side: 'DEBIT' as const, accountCode: 'PURCHASE_EXPENSE', measure: 'COGS' as const, memo: 'بدهکار بهای تمام‌شده', order: 3 },
+      { side: 'CREDIT' as const, accountCode: 'INVENTORY', measure: 'INVENTORY' as const, memo: 'بستانکار موجودی', order: 4 },
+    ] },
+    { code: 'PURCHASE_POSTING', nameFa: 'ثبت خرید', eventType: 'PURCHASE_FULFILLED' as const, lines: [
+      { side: 'DEBIT' as const, accountCode: 'INVENTORY', measure: 'INVENTORY' as const, memo: 'بدهکار موجودی', order: 1 },
+      { side: 'CREDIT' as const, accountCode: 'PAYABLE', measure: 'PAYABLE' as const, memo: 'بستانکار پرداختنی', order: 2 },
+    ] },
+    { code: 'GRN_POSTING', nameFa: 'ثبت رسید انبار', eventType: 'GOODS_RECEIPT_CONFIRMED' as const, lines: [
+      { side: 'DEBIT' as const, accountCode: 'INVENTORY', measure: 'INVENTORY' as const, memo: 'بدهکار موجودی', order: 1 },
+      { side: 'CREDIT' as const, accountCode: 'PAYABLE', measure: 'PAYABLE' as const, memo: 'بستانکار پرداختنی', order: 2 },
+    ] },
+    { code: 'REVERSAL_POSTING', nameFa: 'ثبت معکوس برگشت‌ها', eventType: 'INVENTORY_REVERSAL' as const, lines: [
+      { side: 'DEBIT' as const, accountCode: 'REVENUE', measure: 'REVENUE' as const, memo: 'معکوس درآمد', order: 1 },
+      { side: 'CREDIT' as const, accountCode: 'RECEIVABLE', measure: 'RECEIVABLE' as const, memo: 'معکوس دریافتنی', order: 2 },
+      { side: 'DEBIT' as const, accountCode: 'INVENTORY', measure: 'INVENTORY' as const, memo: 'معکوس موجودی', order: 3 },
+      { side: 'CREDIT' as const, accountCode: 'COGS', measure: 'COGS' as const, memo: 'معکوس بهای تمام‌شده', order: 4 },
+    ] },
+  ] as Array<{ code: string; nameFa: string; eventType: 'SALES_COMPLETED_LOADING' | 'PURCHASE_FULFILLED' | 'GOODS_RECEIPT_CONFIRMED' | 'INVENTORY_REVERSAL'; lines: Array<{ side: 'DEBIT' | 'CREDIT'; accountCode: string; measure: 'RECEIVABLE' | 'PAYABLE' | 'REVENUE' | 'COGS' | 'INVENTORY'; memo: string; order: number }> }>;
+  for (const r of defaultRules) {
+    const rule = await prisma.postingRule.upsert({
+      where: { companyId_code: { companyId, code: r.code } },
+      create: { companyId, code: r.code, nameFa: r.nameFa, eventType: r.eventType, enabled: true },
+      update: {},
+    });
+    if ((await prisma.postingRuleLine.count({ where: { ruleId: rule.id } })) === 0) {
+      await prisma.postingRuleLine.createMany({ data: r.lines.map((l) => ({ ...l, ruleId: rule.id })) });
+    }
+  }
+  console.log('  4 default rules');
   console.log(`  ${CHART_OF_ACCOUNTS.length} accounts`);
 
   console.log('Seeding sequences…');

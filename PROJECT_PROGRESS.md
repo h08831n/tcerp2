@@ -264,6 +264,14 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Migration 20241014000000 with fiscal 1405 seeding per company; INCOME→REVENUE data mapping in-migration
 - Tests g7-01..06 (balanced/unbalanced/closed-period/immutable/reversal/analytics) — 174 suites, 635/635 integration
 
+### Phase 7B — Operational Accounting Integration (COMPLETED — commits 1740656 schema + final impl)
+- Event engine: AccountingEvent log (idempotent per key, FAILED rows retryable via POST /accounting/events/:id/post) → PostingRule/Lines (configurable, per-company, measure-based: RECEIVABLE/REVENUE/COGS/INVENTORY/PAYABLE) → balanced JournalEntry
+- Hooks: loading confirm emits SALES_COMPLETED_LOADING (revenue from price snapshots, COGS from movement cost snapshots) + PURCHASE_FULFILLED (direct trade, fulfillment ledger amounts); loading reverse emits INVENTORY_REVERSAL with swapped sides; GRN confirm emits GOODS_RECEIPT_CONFIRMED; payment/receipt events reserved
+- Analytics: CUSTOMER dimension on receivable lines, SUPPLIER on payable lines — ledger + grouped responsibility reporting foundation ready
+- Rules never block operations: failures land in event log with error, retry endpoint re-posts
+- Fixes found by smoke: reversal swaps sides (not negative amounts), INVENTORY measure included in sale payload, default rules + accounting.posting.manage permission seeded, audience dedupe
+- Tests: 174 suites — 635/635 integration (g7-01..06 + all prior); smoke: sale journal 14.2B rev / 13.6B COGS balanced with CUSTOMER analytic, purchase journal balanced with SUPPLIER analytic, reversal mirrored, all 113 events POSTED balanced
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

@@ -7,6 +7,8 @@ import { NormalizationService } from '../inventory/normalization.service';
 import { LoadingService } from '../loading/loading.service';
 import { GoodsReceiptService } from '../goods-receipt/goods-receipt.service';
 import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
+import { JournalService } from '../accounting/journal.service';
+import { AccountingEventService } from '../accounting/accounting-event.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { SequencesService } from '../sequences/sequences.service';
@@ -63,6 +65,7 @@ export function loadingService(prisma: PrismaClient): LoadingService {
     approvalRequestService(prisma),
     normalizationService(prisma),
     purchaseFulfillmentService(prisma),
+    accountingEventService(prisma),
   );
 }
 
@@ -83,6 +86,14 @@ export function goodsReceiptService(prisma: PrismaClient): GoodsReceiptService {
     inventoryService(prisma),
     normalizationService(prisma),
     purchaseFulfillmentService(prisma),
+    accountingEventService(prisma),
+  );
+}
+
+export function accountingEventService(prisma: PrismaClient): AccountingEventService {
+  return new AccountingEventService(
+    prisma as never,
+    new JournalService(prisma as never, new SequencesService(prisma as never, new AuditService(prisma as never))),
   );
 }
 

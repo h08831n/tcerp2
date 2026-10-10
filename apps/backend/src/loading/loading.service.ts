@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   LoadingRoute,
   LoadingStatus,
@@ -11,6 +11,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
+import { AccountingEventService } from '../accounting/accounting-event.service';
+import { AccountingEventType } from '@prisma/client';
 import { InventoryService } from '../inventory/inventory.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { assertPartyHasRole } from '../common/utils/party-roles';
@@ -169,7 +171,10 @@ export class LoadingService {
     private readonly approvals: ApprovalRequestService,
     private readonly normalization: NormalizationService,
     private readonly fulfillments: PurchaseFulfillmentService,
+    private readonly accountingEvents: AccountingEventService,
   ) {}
+
+  private readonly accountingLogger = new Logger('LoadingAccounting');
 
   // ───────────────────────── create (DRAFT) ─────────────────────────
 
@@ -599,6 +604,10 @@ export class LoadingService {
           userAgent: ctx.userAgent,
         });
 
+        // (f) accounting event (Phase 7B): revenue + COGS from snapshots.
+        // Failures mark the AccountingEvent FAILED — never block operations.
+        await this.emitAccountingEvents(tx, companyId, loading, actor, false);
+
         const partyId = loading.customerPartyId ?? loading.driverPartyId ?? loading.carrierPartyId;
         if (partyId) {
           await this.timeline.record(tx, {
@@ -710,6 +719,7 @@ export class LoadingService {
         });
         await this.fulfillments.reverseBySource(tx, PurchaseFulfillmentType.DIRECT_LOADING, loading.id);
         await this.recomputeOperationalState(tx, companyId, docIds, 'reverse');
+        await this.emitAccountingEvents(tx, companyId, loading, actor, true);
 
         // The debt-gate release request (if any) dies with the loading.
         await tx.approvalRequest.updateMany({
@@ -926,6 +936,120 @@ export class LoadingService {
    * ONE inventory-UOM unit) — the writer multiplies it by the normalized
    * quantity into totalCostSnapshot. Absent/null → NULL cost columns.
    */
+  /**
+   * Phase 7B: SALES_COMPLETED_LOADING (+ INVENTORY_REVERSAL on reverse).
+   * Self-contained: reads the movements + fulfillment ledger rows written in
+   * THIS transaction, plus the sales lines behind allocations. Accounting
+   * failures NEVER block the operation (event row FAILED, retryable).
+   */
+  private async emitAccountingEvents(
+    tx: Client,
+    companyId: string,
+    loading: { id: string; route: LoadingRoute; customerPartyId: string | null; loadingDate: Date },
+    actor: { id: string; username: string },
+    reversal: boolean,
+  ): Promise<void> {
+    try {
+      // 1) COGS from the cost snapshots of this loading's movements (exact).
+      const movements = await tx.stockMovement.findMany({
+        where: { sourceEntityType: 'LOADING', sourceEntityId: loading.id },
+        select: { normalizedQuantity: true, unitCostSnapshot: true },
+      });
+      const cogs = movements.reduce(
+        (sum, m) => (m.unitCostSnapshot ? sum.plus(m.normalizedQuantity.times(m.unitCostSnapshot)) : sum),
+        new Prisma.Decimal(0),
+      );
+
+      // 2) Sales side: allocations → sales lines (price snapshot) converted to
+      //    the sales-line UOM by the normalization service.
+      const revenueByDoc = new Map<string, { amount: Prisma.Decimal; customerId: string | null }>();
+      const loadingRows = await tx.loading.findUniqueOrThrow({
+        where: { id: loading.id },
+        select: { lines: { select: { id: true, productVariantId: true, actualQuantity: true, allocations: true } } },
+      });
+      for (const line of loadingRows.lines) {
+        for (const allocation of line.allocations) {
+          if (!allocation.salesLineId) continue;
+          const salesLine = await tx.salesLine.findUnique({
+            where: { id: allocation.salesLineId },
+            select: { unitPrice: true, uomId: true, salesDocumentId: true, document: { select: { customerPartyId: true } } },
+          });
+          if (!salesLine) continue;
+          const converted = await this.normalization.normalizeQuantity(
+            companyId,
+            line.productVariantId,
+            allocation.allocatedQuantity,
+            (
+              await tx.loadingLine.findUniqueOrThrow({ where: { id: line.id }, select: { uomId: true } })
+            ).uomId ?? salesLine.uomId,
+            salesLine.uomId,
+          );
+          const amount = converted.times(salesLine.unitPrice);
+          const agg = revenueByDoc.get(salesLine.salesDocumentId);
+          revenueByDoc.set(salesLine.salesDocumentId, {
+            amount: (agg?.amount ?? new Prisma.Decimal(0)).plus(amount),
+            customerId: salesLine.document.customerPartyId ?? loading.customerPartyId ?? null,
+          });
+        }
+      }
+
+      // 3) Purchase side (direct route): fulfillment ledger rows of this loading.
+      const purchaseByDoc = new Map<string, { amount: Prisma.Decimal; supplierId: string | null }>();
+      if (loading.route === LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER) {
+        const fulfillments = await tx.purchaseLineFulfillment.findMany({
+          where: { type: 'DIRECT_LOADING', sourceId: loading.id, reversedAt: null },
+          select: { amount: true, purchaseLineId: true },
+        });
+        for (const f of fulfillments) {
+          const plRow = await tx.purchaseLine.findUniqueOrThrow({
+            where: { id: f.purchaseLineId },
+            select: { purchaseDocumentId: true, document: { select: { supplierPartyId: true } } },
+          });
+          const agg = purchaseByDoc.get(plRow.purchaseDocumentId);
+          purchaseByDoc.set(plRow.purchaseDocumentId, {
+            amount: (agg?.amount ?? new Prisma.Decimal(0)).plus(f.amount ?? new Prisma.Decimal(0)),
+            supplierId: plRow.document.supplierPartyId ?? agg?.supplierId ?? null,
+          });
+        }
+      }
+
+      // 4) Emit events (missing/disabled rules → SKIPPED; failures → FAILED).
+      for (const [docId, agg] of revenueByDoc) {
+        await this.accountingEvents.emit({
+          companyId,
+          eventType: AccountingEventType.SALES_COMPLETED_LOADING,
+          sourceEntityType: 'sales_document',
+          sourceEntityId: docId,
+          idempotencyKey: `sale:${loading.id}:${docId}${reversal ? ':rev' : ''}`,
+          measures: { RECEIVABLE: agg.amount, REVENUE: agg.amount, COGS: cogs, INVENTORY: cogs },
+          analytics: { customerId: agg.customerId },
+          description: reversal ? 'برگشت ثبت درآمد فروش (بارگیری معکوس)' : 'شناسایی درآمد فروش و بهای تمام‌شده (بارگیری)',
+          reversal,
+          entryDate: loading.loadingDate ?? undefined,
+        });
+      }
+      for (const [docId, agg] of purchaseByDoc) {
+        await this.accountingEvents.emit({
+          companyId,
+          eventType: AccountingEventType.PURCHASE_FULFILLED,
+          sourceEntityType: 'purchase_document',
+          sourceEntityId: docId,
+          idempotencyKey: `purchase-direct:${loading.id}:${docId}${reversal ? ':rev' : ''}`,
+          measures: { INVENTORY: agg.amount, PAYABLE: agg.amount },
+          analytics: { supplierId: agg.supplierId },
+          description: reversal ? 'برگشت ثبت خرید مستقیم' : 'ثبت خرید مستقیم (تحویل به مشتری)',
+          reversal,
+          entryDate: loading.loadingDate ?? undefined,
+        });
+      }
+      void actor;
+    } catch (error) {
+      this.accountingLogger.warn(
+        `accounting emit failed for loading ${loading.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async generateMovements(
     tx: Client,
     loading: { id: string; companyId: string; loadingDate: Date; route: LoadingRoute },

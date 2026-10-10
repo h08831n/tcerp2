@@ -1,7 +1,6 @@
 import {
   describeIntegration,
   integrationPrisma,
-  INTEGRATION_COMPANY_ID,
   disconnectIntegrationPrisma,
 } from '../testing/integration';
 import {
@@ -26,6 +25,9 @@ import { SmsAudienceMember } from '../automation/automation.service';
  */
 describeIntegration('p5c-05 sms audience resolution + scan', () => {
   const prisma = integrationPrisma();
+  // Hermetic company: the shared integration company carries months of
+  // smoke/spec leftovers, which break audience counting assertions.
+  let COMPANY = '';
   const marker = `p5c-05-${Date.now()}`;
   let actorId = '';
   let variantId = '';
@@ -40,14 +42,22 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
   const mobileByParty = new Map<string, string>();
   const today = todayKey();
 
+  beforeAll(async () => {
+    const company = await prisma.company.create({
+      data: { nameFa: `p5c-05 ${marker}`, status: 'ACTIVE' },
+    });
+    COMPANY = company.id;
+    // sequences not needed by this spec; GRN provisioning unnecessary.
+  });
+
   let customerSeq = 0;
   const seedCustomer = async (label: string): Promise<{ id: string; mobile: string }> => {
-    const party = await createParty(prisma, ['CUSTOMER'], `${marker}-${label}`);
+    const party = await createParty(prisma, ['CUSTOMER'], `${marker}-${label}`, COMPANY);
     // Unique per company (partial unique index on normalizedValue).
     const mobile = `0912${String(Date.now()).slice(-5)}${String(++customerSeq).padStart(2, '0')}`;
     await prisma.partyPhone.create({
       data: {
-        companyId: INTEGRATION_COMPANY_ID,
+        companyId: COMPANY,
         partyId: party.id,
         kind: 'MOBILE',
         rawValue: mobile,
@@ -65,7 +75,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     withVariantLine: boolean,
     label: string,
   ) => {
-    const doc = await createSalesDocumentRow(prisma, INTEGRATION_COMPANY_ID, {
+    const doc = await createSalesDocumentRow(prisma, COMPANY, {
       marker: `${marker}-${label}`,
       customerPartyId,
       salespersonUserId: actorId,
@@ -76,7 +86,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     if (withVariantLine) {
       await prisma.salesLine.create({
         data: {
-          companyId: INTEGRATION_COMPANY_ID,
+          companyId: COMPANY,
           salesDocumentId: doc.id,
           productVariantId: variantId,
           orderedQuantity: 1,
@@ -91,7 +101,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
 
   beforeAll(async () => {
     actorId = await adminUserId(prisma);
-    const fixture = await createVariantInCompany(prisma, INTEGRATION_COMPANY_ID, marker);
+    const fixture = await createVariantInCompany(prisma, COMPANY, marker);
     variantId = fixture.variantId;
     templateId = fixture.templateId;
     categoryId = fixture.categoryId;
@@ -113,7 +123,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
 
   it('INACTIVE_DAYS resolves customers whose last sale is older than N days (incl. never-buyers)', async () => {
     const automation = automationService(prisma, publishingService(prisma, makeAdapters()));
-    const members = await automation.resolveAudience(INTEGRATION_COMPANY_ID, {
+    const members = await automation.resolveAudience(COMPANY, {
       type: 'INACTIVE_DAYS',
       days: 7,
     });
@@ -135,7 +145,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
 
   it('PRODUCT_BUYERS resolves distinct customers with a sales line on the variant', async () => {
     const automation = automationService(prisma, publishingService(prisma, makeAdapters()));
-    const members = await automation.resolveAudience(INTEGRATION_COMPANY_ID, {
+    const members = await automation.resolveAudience(COMPANY, {
       type: 'PRODUCT_BUYERS',
       productVariantId: variantId,
     });
@@ -145,7 +155,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
 
   it('ALL_CUSTOMERS resolves every non-archived CUSTOMER party', async () => {
     const automation = automationService(prisma, publishingService(prisma, makeAdapters()));
-    const members = await automation.resolveAudience(INTEGRATION_COMPANY_ID, { type: 'ALL_CUSTOMERS' });
+    const members = await automation.resolveAudience(COMPANY, { type: 'ALL_CUSTOMERS' });
     const ids = members.map((m: SmsAudienceMember) => m.partyId);
     for (const id of [inactiveBuyerId, recentCustomerId, neverBuyerId, oldBuyerId]) {
       expect(ids).toContain(id);
@@ -156,7 +166,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     const automation = automationService(prisma, publishingService(prisma, makeAdapters()));
     const rule = await prisma.automationRule.create({
       data: {
-        companyId: INTEGRATION_COMPANY_ID,
+        companyId: COMPANY,
         code: `P5C05-${marker}`,
         nameFa: `پیام مشتری راکد ${marker}`,
         triggerType: 'CUSTOMER_INACTIVE_DAYS',
@@ -173,12 +183,12 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
 
     const smsJobsFor = () =>
       prisma.queueJob.count({
-        where: { companyId: INTEGRATION_COMPANY_ID, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
+        where: { companyId: COMPANY, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
       });
 
     // The company is shared — resolve the audience first and assert
     // RELATIVE to it (other specs' leftovers must not break the counts).
-    const members = await automation.resolveAudience(INTEGRATION_COMPANY_ID, {
+    const members = await automation.resolveAudience(COMPANY, {
       type: 'INACTIVE_DAYS',
       days: 7,
     });
@@ -187,7 +197,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     );
 
     const summaries = await automation.dailyScan({
-      companyId: INTEGRATION_COMPANY_ID,
+      companyId: COMPANY,
       ruleId: rule.id,
       date: today,
     });
@@ -196,7 +206,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     expect(summaries[0].executed).toBe(1);
 
     const jobs = await prisma.queueJob.findMany({
-      where: { companyId: INTEGRATION_COMPANY_ID, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
+      where: { companyId: COMPANY, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
     });
     expect(jobs).toHaveLength(members.filter((m: SmsAudienceMember) => m.mobile).length);
     const targets = jobs.map((job) => (job.payload as { to: string }).to).sort();
@@ -219,7 +229,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     // Idempotency: a same-date re-run creates NO new jobs.
     const before = await smsJobsFor();
     const rerun = await automation.dailyScan({
-      companyId: INTEGRATION_COMPANY_ID,
+      companyId: COMPANY,
       ruleId: rule.id,
       date: today,
     });
@@ -228,7 +238,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
   });
 
   afterAll(async () => {
-    await prisma.queueJob.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, jobType: 'sms.send' } });
+    await prisma.queueJob.deleteMany({ where: { companyId: COMPANY, jobType: 'sms.send' } });
     await prisma.automationRun.deleteMany({ where: { rule: { code: `P5C05-${marker}` } } });
     await prisma.automationRule.deleteMany({ where: { code: `P5C05-${marker}` } });
     for (const id of docIds) await cleanupSalesDocument(prisma, id);
@@ -240,7 +250,7 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     await prisma.productCategory.deleteMany({ where: { id: categoryId } });
     if (uomId) {
       await prisma.uom.deleteMany({ where: { id: uomId } });
-      await prisma.uomCategory.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, code: `P5W-${marker}` } });
+      await prisma.uomCategory.deleteMany({ where: { companyId: COMPANY, code: `P5W-${marker}` } });
     }
     await disconnectIntegrationPrisma();
   });
