@@ -272,6 +272,9 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Fixes found by smoke: reversal swaps sides (not negative amounts), INVENTORY measure included in sale payload, default rules + accounting.posting.manage permission seeded, audience dedupe
 - Tests: 174 suites — 635/635 integration (g7-01..06 + all prior); smoke: sale journal 14.2B rev / 13.6B COGS balanced with CUSTOMER analytic, purchase journal balanced with SUPPLIER analytic, reversal mirrored, all 113 events POSTED balanced
 
+### Reporting Architecture Checkpoint (2026-10-12 — docs only)
+- docs/06-reporting-architecture.md ratified: reports read ONLY from accounting entries + cost snapshots (never sales/purchase tables); GL with running balances + drill-down; trial balance with explicit balanced assertion; subsidiary ledger on partyId/analytics with financial-responsibility grouped view (no identity merge) and operational-balance reconciliation column; operational profit from SALES/PURCHASE journals only; inventory valuation via specific-identification cost snapshots (customer/supplier locations reported separately); opening balances = balanced OPENING journal entries via import; endpoints listed. Phase 7C checklist embedded.
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.
