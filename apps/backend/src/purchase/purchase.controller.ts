@@ -126,12 +126,17 @@ export class PurchaseController {
     return this.purchaseService.place(companyId, id, actor, this.ctx(request));
   }
 
-  /** Phase 6 goods receipt: IN stock movements (idempotent no-op on re-receive). */
+  /**
+   * DEPRECATED (Integrity Gate #9): blind PO-receipt is gone — the tombstone
+   * answers 403 RECEIVE_DEPRECATED; real stock comes from goods receipts
+   * (POST /api/goods-receipts).
+   */
   @Post(':id/receive')
   @RequirePermissions('purchase.edit')
   async receive(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() actor: { id: string; username: string }, @Req() request: Request) {
     const companyId = await this.companyIdOf(actor, request);
-    return this.purchaseService.receive(companyId, id, actor, this.ctx(request));
+    await this.purchaseService.receive(companyId, id);
+    return { deprecated: true }; // unreachable — receive always throws
   }
 
   @Post(':id/complete')

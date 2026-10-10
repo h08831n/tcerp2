@@ -6,6 +6,7 @@ import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
 import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
 import { assertSameCompany } from '../common/utils/entity-company';
+import { NormalizationService } from '../inventory/normalization.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
   AddTemplateAttributeDto,
@@ -103,10 +104,20 @@ export const WEIGHT_CATEGORY_CODE = 'WEIGHT';
 
 @Injectable()
 export class TemplatesService {
+  private normalizationInstance: NormalizationService | undefined;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
   ) {}
+
+  /** Normalization seam (Integrity Gate #2 guard) — lazy, prisma-only. */
+  private get normalization(): NormalizationService {
+    if (!this.normalizationInstance) {
+      this.normalizationInstance = new NormalizationService(this.prisma);
+    }
+    return this.normalizationInstance;
+  }
 
   private static wrapUnique(error: unknown): never {
     if (
@@ -1289,6 +1300,7 @@ export class TemplatesService {
         nameFa: true,
         weightPerUnit: true,
         weightUomId: true,
+        inventoryUomId: true,
         active: true,
         isPublic: true,
         version: true,
@@ -1298,6 +1310,16 @@ export class TemplatesService {
       throw new NotFoundError('Variant not found', { templateId, variantId });
     }
     if (dto.defaultUomId) await this.assertSameCompanyRef('uom', companyId, dto.defaultUomId);
+
+    // Integrity Gate #2: the inventory UOM is same-company AND locked once
+    // any stock_movement exists for the variant (history can never be
+    // re-based silently).
+    await this.normalization.assertInventoryUomEditable(
+      companyId,
+      variantId,
+      dto.inventoryUomId,
+      variant.inventoryUomId,
+    );
 
     // Weight validation on the MERGED result (3B correction #3). Only
     // enforced when the request touches weight fields, so unrelated PATCHes
@@ -1325,6 +1347,7 @@ export class TemplatesService {
           data: {
             ...(dto.nameFa !== undefined ? { nameFa: dto.nameFa } : {}),
             ...(dto.defaultUomId !== undefined ? { defaultUomId: dto.defaultUomId } : {}),
+            ...(dto.inventoryUomId !== undefined ? { inventoryUomId: dto.inventoryUomId } : {}),
             ...(dto.weightPerUnit !== undefined
               ? {
                   weightPerUnit:
@@ -1352,6 +1375,7 @@ export class TemplatesService {
             nameFa: variant.nameFa,
             weightPerUnit: variant.weightPerUnit,
             weightUomId: variant.weightUomId,
+            inventoryUomId: variant.inventoryUomId,
             active: variant.active,
             isPublic: variant.isPublic,
             version: variant.version,
@@ -1361,6 +1385,7 @@ export class TemplatesService {
             nameFa: updated.nameFa,
             weightPerUnit: updated.weightPerUnit,
             weightUomId: updated.weightUomId,
+            inventoryUomId: updated.inventoryUomId,
             active: updated.active,
             isPublic: updated.isPublic,
             version: updated.version,

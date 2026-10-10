@@ -9,8 +9,10 @@ import { purchaseService, createParty, cleanupPurchaseDocument } from '../testin
 import {
   loadingService,
   inventoryService,
+  goodsReceiptService,
+  mainWarehouse,
   cleanupLoading,
-  cleanupPurchaseReceive,
+  cleanupGoodsReceipt,
   cleanupCompanyPhase6,
   stockQuery,
   movementQuery,
@@ -21,7 +23,7 @@ import {
  * p6-11 company-isolation: loadings, stock, movements and warehouses of
  * company A are INVISIBLE to company B — cross-company reads are 404-style
  * and B's computed stock only counts B's movements. Also proves the lazy
- * default-warehouse creation (B gets its own MAIN on first confirm).
+ * default-warehouse creation (B gets its own MAIN on first use).
  */
 describeIntegration('p6-11 company-isolation', () => {
   const prisma = integrationPrisma();
@@ -31,13 +33,14 @@ describeIntegration('p6-11 company-isolation', () => {
   let variantA = { variantId: '', templateId: '', categoryId: '', uomId: '', sku: '' };
   let loadingAId = '';
   let purchaseAId = '';
+  let receiptAId = '';
 
   beforeAll(async () => {
     actorId = await adminUserId(prisma);
     const companyB = await createCompany(prisma, marker);
     companyBId = companyB.id;
 
-    // Company A: a purchase receive (IN) + a confirmed loading (OUT).
+    // Company A: a goods receipt (IN) + a confirmed warehouse loading (OUT).
     const variant = await createVariantInCompany(prisma, INTEGRATION_COMPANY_ID, marker);
     variantA = variant;
     const actor = { id: actorId, username: 'admin' };
@@ -52,12 +55,29 @@ describeIntegration('p6-11 company-isolation', () => {
     );
     purchaseAId = po.id;
     await purchase.place(INTEGRATION_COMPANY_ID, purchaseAId, actor, {});
-    await purchase.receive(INTEGRATION_COMPANY_ID, purchaseAId, actor, {});
+    const main = await mainWarehouse(prisma);
+    const grn = await goodsReceiptService(prisma).create(
+      INTEGRATION_COMPANY_ID,
+      {
+        purchaseDocumentId: purchaseAId,
+        warehouseId: main.id,
+        lines: [{ purchaseLineId: po.lines[0].id, actualQuantity: 30, uomId: variantA.uomId }],
+      },
+      actor,
+      {},
+    );
+    receiptAId = grn.id;
+    await goodsReceiptService(prisma).confirm(INTEGRATION_COMPANY_ID, receiptAId, actor, {});
 
     const loading = loadingService(prisma);
     const l = await loading.create(
       INTEGRATION_COMPANY_ID,
-      { loadingDate: new Date(), lines: [{ productVariantId: variant.variantId, actualQuantity: 10 }] },
+      {
+        loadingDate: new Date(),
+        route: 'WAREHOUSE_TO_CUSTOMER',
+        warehouseId: main.id,
+        lines: [{ productVariantId: variant.variantId, actualQuantity: 10 }],
+      },
       actor,
       {},
     );
@@ -90,9 +110,16 @@ describeIntegration('p6-11 company-isolation', () => {
     // B CAN run its own operational flow — its own MAIN warehouse is created lazily.
     const variantB = await createVariantInCompany(prisma, companyBId, `${marker}-b`);
     const customerB = await createParty(prisma, ['CUSTOMER'], `${marker}-b`, companyBId);
+    const bMain = await inventoryService(prisma).ensureDefaultWarehouse(prisma as never, companyBId);
     const lB = await loading.create(
       companyBId,
-      { loadingDate: new Date(), customerPartyId: customerB.id, lines: [{ productVariantId: variantB.variantId, actualQuantity: 5 }] },
+      {
+        loadingDate: new Date(),
+        route: 'WAREHOUSE_TO_CUSTOMER',
+        warehouseId: bMain.id,
+        customerPartyId: customerB.id,
+        lines: [{ productVariantId: variantB.variantId, actualQuantity: 5 }],
+      },
       actor,
       {},
     );
@@ -112,7 +139,7 @@ describeIntegration('p6-11 company-isolation', () => {
 
   afterAll(async () => {
     await cleanupLoading(prisma, loadingAId);
-    await cleanupPurchaseReceive(prisma, purchaseAId);
+    await cleanupGoodsReceipt(prisma, receiptAId);
     await cleanupPurchaseDocument(prisma, purchaseAId);
     const markerPartyIds = (
       await prisma.party.findMany({
@@ -120,6 +147,9 @@ describeIntegration('p6-11 company-isolation', () => {
         select: { id: true },
       })
     ).map((p) => p.id);
+    await prisma.stockLocation.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, partyId: { in: markerPartyIds } },
+    });
     await prisma.partyOperationalBalance.deleteMany({
       where: { companyId: INTEGRATION_COMPANY_ID, partyId: { in: markerPartyIds } },
     });

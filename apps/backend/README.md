@@ -21,11 +21,14 @@ intelligence), document-flow relations. Phase 5: daily pricing engine
 publishing (batch → per-channel queue items through mock channel
 adapters + templates), automation engine (PRICE_UPDATED + daily scans,
 idempotent runs), public website/portal API.
-Phase 6: loading operational lifecycle (confirm generates OUT stock
-movements + operational loaded amounts + the customer-debt driver-info
-gate), purchase goods receipt (IN movements), computed inventory
-(SUM(IN) − SUM(OUT) per variant), warehouses (one default per company)
-and a lean approval-request engine (RELEASE_DRIVER_INFO).
+Phase 6: loading operational lifecycle (explicit physical ROUTE + confirm
+generates route-resolved stock movements + operational loaded amounts + the
+customer-debt driver-info gate + REVERSAL with compensating movements),
+location-based inventory (StockLocation / StockMovement with verbatim source
+AND normalized quantity pairs — Integrity Gate normalization service),
+real goods receipts (per-line ACTUAL quantities, over-receipt flagged,
+reversal), warehouses (one default per company), internal transfers and a
+lean generic approval-request engine (RELEASE_DRIVER_INFO).
 
 ## Setup
 
@@ -101,15 +104,33 @@ src/
                     supplier mappings
   loading/         Phase 6 loading lifecycle: DRAFT → CONFIRMED (+ cancel);
                    confirm = ONE serializable tx (allocation re-validation
-                   under FOR UPDATE, OUT StockMovements, operational loaded
-                   amounts, debt gate, relations, audit) + driver-info
-                   release; responses strip driver/carrier while restricted
-  inventory/       Phase 6 computed stock (single aggregate query, negative
-                   flagged), movement ledger, warehouses CRUD (at most one
-                   default — `ensureDefaultWarehouse` resolves/seeds MAIN)
-  approvals/       Phase 6 ApprovalRequest engine: list/get/decide; APPROVED
-                   RELEASE_DRIVER_INFO clears loading.driverInfoRestricted
-                   in the same tx; requester notified
+                   under FOR UPDATE, StockMovements ALONG THE EXPLICIT ROUTE,
+                   operational loaded amounts, debt gate, relations, audit) +
+                   driver-info release + REVERSAL (compensating movements,
+                   required reason, operational rollback); responses strip
+                   driver/carrier while restricted
+  inventory/       Phase 6 Integrity Gate inventory: NormalizationService
+                   (inventoryUOM resolution, Decimal normalization, the ONLY
+                   movement write seam, negative-stock policy, variant
+                   inventoryUom PATCH lock), StockLocations
+                   (SUPPLIER/INTERNAL/CUSTOMER per company+warehouse+party),
+                   computed stock (location semantics, single aggregate
+                   query, negative flagged), movement ledger (both
+                   quantity/uom pairs), warehouses CRUD (at most one default
+                   — `ensureDefaultWarehouse` resolves/seeds MAIN),
+                   internal transfers
+  goods-receipt/   Integrity Gate #9 real receipts: DRAFT → CONFIRMED →
+                   REVERSED; confirm = ONE serializable tx (IN movements
+                   SUPPLIER→INTERNAL per line `grn:{id}:line:{lineId}`,
+                   purchase operationalLoadedAmount += converted actual ×
+                   unitPrice, status recompute, relations, audit); reverse =
+                   compensating movements + exact rollback; over-receipt
+                   allowed and flagged (derived, cumulative)
+  approvals/       Phase 6 ApprovalRequest engine (GENERIC entity reference
+                   + extensible assertEntityExists map): list/get/decide;
+                   APPROVED RELEASE_DRIVER_INFO clears
+                   loading.driverInfoRestricted in the same tx; requester
+                   notified
   workflow-timer/  durable timers executed by the queue (action registry)
   notifications/   notification rules (condition engine) + dispatch service
   integrations/    integration adapter configs (SMS/…)
@@ -347,29 +368,71 @@ clean seam for future favorite-products / behavior rules (AI later): new
 audience types slot into `AutomationService.resolveAudience` and every
 caller keeps working.
 
-### Loading · Inventory · Operational settlement (Phase 6)
+### Loading · Inventory · Goods receipts · Integrity Gate (Phase 6)
 
-The Loading (header + lines + optional allocations) is the SINGLE operational
-event of the domain (boundaries doc §2): it is registered once and shared by
-the sale and purchase sides. `POST /api/loadings/:id/confirm` runs ONE
-SERIALIZABLE transaction that (a) re-validates every allocation with `FOR
-UPDATE` row locks in consistent id order — loading allocations consume
-ordered quantity on BOTH sales and purchase lines (over-allocation → 409
-`ALLOCATION_EXCEEDS_QUANTITY`, cross-variant → 422
-`ALLOCATION_VARIANT_MISMATCH`); (b) generates one OUT `StockMovement` per
-loading line into the loading's warehouse (or the company default,
-`ensureDefaultWarehouse`) with idempotencyKey
-`loading:{loadingId}:line:{lineId}` (P2002 = already moved — never
-duplicated); (c) adds `allocatedQuantity × line.unitPrice` (exact Decimal)
-to each allocated document's `operationalLoadedAmount` and recomputes the
-document status → `PARTIALLY_LOADED` / `COMPLETED` (only from
-SALES_ORDER / ORDER_PLACED+; never downgraded); (d) applies the DEBT GATE
-(§20): a customer whose `PartyOperationalBalance.balance > 0` gets a PENDING
+**Normalization (Integrity Gate #1/#2/#3).** Every `StockMovement` stores BOTH
+the verbatim source pair (`sourceQuantity` + `sourceUomId` — audit) and the
+normalized pair (`normalizedQuantity` + `inventoryUomId` — expressed in the
+variant's inventory UOM: `inventoryUomId` ?? `defaultUomId`, 422
+`INVENTORY_UOM_MISSING` when neither exists). `normalizedQuantity` is the
+ONLY column stock aggregation may ever SUM — raw units are never mixed.
+Same-category conversion uses the pure UOM-engine ratio; the ONLY
+cross-category bridge is the variant's product-weight pair
+(`weightPerUnit` × `weightUomId`); anything else is 422
+`UOM_CONVERSION_IMPOSSIBLE` (never guessed). `NormalizationService
+.insertStockMovement` is the single movement WRITE SEAM: it computes the
+normalized values internally and inserts with `ON CONFLICT DO NOTHING` (the
+unique idempotency key is the only duplicate authority — a mid-transaction
+P2002 would poison it, Postgres 25P02). It also enforces the
+`inventory.negative_stock_policy` Setting (`ALLOW | WARN | BLOCK`, default
+WARN): under BLOCK a write that would push an INTERNAL (source) location
+below zero is rejected (`NEGATIVE_STOCK_BLOCKED`); WARN/ALLOW only flag it on
+the stock query. The variant inventory UOM is LOCKED once any movement exists
+— a PATCH that would change it is 403 `INVENTORY_UOM_LOCKED`; same-company
+targets are enforced (`UOM_NOT_IN_COMPANY`).
+
+**Stock locations (Integrity Gate #6).** A movement goes FROM a location TO a
+location. Locations are company-scoped rows keyed by semantics:
+`SUPPLIER-{partyId}` / `CUSTOMER-{partyId}` (find-or-created per party) with
+company-wide `SUPPLIER-DEFAULT` / `CUSTOMER-DEFAULT` fallbacks, and one
+INTERNAL `LOC-{warehouseCode}` per warehouse. `ensureLocations(companyId)` is
+idempotent. Company physical stock counts INTERNAL deltas only (#7): +q when
+a movement ARRIVES at an INTERNAL location from a non-internal one, −q when
+it LEAVES one, 0 when both ends are INTERNAL (transfers) or both external
+(direct trade).
+
+**Loading (route + reversal).** The loading carries an explicit physical
+ROUTE (Integrity Gate #10 — never inferred from the presence of a warehouse):
+`DIRECT_SUPPLIER_TO_CUSTOMER` (default; SUPPLIER → CUSTOMER, no internal
+impact), `WAREHOUSE_TO_CUSTOMER` and `SUPPLIER_TO_WAREHOUSE` (both REQUIRE an
+explicit `warehouseId`, 422 `WAREHOUSE_REQUIRED`). `confirm()` is ONE
+SERIALIZABLE transaction that (a) re-validates every allocation under `FOR
+UPDATE` row locks — the `allocatedQuantity` is expressed in the LOADING
+LINE's uom and is converted into the TARGET document line's uom before every
+comparison (422 `ALLOCATION_UOM_INCOMPATIBLE` when no conversion exists;
+over-allocation → 409 `ALLOCATION_EXCEEDS_QUANTITY`; cross-variant → 422
+`ALLOCATION_VARIANT_MISMATCH`); (b) generates one movement per line ALONG THE
+ROUTE (idempotencyKey `loading:{loadingId}:line:{lineId}`, ON CONFLICT DO
+NOTHING); (c) recomputes each touched document's `operationalLoadedAmount`
+from the TOTAL loaded quantities (converted to each document line's uom —
+the "target pricing uom") × line.unitPrice and upgrades the document status →
+`PARTIALLY_LOADED` / `COMPLETED`; (d) applies the DEBT GATE (§20): a customer
+whose `PartyOperationalBalance.balance > 0` gets a PENDING
 `RELEASE_DRIVER_INFO` ApprovalRequest and `driverInfoRestricted = true` —
 debt never blocks the loading, it only hides driver/carrier details; (e)
 writes loading ↔ sales_document RELATED DocumentRelations + audit + party
-timeline (`LOADING_CONFIRMED`) — audit failure rolls the whole confirmation
-back (p6-13).
+timeline — audit failure rolls the whole confirmation back (p6-13).
+
+`POST /api/loadings/:id/reverse` (Integrity Gate #11, `loading.reverse`,
+CONFIRMED only, REQUIRED reason — 422 `REVERSAL_REASON_REQUIRED`) is ONE
+SERIALIZABLE transaction: the original flips to `REVERSED` + reason, one
+COMPENSATING movement per original movement (endpoints swapped,
+`reversalOfMovementId` linkage, key `loading-rev:{loadingId}:line:{lineId}`),
+the operational amounts roll back on both documents (full recompute) and the
+status may fall back to the base active status, PENDING driver-info
+approvals are CANCELLED, and the audit (`LOADING_REVERSED`) + timeline commit
+together. A reversed loading is immutable forever and `GET /api/loadings/:id`
+shows the reversal linkage (`reversalOf` / `reversals`).
 
 Driver-info visibility: while restricted, `GET /api/loadings/:id` strips
 driver/carrier details (`driver: null, carrier: null, restricted: true`)
@@ -378,34 +441,66 @@ list responses NEVER carry driver/carrier details. Release/reject
 (`loading.driver_info.release`) decides the PENDING approval — APPROVED
 clears the restriction, REJECTED keeps it; the requester is notified.
 
-Purchase goods receipt: `POST /api/purchase/:id/receive` (`purchase.edit`,
-from ORDER_PLACED) generates one IN movement per purchase line
-(idempotencyKey `purchase:{id}:line:{lineId}`) into the default warehouse;
-re-receive is a no-op success (`moved: false`).
+**Goods receipts (Integrity Gate #9).** The blind PO-receive is DEPRECATED —
+`POST /api/purchase/:id/receive` is a tombstone answering 403
+`RECEIVE_DEPRECATED`. Real stock comes from goods receipts: `POST
+/api/goods-receipts` creates a DRAFT (GRN number from the `GOODS_RECEIPT`
+sequence, destination = explicit INTERNAL `destinationLocationId`, or a
+`warehouseId`, or the company default warehouse; over-receipt is allowed).
+`confirm()` is ONE SERIALIZABLE transaction: one IN movement per line
+SUPPLIER(po supplier) → INTERNAL(destination) with idempotencyKey
+`grn:{receiptId}:line:{lineId}`; the purchase `operationalLoadedAmount`
+grows by Σ convertedQty(line uom → PO line uom) × line.unitPrice (exact
+rollback on reverse) and the purchase status is recomputed
+(`PARTIALLY_LOADED` / `COMPLETED` from receipt coverage); purchase ↔
+goods_receipt RELATED relations are written both ways. The `overReceipt`
+flag is DERIVED: cumulative received across CONFIRMED receipts of the PO
+line (converted into the PO line's uom) > orderedQuantity — g6-14 (30+35+36
+vs 100 flags the third receipt). `reverse` (`goods_receipt.reverse`, reason
+required) writes compensating movements (swapped endpoints,
+`reversalOfMovementId`, key `grn-rev:{id}:line:{lineId}`,
+`RECEIPT_REVERSAL`) and rolls the purchase amounts/status back; a confirmed
+receipt is otherwise immutable (cancel is DRAFT-only). The generic
+approval engine validates entity references through an extensible
+`assertEntityExists` map (currently `loading`, `goods_receipt`; unknown type
+→ 422 `APPROVAL_UNKNOWN_ENTITY_TYPE`, missing entity → 404).
 
-Inventory: stock per variant = SUM(IN) − SUM(OUT) in ONE aggregate SQL query
-(display joins + `COUNT(*) OVER()` pagination; negative stock allowed and
-flagged `negative: true` — warning semantics, nothing is blocked). There is
-NO manual stock entry and none will be added (boundary §5). Warehouses
-enforce at most one default per company (UOM base-unit precedent); the seed
-creates one `MAIN` انبار مرکزی default per company.
+Inventory: stock per variant in ONE aggregate SQL query (display joins +
+`COUNT(*) OVER()` pagination — no N+1; negative stock allowed and flagged
+`negative: true` under WARN/ALLOW). Per-warehouse queries aggregate that
+warehouse's inbound minus outbound legs. There is NO manual stock entry; the
+internal warehouse→warehouse TRANSFER (inventory.edit) is the single
+deliberate exception (one INTERNAL→INTERNAL movement — company total
+unchanged by construction). Warehouses enforce at most one default per
+company (UOM base-unit precedent); the seed creates one `MAIN` انبار مرکزی
+default per company.
 
 | Method | Path | Notes | Permission |
 | --- | --- | --- | --- |
-| POST/GET | `/api/loadings` (+ GET/PATCH/DELETE `:id`) — create DRAFT (role-validated driver/carrier/customer parties, same-company variant/uom, allocation guards), paginated list (`status`/date/`customerPartyId` filters; ALL with `loading.view_all` else creator-own) | `loading.view` / `create` / `edit` / `cancel` |
+| POST/GET | `/api/loadings` (+ GET/PATCH/DELETE `:id`) — create DRAFT (explicit `route`, role-validated driver/carrier/customer parties, same-company variant/uom, allocation guards), paginated list (`status`/date/`customerPartyId` filters; ALL with `loading.view_all` else creator-own) | `loading.view` / `create` / `edit` / `cancel` |
 | POST | `/api/loadings/:id/confirm` — the operational event (a)–(e) above; double confirm → 403 `LOADING_CONFIRMED` | `loading.confirm` |
+| POST | `/api/loadings/:id/reverse` `{reason}` — compensating movements + operational rollback; REVERSED is immutable | `loading.reverse` |
 | POST | `/api/loadings/:id/cancel` — DRAFT → CANCELLED; CONFIRMED → 403 `LOADING_CONFIRMED` | `loading.cancel` |
 | POST | `/api/loadings/:id/driver-info/release` · `/:id/driver-info/reject` — manager decision on the debt-gate approval | `loading.driver_info.release` |
 | GET | `/api/loadings/:id/relations` — related documents (document-flow; loading labelled «بارگیری {date}») | `loading.view` |
-| POST | `/api/purchase/:id/receive` — IN movements per line, idempotent (`moved:false` on re-receive) | `purchase.edit` |
-| GET | `/api/inventory/stock?warehouseId&variantId&categoryId&search&page&pageSize` — computed stock per variant | `inventory.view` |
-| GET | `/api/inventory/movements?warehouseId&variantId&sourceEntityType&sourceEntityId&from&to` — ledger desc | `inventory.view` |
+| POST | `/api/purchase/:id/receive` — DEPRECATED tombstone → 403 `RECEIVE_DEPRECATED` | `purchase.edit` |
+| POST/GET | `/api/goods-receipts` (+ GET `:id`, GET `:id/relations`) — DRAFT receipts / list / detail (per-line `overReceipt`, movements, reversal linkage) | `goods_receipt.view` / `create` |
+| POST | `/api/goods-receipts/:id/confirm` — IN movements + purchase amounts + relations | `goods_receipt.confirm` |
+| POST | `/api/goods-receipts/:id/reverse` `{reason}` — compensating movements + rollback | `goods_receipt.reverse` |
+| POST | `/api/goods-receipts/:id/cancel` — DRAFT → CANCELLED | `goods_receipt.edit` |
+| GET | `/api/inventory/stock?warehouseId&variantId&categoryId&search&page&pageSize` — computed stock per variant (location semantics, `negative` flag) | `inventory.view` |
+| GET | `/api/inventory/movements?warehouseId&variantId&sourceEntityType&sourceEntityId&from&to` — ledger desc with BOTH quantity/uom pairs + location endpoints | `inventory.view` |
+| GET | `/api/inventory/locations?type&warehouseId&active` — stock locations | `inventory.view` |
+| POST | `/api/inventory/transfer` `{variantId, quantity, uomId, fromWarehouseId, toWarehouseId}` — INTERNAL→INTERNAL, company total unchanged | `inventory.edit` |
 | GET/POST/PATCH/DELETE | `/api/inventory/warehouses(+:id)` (+ POST `:id/default` — flips the single default) | `inventory.view` / `inventory.warehouses.manage` |
 | GET | `/api/approvals?status&approvalType&entityType` · `/api/approvals/:id` | `approvals.decide` |
-| POST | `/api/approvals/:id/decide` `{decision: APPROVED\|REJECTED, note?}` — 409 `APPROVAL_ALREADY_DECIDED` on re-decide | `approvals.decide` |
+| POST | `/api/approvals/:id/decide` `{decision: APPROVED\|REJECTED, note?}` — 409 `APPROVAL_ALREADY_DECIDED` on re-decide; entity existence enforced | `approvals.decide` |
 | GET | `/api/parties/:id/operational-balance` — the debt-gate input (claims module) | `claims.view` |
 
-Phase 6 party timeline events: `LOADING_CONFIRMED`, `DRIVER_INFO_RELEASED`.
+Phase 6 party timeline events: `LOADING_CONFIRMED`, `LOADING_REVERSED`,
+`RECEIPT_CONFIRMED`, `RECEIPT_REVERSED`, `DRIVER_INFO_RELEASED`.
+Movement `sourceEntityType` values: `PURCHASE_RECEIPT`, `LOADING`,
+`LOADING_REVERSAL`, `RECEIPT_REVERSAL`, `TRANSFER`.
 
 ### Parties / CRM core (Phase 3A)
 
@@ -656,12 +751,15 @@ text, never the product master.
   cancel), `price_request.*` (view / create / manage_offers),
   `allocations.manage`, `crm.view` / `crm.manage`, `paymentterm.manage`.
 - Phase 6 permission catalog additions: `loading.*` (view / create / edit /
-  confirm / cancel / driver_info.release / view_all), `inventory.*` (view /
-  warehouses.manage), `approvals.decide`. Roles: `salesperson` keeps
-  loading.view/create/edit; `sales_manager` gains the full loading stack
-  (confirm/cancel/driver_info.release/view_all) + `approvals.decide` +
-  `inventory.view`; `buyer` and `purchase_manager` gain loading.view/create
-  (purchase side); `admin` holds all.
+  confirm / cancel / reverse / driver_info.release / view_all),
+  `goods_receipt.*` (view / create / edit / confirm / reverse),
+  `inventory.*` (view / warehouses.manage), `approvals.decide`. Roles:
+  `salesperson` keeps loading.view/create/edit; `sales_manager` gains the
+  full loading stack (confirm/cancel/reverse/driver_info.release/view_all) +
+  `approvals.decide` + `inventory.view`; `buyer` gains loading.view/create +
+  goods_receipt.view/create/edit; `purchase_manager` gains loading.view/
+  create/reverse + the full goods_receipt stack + `inventory.view`;
+  `admin` holds all.
 - One DEFAULT warehouse per company: `MAIN` انبار مرکزی (upsert on
   `(companyId, code)` — never modified on re-seed); the service-level
   `ensureDefaultWarehouse` also self-heals companies with none.
@@ -673,7 +771,8 @@ text, never the product master.
 - Sequences per company (JALALI_YEAR reset, padding 5): `SALES_DOCUMENT(SD)`,
   `PURCHASE(PO)`, `PRICE_REQUEST(PRQ)`, `SALES_TAX_INVOICE(STI)`,
   `PURCHASE_TAX_INVOICE(PTI)`, `RECEIPT(REC)`, `PAYMENT(PAY)`,
-  `JOURNAL_ENTRY(JE)`, `CHECK(CHK)`, `BANK_TRANSFER(BT)` → e.g. `SD-1405-00001`.
+  `JOURNAL_ENTRY(JE)`, `CHECK(CHK)`, `BANK_TRANSFER(BT)`,
+  `GOODS_RECEIPT(GRN)` → e.g. `SD-1405-00001`.
 - Lost reasons (Phase 4, per company): `PRICE_HIGH` قیمت بالا, `COMPETITOR`
   خرید از رقیب, `NO_NEED` عدم نیاز, `DELAY` تاخیر, `PAYMENT_TERMS` عدم توافق
   شرایط پرداخت, `OTHER` سایر.
@@ -694,9 +793,12 @@ text, never the product master.
 
 ## Tests
 
-`npm test` — 573 tests across 129 suites (the live-DB integration tests
-auto-skip without `TEST_INTEGRATION=1`; with it, all 573 run against Postgres
-and clean up after themselves). Coverage includes the 15
+`npm test` — 626 tests across 170 suites (the live-DB integration tests
+auto-skip without `TEST_INTEGRATION=1`: 400 run / 226 skip; with it, all 626
+run against Postgres and clean up after themselves — `npm run
+test:integration` runs the suite IN-BAND, the Windows-safe runner is
+`scripts/test-integration.js`, because parallel jest workers deadlock
+SERIALIZABLE loading transactions). Coverage includes the 15
 architecture-gate scenarios (greppable as `01 company-scoped-sequence-uniqueness` …
 `15 outgoing-check-paid-bank-effect`), the Phase 3A party/CRM acceptance
 tests (`p3a-01` duplicate normalized phone … `p3a-12` score rules from
@@ -722,19 +824,39 @@ with the price-change-never-rewrites regression, `p5c-02` purchase
 price-source wiring, `p5c-03` public-API visibility levels + isPublic
 toggle, `p5c-04` publishing-adapter contract + fake-adapter end-to-end,
 `p5c-05` SEND_SMS audience resolution + idempotent audience scan) and
-the Phase 6 acceptance tests (`p6-01` confirm generates OUT movements with
-`loading:{id}:line:{lineId}` idempotency keys into the default warehouse,
-`p6-02` double confirm → 403 `LOADING_CONFIRMED` + no duplicate movements
-on re-run, `p6-03` purchase receive IN movements + no-op re-receive,
-`p6-04` computed stock IN 50 / OUT 20 → 30 with negative flagging,
-`p6-05` operational loaded amounts + PARTIALLY_LOADED → COMPLETED,
-`p6-06` over-allocation guard, `p6-07` variant mismatch guard, `p6-08`
-debt gate restricts driver info (approval + restricted payload rules),
-`p6-09` release/reject approval flow with notifications, `p6-10` no debt →
-no restriction, `p6-11` company isolation, `p6-12` permissions
-(loading.confirm / approvals.decide / inventory.warehouses.manage),
-`p6-13` audit atomicity on confirm, `p6-14` warehouse default resolution,
-`p6-15` restart persistence, `p6-16` driver role guard `NOT_A_DRIVER`) and
+the Phase 6 acceptance tests (`p6-01` confirm generates route-resolved
+movements with `loading:{id}:line:{lineId}` idempotency keys along the DIRECT
+route (SUPPLIER → CUSTOMER), `p6-02` double confirm → 403 `LOADING_CONFIRMED`
++ no duplicate movements on re-run, `p6-03` goods receipts: the PO receive
+tombstone (403 `RECEIVE_DEPRECATED`) + GRN confirm IN movements
+SUPPLIER→INTERNAL + no duplicates on double confirm, `p6-04` computed stock
+IN 50 / OUT 20 → 30 with location semantics and negative flagging, `p6-05`
+operational loaded amounts + PARTIALLY_LOADED → COMPLETED, `p6-06`
+over-allocation guard, `p6-07` variant mismatch guard, `p6-08` debt gate
+restricts driver info (approval + restricted payload rules), `p6-09`
+release/reject approval flow with notifications, `p6-10` no debt → no
+restriction, `p6-11` company isolation, `p6-12` permissions (loading/goods
+receipt catalogs + role grants + route metadata incl. reverse/transfer/
+locations), `p6-13` audit atomicity on confirm, `p6-14` warehouse default
+resolution (via goods receipts), `p6-15` restart persistence, `p6-16`
+driver role guard `NOT_A_DRIVER`), the Phase 6 Integrity Gate tests
+(`g6-01` 40000 kg in vs 40 t out → 0 stock, `g6-02` raw units never summed
+(1.5 t from kg receipts), `g6-03` variant inventory-UOM company validation,
+`g6-04` INVENTORY_UOM_LOCKED after movements, `g6-05` piece→kg via
+weightPerUnit, `g6-06` impossible cross-category rejected, `g6-07` 25000 kg
+loading against a 50 t sale loads 25 t, `g6-08` 25 t allocation against a
+50000 kg PO, `g6-09` operational amount in the target (document) pricing
+uom, `g6-10` DIRECT route leaves internal stock untouched, `g6-11`
+SUPPLIER_TO_WAREHOUSE increases internal, `g6-12` WAREHOUSE_TO_CUSTOMER
+decreases internal, `g6-13` internal transfer preserves the company total,
+`g6-14` partial GRNs 30/35/36 vs 100 with overReceipt flagging, `g6-15` GRN
+confirm idempotency, `g6-16` confirmed-loading edit blocked, `g6-17`
+loading reversal compensating movements, `g6-18` reversal restores
+operational status, `g6-19` reversal requires a reason, `g6-20` generic
+approval on a non-loading entity, `g6-21`/`g6-22` loading create/update
+audit rollback atomicity, `g6-23` negative-stock policies
+(WARN/ALLOW/BLOCK), `g6-24` company location isolation, `g6-25` inventory
+grid without N+1) and
 Jalali conversion, phone
 normalization, login lockout, permissions, sequence v2 format/reset/allocate,
 queue backoff/priority/idempotency. Integration tests clean up after

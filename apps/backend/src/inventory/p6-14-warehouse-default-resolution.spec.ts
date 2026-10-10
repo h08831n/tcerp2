@@ -4,58 +4,86 @@ import {
   INTEGRATION_COMPANY_ID,
   disconnectIntegrationPrisma,
 } from '../testing/integration';
-import { adminUserId, createVariant } from '../testing/p4-fixtures';
+import {
+  adminUserId,
+  purchaseService,
+  createParty,
+  createVariant,
+  cleanupPurchaseDocument,
+} from '../testing/p4-fixtures';
 import {
   inventoryService,
   loadingService,
+  goodsReceiptService,
   mainWarehouse,
   cleanupLoading,
+  cleanupGoodsReceipt,
 } from '../testing/p6-fixtures';
 
 /**
- * p6-14 warehouse-default-resolution: a loading with NO warehouse generates
- * its OUT movements in the company DEFAULT warehouse (MAIN); an explicit
- * warehouseId is honored. Warehouse defaults follow the UOM base-unit
- * precedent: promoting a second default is a 409, set-default flips.
+ * p6-14 warehouse-default-resolution: a goods receipt with NO warehouseId
+ * lands its IN movements in the company DEFAULT warehouse (MAIN); an
+ * explicit warehouseId (GRN or a WAREHOUSE-route loading) is honored.
+ * Warehouse defaults follow the UOM base-unit precedent: promoting a second
+ * default is a 409, set-default flips.
  */
 describeIntegration('p6-14 warehouse-default-resolution', () => {
   const prisma = integrationPrisma();
   const marker = `p6-14-${Date.now()}`;
   let actorId = '';
+  let supplier = { id: '', nameFa: '' };
   let variant = { variantId: '', templateId: '', uomId: '', sku: '', templateNameFa: '' };
-  let loadingAId = '';
-  let loadingBId = '';
+  let purchaseId = '';
+  let receiptId = '';
+  let loadingId = '';
   let extraWarehouseId = '';
 
   beforeAll(async () => {
     actorId = await adminUserId(prisma);
+    supplier = await createParty(prisma, ['SUPPLIER'], marker);
     variant = await createVariant(prisma, marker);
+    await inventoryService(prisma).ensureLocations(INTEGRATION_COMPANY_ID);
     await mainWarehouse(prisma);
   });
 
   it('no warehouseId → default used; explicit warehouse honored; default uniqueness enforced', async () => {
     const inventory = inventoryService(prisma);
     const loading = loadingService(prisma);
+    const receipts = goodsReceiptService(prisma);
+    const purchase = purchaseService(prisma);
     const actor = { id: actorId, username: 'admin' };
 
     const main = await prisma.warehouse.findFirstOrThrow({
       where: { companyId: INTEGRATION_COMPANY_ID, code: 'MAIN' },
     });
-
-    // (a) No warehouseId → default MAIN.
-    const a = await loading.create(
+    const po = await purchase.create(
       INTEGRATION_COMPANY_ID,
-      { loadingDate: new Date(), lines: [{ productVariantId: variant.variantId, actualQuantity: 1 }] },
+      { supplierPartyId: supplier.id, lines: [{ productVariantId: variant.variantId, quantity: 10, unitPrice: 0 }] },
       actor,
       {},
     );
-    loadingAId = a.id;
-    await loading.confirm(INTEGRATION_COMPANY_ID, loadingAId, actor, {});
-    const aMovements = await prisma.stockMovement.findMany({ where: { sourceEntityId: loadingAId } });
-    expect(aMovements).toHaveLength(1);
-    expect(aMovements[0].warehouseId).toBe(main.id);
+    purchaseId = po.id;
+    await purchase.place(INTEGRATION_COMPANY_ID, purchaseId, actor, {});
 
-    // (b) Explicit warehouse honored.
+    // (a) No warehouseId → default MAIN (the INTERNAL LOC-MAIN location).
+    const grn = await receipts.create(
+      INTEGRATION_COMPANY_ID,
+      {
+        purchaseDocumentId: purchaseId,
+        lines: [{ purchaseLineId: po.lines[0].id, actualQuantity: 3, uomId: variant.uomId }],
+      },
+      actor,
+      {},
+    );
+    receiptId = grn.id;
+    await receipts.confirm(INTEGRATION_COMPANY_ID, receiptId, actor, {});
+    const grnMovements = await prisma.stockMovement.findMany({
+      where: { sourceEntityType: 'PURCHASE_RECEIPT', sourceEntityId: receiptId },
+    });
+    expect(grnMovements).toHaveLength(1);
+    expect(grnMovements[0].warehouseId).toBe(main.id);
+
+    // (b) Explicit warehouse honored (WAREHOUSE_TO_CUSTOMER loading).
     const extra = await inventory.createWarehouse(
       INTEGRATION_COMPANY_ID,
       { code: `P6W-${marker}`, nameFa: 'انبار تست ۶-۱۴' },
@@ -67,15 +95,16 @@ describeIntegration('p6-14 warehouse-default-resolution', () => {
       INTEGRATION_COMPANY_ID,
       {
         loadingDate: new Date(),
+        route: 'WAREHOUSE_TO_CUSTOMER',
         warehouseId: extraWarehouseId,
         lines: [{ productVariantId: variant.variantId, actualQuantity: 2 }],
       },
       actor,
       {},
     );
-    loadingBId = b.id;
-    await loading.confirm(INTEGRATION_COMPANY_ID, loadingBId, actor, {});
-    const bMovements = await prisma.stockMovement.findMany({ where: { sourceEntityId: loadingBId } });
+    loadingId = b.id;
+    await loading.confirm(INTEGRATION_COMPANY_ID, loadingId, actor, {});
+    const bMovements = await prisma.stockMovement.findMany({ where: { sourceEntityId: loadingId } });
     expect(bMovements).toHaveLength(1);
     expect(bMovements[0].warehouseId).toBe(extraWarehouseId);
 
@@ -108,11 +137,22 @@ describeIntegration('p6-14 warehouse-default-resolution', () => {
   });
 
   afterAll(async () => {
-    await cleanupLoading(prisma, loadingAId);
-    await cleanupLoading(prisma, loadingBId);
+    await cleanupLoading(prisma, loadingId);
+    await cleanupGoodsReceipt(prisma, receiptId);
+    await cleanupPurchaseDocument(prisma, purchaseId);
     if (extraWarehouseId) {
       await prisma.warehouse.deleteMany({ where: { id: extraWarehouseId } }).catch(() => undefined);
     }
+    const parties = await prisma.party.findMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { contains: marker } },
+      select: { id: true },
+    });
+    await prisma.stockLocation.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, partyId: { in: parties.map((p) => p.id) } },
+    });
+    await prisma.party.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, id: { in: parties.map((p) => p.id) } },
+    });
     await disconnectIntegrationPrisma();
   });
 });

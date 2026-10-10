@@ -237,6 +237,15 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Frontend: /loadings (list/new/detail with confirm + release modal + related docs), /inventory (3 tabs), /approvals, receive button on purchase detail
 - Tests: 145 suites — 595/595 integration; live smoke: purchase 40t receive → IN movement (re-receive no-op), loading 40t confirm → OUT movement + operationalLoadedAmount 14.2B + debt gate restricted → manager release → visible; stock 0; DTO fix ArrayMinSize found by smoke
 
+### Phase 6 Integrity Gate (COMPLETED — commits 1f5bc46 schema + gate impl)
+- Location-based movements: StockLocation (SUPPLIER/INTERNAL/CUSTOMER/TRANSIT); movements carry source/destination locations; company stock = INTERNAL net only — direct SUPPLIER→CUSTOMER creates NO fake internal stock
+- Normalized quantities: movements keep sourceQuantity/sourceUom verbatim; normalizedQuantity in variant.inventoryUomId (authoritative, service-locked after movements) via UOM engine; piece↔weight only via weightPerUnit; impossible → UOM_CONVERSION_IMPOSSIBLE
+- Loading: explicit route enum; allocation qty is in LoadingLine.uom — converted to target line UOM before over-allocation math; operational amounts = convertedQty × immutable unit-price snapshot; REVERSAL (compensating movements, operational rollback, approval cancel, audit REVERSAL_REASON_REQUIRED) — originals immutable
+- GoodsReceipt/Lines: real partial receipts (30+35+36 vs PO 100 → actual 101, overReceipt flagged per pushing receipt), confirm/reverse/cancel, movements SUPPLIER→INTERNAL; purchase /receive tombstoned (RECEIVE_DEPRECATED)
+- ApprovalRequest fully generic (no Loading FK); document flow gains goods_receipt
+- inventory.negative_stock_policy setting (ALLOW/WARN/BLOCK); POST /inventory/transfer (INTERNAL→INTERNAL preserves company total)
+- 25 new g6 tests (170 suites, 626/626 integration); live smoke A (direct, mixed kg/ton: 40,000kg→40ton, amounts 14.2B/13.6B exact, no internal stock) and B (GRN 101t in, loading 25,000kg→25t out → stock 76, reversal → back to 101, opLoaded rolled back)
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

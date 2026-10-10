@@ -16,6 +16,7 @@ import {
   CreateLoadingDto,
   LoadingQueryDto,
   ReleaseDriverInfoDto,
+  ReverseLoadingDto,
   UpdateLoadingDto,
 } from './loading.dto';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
@@ -81,6 +82,7 @@ export class LoadingController {
       companyId,
       {
         loadingDate: new Date(dto.loadingDate),
+        route: dto.route,
         warehouseId: dto.warehouseId,
         customerPartyId: dto.customerPartyId,
         driverPartyId: dto.driverPartyId,
@@ -148,6 +150,25 @@ export class LoadingController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     return this.loadingService.confirm(companyId, id, actor, this.ctx(request));
+  }
+
+  /**
+   * CONFIRMED → REVERSED with a REQUIRED reason (Integrity Gate #11): one
+   * atomic transaction — compensating movements (swapped endpoints,
+   * reversalOfMovementId linkage), operational rollback on both documents,
+   * pending driver-info approvals CANCELLED, audit + timeline. A reversed
+   * loading is immutable forever.
+   */
+  @Post(':id/reverse')
+  @RequirePermissions('loading.reverse')
+  async reverse(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReverseLoadingDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.loadingService.reverse(companyId, id, dto, actor, this.ctx(request));
   }
 
   /** Manager releases restricted driver/carrier info (debt gate APPROVED). */

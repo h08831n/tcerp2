@@ -23,6 +23,10 @@ export const DOCUMENT_TYPES = [
   // confirmed). A loading has no document number — it is labelled
   // `بارگیری {date}` (see resolveLabels).
   'loading',
+  // Integrity Gate #9: goods receipts are first-class navigation endpoints —
+  // purchase_document ↔ goods_receipt RELATED relations are written at GRN
+  // confirm; receipts are labelled with their GRN number.
+  'goods_receipt',
 ] as const;
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -76,6 +80,7 @@ export class DocumentRelationService {
       lead: () => client.lead.findFirst({ where: { id, companyId }, select: { id: true } }),
       opportunity: () => client.opportunity.findFirst({ where: { id, companyId }, select: { id: true } }),
       loading: () => client.loading.findFirst({ where: { id, companyId }, select: { id: true } }),
+      goods_receipt: () => client.goodsReceipt.findFirst({ where: { id, companyId }, select: { id: true } }),
     } as const;
     const row = await delegates[type]();
     if (!row) {
@@ -247,6 +252,40 @@ export class DocumentRelationService {
           items: [],
         });
       }
+
+      // Integrity Gate #9: a purchase document KNOWS its goods receipts via
+      // the purchase_document_id FK — expose them as a derived group (the
+      // explicit RELATED rows created at confirm are deduped by `seen`).
+      if (type === 'purchase_document') {
+        const receipts = await this.prisma.goodsReceipt.findMany({
+          where: { purchaseDocumentId: id, companyId },
+          orderBy: { receiptDate: 'desc' },
+          select: { id: true, receiptNumber: true, createdAt: true },
+        });
+        const grLabels = await this.resolveLabels(
+          companyId,
+          receipts.map((r) => ({ type: 'goods_receipt', id: r.id })),
+        );
+        for (const receipt of receipts) {
+          const pairKey = `goods_receipt:${receipt.id}:RELATED`;
+          if (seen.has(pairKey)) continue;
+          seen.add(pairKey);
+          const group = groups.get('goods_receipt:RELATED') ?? {
+            type: 'goods_receipt',
+            relationType: 'RELATED',
+            count: 0,
+            items: [],
+          };
+          group.count += 1;
+          group.items.push({
+            id: receipt.id,
+            label: grLabels.get(`goods_receipt:${receipt.id}`) ?? receipt.receiptNumber,
+            relationType: 'RELATED',
+            createdAt: receipt.createdAt,
+          });
+          groups.set('goods_receipt:RELATED', group);
+        }
+      }
     }
 
     const relations = [...groups.values()];
@@ -314,6 +353,14 @@ export class DocumentRelationService {
       rows.forEach((r) =>
         labels.set(`loading:${r.id}`, `بارگیری ${r.loadingDate.toISOString().slice(0, 10)}`),
       );
+    }
+    if (byType.has('goods_receipt')) {
+      // Goods receipts carry their GRN number.
+      const rows = await this.prisma.goodsReceipt.findMany({
+        where: { companyId, id: { in: byType.get('goods_receipt') } },
+        select: { id: true, receiptNumber: true },
+      });
+      rows.forEach((r) => labels.set(`goods_receipt:${r.id}`, r.receiptNumber));
     }
     return labels;
   }

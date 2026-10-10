@@ -618,6 +618,15 @@ export class UpdateVariantDto {
   @MaxLength(200)
   nameFa?: string;
 
+  /**
+   * Integrity Gate #2 — the authoritative UOM for inventory aggregation
+   * (falls back to defaultUomId). Same-company; LOCKED once stock movements
+   * exist (INVENTORY_UOM_LOCKED) — aggregated history can never be re-based.
+   */
+  @IsOptional()
+  @IsUUID()
+  inventoryUomId?: string | null;
+
   @IsOptional()
   @IsUUID()
   defaultUomId?: string | null;

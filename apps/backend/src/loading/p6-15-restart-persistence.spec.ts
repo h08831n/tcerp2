@@ -23,13 +23,19 @@ describeIntegration('p6-15 restart-persistence', () => {
   it('a fresh client sees loadings, movements and computed stock', async () => {
     actorId = await adminUserId(prisma);
     variant = await createVariant(prisma, marker);
-    await mainWarehouse(prisma);
+    await inventoryService(prisma).ensureLocations(INTEGRATION_COMPANY_ID);
+    const main = await mainWarehouse(prisma);
 
     const actor = { id: actorId, username: 'admin' };
     const loading = loadingService(prisma);
     const created = await loading.create(
       INTEGRATION_COMPANY_ID,
-      { loadingDate: new Date(), lines: [{ productVariantId: variant.variantId, actualQuantity: 15 }] },
+      {
+        loadingDate: new Date(),
+        route: 'WAREHOUSE_TO_CUSTOMER',
+        warehouseId: main.id,
+        lines: [{ productVariantId: variant.variantId, actualQuantity: 15 }],
+      },
       actor,
       {},
     );

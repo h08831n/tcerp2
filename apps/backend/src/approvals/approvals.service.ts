@@ -4,14 +4,25 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { TimelineService } from '../parties/timeline.service';
 import { NotificationService } from '../notifications/notifications.service';
-import { ConflictError, NotFoundError } from '../common/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import { ApprovalQueryDto } from './approvals.dto';
 
 export const APPROVAL_MESSAGES = {
   alreadyDecided: 'APPROVAL_ALREADY_DECIDED',
+  unknownEntityType: 'APPROVAL_UNKNOWN_ENTITY_TYPE',
 } as const;
+
+/**
+ * The extensible APPROVAL ENTITY map (Integrity Gate #13): ApprovalRequest
+ * carries NO physical FK — (entityType, entityId) is a generic reference and
+ * every producer registers its entity here so decisions can assert the
+ * target actually exists IN THE COMPANY. Adding a new approvable entity is
+ * a one-line map entry (next: purchase orders, claims, …).
+ */
+export const APPROVAL_ENTITY_TYPES = ['loading', 'goods_receipt'] as const;
+export type ApprovalEntityType = (typeof APPROVAL_ENTITY_TYPES)[number];
 
 /**
  * Lean approval engine (Phase 6, REQUIREMENTS §51 subset + domain boundaries
@@ -62,7 +73,7 @@ export class ApprovalRequestService {
     return approval;
   }
 
-  /** The PENDING release request for a loading, if any. */
+  /** The PENDING release request for a loading, if any (entityType='loading'). */
   async findPendingLoadingRelease(
     companyId: string,
     loadingId: string,
@@ -77,6 +88,34 @@ export class ApprovalRequestService {
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Generic entity validation (Integrity Gate #13): the (entityType,
+   * entityId) reference must point at an existing row IN THIS COMPANY.
+   * Unknown type → 422 APPROVAL_UNKNOWN_ENTITY_TYPE; missing row → 404.
+   */
+  async assertEntityExists(
+    companyId: string,
+    entityType: string,
+    entityId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<void> {
+    const db = tx ?? this.prisma;
+    switch (entityType as ApprovalEntityType) {
+      case 'loading': {
+        const row = await db.loading.findFirst({ where: { id: entityId, companyId }, select: { id: true } });
+        if (!row) throw new NotFoundError('Approval entity not found', { entityType, entityId });
+        return;
+      }
+      case 'goods_receipt': {
+        const row = await db.goodsReceipt.findFirst({ where: { id: entityId, companyId }, select: { id: true } });
+        if (!row) throw new NotFoundError('Approval entity not found', { entityType, entityId });
+        return;
+      }
+      default:
+        throw new ValidationError(APPROVAL_MESSAGES.unknownEntityType, { entityType });
+    }
   }
 
   /**
@@ -99,6 +138,9 @@ export class ApprovalRequestService {
         status: existing.status,
       });
     }
+    // The generic reference must resolve (Integrity Gate #13) — a decision
+    // on a deleted/foreign entity can never commit.
+    await this.assertEntityExists(companyId, existing.entityType, existing.entityId);
 
     const decision = await this.prisma.$transaction(async (tx) => {
       const approval = await tx.approvalRequest.update({

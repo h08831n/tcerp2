@@ -87,6 +87,13 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'loading.confirm', module: 'loading', action: 'confirm', description: 'Confirm loadings (generates OUT stock movements + operational amounts)' },
   { code: 'loading.cancel', module: 'loading', action: 'cancel', description: 'Cancel / delete DRAFT loadings' },
   { code: 'loading.driver_info.release', module: 'loading', action: 'driver_info.release', description: 'Release restricted driver/carrier info (manager approval)' },
+  { code: 'loading.reverse', module: 'loading', action: 'reverse', description: 'Reverse CONFIRMED loadings (compensating stock movements, required reason)' },
+  // goods receipts (Phase 6 Integrity Gate #9: real partial receipts drive stock)
+  { code: 'goods_receipt.view', module: 'goods_receipt', action: 'view', description: 'View goods receipts (GRN)' },
+  { code: 'goods_receipt.create', module: 'goods_receipt', action: 'create', description: 'Register goods receipts (DRAFT)' },
+  { code: 'goods_receipt.edit', module: 'goods_receipt', action: 'edit', description: 'Edit / cancel DRAFT goods receipts' },
+  { code: 'goods_receipt.confirm', module: 'goods_receipt', action: 'confirm', description: 'Confirm goods receipts (IN stock movements + purchase amounts)' },
+  { code: 'goods_receipt.reverse', module: 'goods_receipt', action: 'reverse', description: 'Reverse CONFIRMED goods receipts (compensating movements, required reason)' },
   { code: 'loading.view_all', module: 'loading', action: 'view_all', description: 'View all loadings regardless of creator (list scope ALL)' },
   // inventory (Phase 6)
   { code: 'inventory.view', module: 'inventory', action: 'view', description: 'View computed stock, stock movements and warehouses' },
@@ -213,6 +220,7 @@ const ROLE_DEFS: {
       // Phase 6: managers confirm loadings, release restricted driver info and
       // decide approval requests (debt gate); loading.view_all → list scope ALL.
       'loading.view', 'loading.create', 'loading.edit', 'loading.confirm', 'loading.cancel',
+      'loading.reverse',
       'loading.driver_info.release', 'loading.view_all', 'approvals.decide',
       'inventory.view',
       'parties.view', 'parties.create', 'parties.edit',
@@ -231,14 +239,18 @@ const ROLE_DEFS: {
     nameEn: 'Buyer',
     permissions: ['files.view', 'files.upload', 'files.download', 'queue.view', 'claims.view', 'claims.create', 'loading.view', 'loading.create', 'products.view',
       'purchase.view', 'purchase.create', 'purchase.edit',
+      'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit',
       'price_request.view', 'price_request.create'],
   },
   {
     code: 'purchase_manager',
     nameFa: 'مدیر خرید',
     nameEn: 'Purchase Manager',
-    permissions: ['teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view', 'claims.view', 'claims.create', 'claims.edit', 'loading.view', 'loading.create',
+    permissions: ['teams.view', 'files.view', 'files.upload', 'files.download', 'queue.view', 'audit.view', 'claims.view', 'claims.create', 'claims.edit',
+      'loading.view', 'loading.create', 'loading.reverse',
       'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.cancel',
+      'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit', 'goods_receipt.confirm', 'goods_receipt.reverse',
+      'inventory.view',
       'price_request.view', 'price_request.create', 'price_request.manage_offers',
       'allocations.manage'],
   },
@@ -283,6 +295,8 @@ const SEQUENCE_DEFS = [
   { documentType: 'BANK_TRANSFER', name: 'Bank transfer', prefix: 'BT' },
   // Phase 5
   { documentType: 'PUBLISH_BATCH', name: 'Publish batch', prefix: 'PB' },
+  // Phase 6 Integrity Gate #9
+  { documentType: 'GOODS_RECEIPT', name: 'Goods receipt', prefix: 'GRN' },
 ];
 
 const CHART_OF_ACCOUNTS = [

@@ -14,6 +14,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { PaginationDto } from '../common/dto/pagination.dto';
+import { LoadingRoute } from '@prisma/client';
 
 export class LoadingAllocationDto {
   @IsOptional()
@@ -57,6 +58,15 @@ export class CreateLoadingDto {
   @IsDateString()
   loadingDate!: string;
 
+  /**
+   * The explicit physical route (Integrity Gate #10 — never inferred):
+   *   DIRECT_SUPPLIER_TO_CUSTOMER (default) | WAREHOUSE_TO_CUSTOMER |
+   *   SUPPLIER_TO_WAREHOUSE. The warehouse routes REQUIRE warehouseId.
+   */
+  @IsOptional()
+  @IsIn(Object.values(LoadingRoute) as string[])
+  route?: LoadingRoute;
+
   @IsOptional()
   @IsUUID()
   warehouseId?: string;
@@ -98,6 +108,10 @@ export class UpdateLoadingDto {
   loadingDate?: string;
 
   @IsOptional()
+  @IsIn(Object.values(LoadingRoute) as string[])
+  route?: LoadingRoute;
+
+  @IsOptional()
   @IsUUID()
   warehouseId?: string | null;
 
@@ -129,8 +143,8 @@ export class UpdateLoadingDto {
 
 export class LoadingQueryDto extends PaginationDto {
   @IsOptional()
-  @IsIn(['DRAFT', 'CONFIRMED', 'CANCELLED'])
-  status?: 'DRAFT' | 'CONFIRMED' | 'CANCELLED';
+  @IsIn(['DRAFT', 'CONFIRMED', 'REVERSED', 'CANCELLED'])
+  status?: 'DRAFT' | 'CONFIRMED' | 'REVERSED' | 'CANCELLED';
 
   @IsOptional()
   @IsDateString()
@@ -143,6 +157,14 @@ export class LoadingQueryDto extends PaginationDto {
   @IsOptional()
   @IsUUID()
   customerPartyId?: string;
+}
+
+/** Reversal of a CONFIRMED loading — the reason is REQUIRED (Integrity Gate #11). */
+export class ReverseLoadingDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(1000)
+  reason!: string;
 }
 
 export class ReleaseDriverInfoDto {

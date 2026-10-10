@@ -3,11 +3,15 @@ import { AuditService } from '../audit/audit.service';
 import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { NormalizationService } from '../inventory/normalization.service';
 import { LoadingService } from '../loading/loading.service';
+import { GoodsReceiptService } from '../goods-receipt/goods-receipt.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { NotificationService } from '../notifications/notifications.service';
+import { SequencesService } from '../sequences/sequences.service';
 import { StockQueryDto, MovementQueryDto } from '../inventory/inventory.dto';
 import { LoadingQueryDto } from '../loading/loading.dto';
+import { GoodsReceiptQueryDto } from '../goods-receipt/goods-receipt.dto';
 import { makeQueueService } from './p5-fixtures';
 import { INTEGRATION_COMPANY_ID } from './integration';
 
@@ -31,6 +35,16 @@ export function loadingQuery(input: Partial<LoadingQueryDto> = {}): LoadingQuery
   return Object.assign(new LoadingQueryDto(), input);
 }
 
+export function goodsReceiptQuery(
+  input: Partial<GoodsReceiptQueryDto> = {},
+): GoodsReceiptQueryDto {
+  return Object.assign(new GoodsReceiptQueryDto(), input);
+}
+
+export function normalizationService(prisma: PrismaClient): NormalizationService {
+  return new NormalizationService(prisma as never);
+}
+
 export function inventoryService(prisma: PrismaClient): InventoryService {
   return new InventoryService(prisma as never, new AuditService(prisma as never));
 }
@@ -46,6 +60,22 @@ export function loadingService(prisma: PrismaClient): LoadingService {
     relations,
     inventoryService(prisma),
     approvalRequestService(prisma),
+    normalizationService(prisma),
+  );
+}
+
+export function goodsReceiptService(prisma: PrismaClient): GoodsReceiptService {
+  const audit = new AuditService(prisma as never);
+  const timeline = new TimelineService(prisma as never);
+  const relations = new DocumentRelationService(prisma as never, audit);
+  return new GoodsReceiptService(
+    prisma as never,
+    new SequencesService(prisma as never, audit),
+    audit,
+    timeline,
+    relations,
+    inventoryService(prisma),
+    normalizationService(prisma),
   );
 }
 
@@ -100,8 +130,33 @@ export async function cleanupLoading(prisma: PrismaClient, loadingId: string): P
 
 export async function cleanupPurchaseReceive(prisma: PrismaClient, purchaseDocumentId: string): Promise<void> {
   if (!purchaseDocumentId) return;
-  await prisma.stockMovement.deleteMany({ where: { sourceEntityId: purchaseDocumentId } });
+  await prisma.stockMovement.deleteMany({
+    where: { sourceEntityType: { in: ['PURCHASE', 'PURCHASE_RECEIPT', 'RECEIPT_REVERSAL'] }, sourceEntityId: purchaseDocumentId },
+  });
 }
+
+/** Delete one goods receipt + its movements (business rows; audits stay). */
+export async function cleanupGoodsReceipt(prisma: PrismaClient, receiptId: string): Promise<void> {
+  if (!receiptId) return;
+  await prisma.stockMovement.deleteMany({
+    where: { sourceEntityType: { in: ['PURCHASE_RECEIPT', 'RECEIPT_REVERSAL'] }, sourceEntityId: receiptId },
+  });
+  await prisma.documentRelation.deleteMany({
+    where: {
+      OR: [
+        { fromType: 'goods_receipt', fromId: receiptId },
+        { toType: 'goods_receipt', toId: receiptId },
+      ],
+    },
+  });
+  await prisma.goodsReceipt.deleteMany({ where: { id: receiptId } }).catch(() => undefined);
+}
+
+/**
+ * Sequence numbers are consumed even by rolled-back receipts — keep the
+ * shared INTEGRATION company's GRN counter assertions relative, or clean a
+ * test company's sequences wholesale via cleanupCompanyPhase6.
+ */
 
 /**
  * Company-wide cleanup used by the isolated-company isolation test: removes
@@ -112,6 +167,10 @@ export async function cleanupCompanyPhase6(prisma: PrismaClient, companyId: stri
   await prisma.approvalRequest.deleteMany({ where: { companyId } });
   await prisma.documentRelation.deleteMany({ where: { companyId } });
   await prisma.stockMovement.deleteMany({ where: { companyId } });
+  await prisma.goodsReceiptLine.deleteMany({ where: { receipt: { companyId } } });
+  await prisma.goodsReceipt.deleteMany({ where: { companyId } });
+  await prisma.stockLocation.deleteMany({ where: { companyId } });
+  await prisma.setting.deleteMany({ where: { companyId } });
   await prisma.loadingAllocation.deleteMany({ where: { companyId } });
   await prisma.loadingLine.deleteMany({ where: { loading: { companyId } } });
   await prisma.loading.deleteMany({ where: { companyId } });

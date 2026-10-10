@@ -13,7 +13,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "db:seed": "ts-node prisma/seed.ts",
-    "test:integration": "TEST_INTEGRATION=1 jest --runInBand"
+    "test:integration": "node scripts/test-integration.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.632.0",

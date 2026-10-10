@@ -13,7 +13,9 @@ import {
 import { Request } from 'express';
 import { InventoryService } from './inventory.service';
 import {
+  CreateTransferDto,
   CreateWarehouseDto,
+  LocationQueryDto,
   MovementQueryDto,
   StockQueryDto,
   UpdateWarehouseDto,
@@ -24,9 +26,15 @@ import { RequestContext } from '../auth/auth.service';
 import { CompanyContextService } from '../companies/company-context.service';
 
 /**
- * GET  /api/inventory/stock       — computed per-variant stock (inventory.view)
- * GET  /api/inventory/movements   — movement ledger (inventory.view)
+ * GET  /api/inventory/stock       — computed per-variant stock, location
+ *                                    semantics, normalizedQuantity sums
+ *                                    (inventory.view)
+ * GET  /api/inventory/movements   — movement ledger with both quantity/uom
+ *                                    pairs + location endpoints (inventory.view)
+ * GET  /api/inventory/locations   — stock locations (inventory.view)
  * GET  /api/inventory/warehouses  — warehouse list (inventory.view)
+ * POST /api/inventory/transfer    — internal warehouse→warehouse transfer
+ *                                    (inventory.edit)
  * POST/PATCH/DELETE /api/inventory/warehouses(+:id/set-default)
  *                                  — inventory.warehouses.manage
  */
@@ -61,6 +69,29 @@ export class InventoryController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(user, request.headers);
     return this.inventory.movements(companyId, query);
+  }
+
+  @Get('locations')
+  @RequirePermissions('inventory.view')
+  async locations(
+    @Query() query: LocationQueryDto,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.inventory.listLocations(companyId, query);
+  }
+
+  /** Internal warehouse→warehouse transfer (single INTERNAL→INTERNAL movement). */
+  @Post('transfer')
+  @RequirePermissions('inventory.edit')
+  async transfer(
+    @Body() dto: CreateTransferDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.inventory.transfer(companyId, dto, actor, this.ctx(request));
   }
 
   @Get('warehouses')

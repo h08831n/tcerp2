@@ -3,7 +3,9 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
+  IsNumber,
   IsOptional,
+  IsPositive,
   IsString,
   IsUUID,
   MaxLength,
@@ -24,6 +26,15 @@ export class StockQueryDto extends PaginationDto {
   categoryId?: string;
 }
 
+/** Movement source entity types (polymorphic — see StockMovement schema). */
+export const MOVEMENT_SOURCE_TYPES = [
+  'PURCHASE_RECEIPT',
+  'LOADING',
+  'LOADING_REVERSAL',
+  'RECEIPT_REVERSAL',
+  'TRANSFER',
+] as const;
+
 export class MovementQueryDto extends PaginationDto {
   @IsOptional()
   @IsUUID()
@@ -34,8 +45,8 @@ export class MovementQueryDto extends PaginationDto {
   variantId?: string;
 
   @IsOptional()
-  @IsIn(['PURCHASE', 'LOADING'])
-  sourceEntityType?: 'PURCHASE' | 'LOADING';
+  @IsIn(MOVEMENT_SOURCE_TYPES)
+  sourceEntityType?: (typeof MOVEMENT_SOURCE_TYPES)[number];
 
   @IsOptional()
   @IsUUID()
@@ -48,6 +59,38 @@ export class MovementQueryDto extends PaginationDto {
   @IsOptional()
   @IsDateString()
   to?: string;
+}
+
+export class LocationQueryDto {
+  @IsOptional()
+  @IsIn(['SUPPLIER', 'INTERNAL', 'CUSTOMER', 'TRANSIT'])
+  type?: 'SUPPLIER' | 'INTERNAL' | 'CUSTOMER' | 'TRANSIT';
+
+  @IsOptional()
+  @IsUUID()
+  warehouseId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
+}
+
+export class CreateTransferDto {
+  @IsUUID()
+  variantId!: string;
+
+  @IsNumber()
+  @IsPositive()
+  quantity!: number;
+
+  @IsUUID()
+  uomId!: string;
+
+  @IsUUID()
+  fromWarehouseId!: string;
+
+  @IsUUID()
+  toWarehouseId!: string;
 }
 
 export class CreateWarehouseDto {

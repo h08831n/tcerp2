@@ -10,6 +10,7 @@ import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { LoadingService } from './loading.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { NormalizationService } from '../inventory/normalization.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { QueueService } from '../queue/queue.service';
@@ -48,6 +49,7 @@ describeIntegration('p6-13 audit-atomicity', () => {
       relations,
       new InventoryService(prisma as never, audit),
       approvals,
+      new NormalizationService(prisma as never),
     );
   }
 
@@ -59,10 +61,10 @@ describeIntegration('p6-13 audit-atomicity', () => {
 
   it('an audit failure on confirm leaves NOTHING behind', async () => {
     const audit = new AuditService(prisma as never);
-    jest.spyOn(audit, 'recordTx').mockRejectedValueOnce(new Error('audit write failed'));
     const service = makeLoadingService(audit);
     const actor = { id: actorId, username: 'admin' };
 
+    // The DRAFT is created with the SAME (still healthy) audit instance.
     const created = await service.create(
       INTEGRATION_COMPANY_ID,
       { loadingDate: new Date(), lines: [{ productVariantId: variant.variantId, actualQuantity: 7 }] },
@@ -71,6 +73,8 @@ describeIntegration('p6-13 audit-atomicity', () => {
     );
     loadingId = created.id;
 
+    // NOW sabotage: the next recordTx call (the confirm) fails.
+    jest.spyOn(audit, 'recordTx').mockRejectedValueOnce(new Error('audit write failed'));
     await expect(
       service.confirm(INTEGRATION_COMPANY_ID, loadingId, actor, {}),
     ).rejects.toThrow('audit write failed');

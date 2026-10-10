@@ -1,8 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { LoadingStatus, PartyRoleType, Prisma, PurchaseDocumentStatus, SalesDocumentStatus } from '@prisma/client';
+import {
+  LoadingRoute,
+  LoadingStatus,
+  PartyRoleType,
+  Prisma,
+  PurchaseDocumentStatus,
+  SalesDocumentStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { AuditAction } from '../audit/audit.dto';
 import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { InventoryService } from '../inventory/inventory.service';
@@ -15,7 +21,7 @@ import {
   ValidationError,
 } from '../common/errors';
 import { D, roundQuantity } from '../common/utils/money';
-import { insertStockMovementIfAbsent } from '../common/utils/stock-movement';
+import { NormalizationService } from '../inventory/normalization.service';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
@@ -33,6 +39,7 @@ export const LOADING_MESSAGES = {
   notACustomer: 'NOT_A_CUSTOMER',
   variantMismatch: 'ALLOCATION_VARIANT_MISMATCH',
   exceedsQuantity: 'ALLOCATION_EXCEEDS_QUANTITY',
+  allocationUomIncompatible: 'ALLOCATION_UOM_INCOMPATIBLE',
   allocationPositive: 'ALLOCATION_QUANTITY_POSITIVE',
   allocationTargetRequired: 'ALLOCATION_TARGET_REQUIRED',
   allocationSingleTarget: 'ALLOCATION_SINGLE_TARGET',
@@ -42,10 +49,13 @@ export const LOADING_MESSAGES = {
   uomNotInCompany: 'UOM_NOT_IN_COMPANY',
   confirmed: 'LOADING_CONFIRMED',
   notDraft: 'LOADING_NOT_DRAFT',
+  notReversible: 'LOADING_NOT_REVERSIBLE',
   invalidTransition: 'INVALID_STATUS_TRANSITION',
   versionConflict: 'VERSION_CONFLICT',
   notRestricted: 'LOADING_NOT_RESTRICTED',
   noPendingApproval: 'NO_PENDING_APPROVAL',
+  warehouseRequired: 'WAREHOUSE_REQUIRED',
+  reversalReasonRequired: 'REVERSAL_REASON_REQUIRED',
 } as const;
 
 export interface LoadingAllocationInput {
@@ -64,6 +74,7 @@ export interface LoadingLineInput {
 
 export interface CreateLoadingInput {
   loadingDate: Date;
+  route?: LoadingRoute;
   warehouseId?: string | null;
   customerPartyId?: string | null;
   driverPartyId?: string | null;
@@ -82,27 +93,41 @@ interface AllocationLineRow {
   productVariantId: string;
   orderedQuantity: Prisma.Decimal;
   unitPrice: Prisma.Decimal;
+  uomId: string;
   documentId: string;
 }
+
+type MovementEndpoints = {
+  sourceLocationId: string;
+  destinationLocationId: string;
+  warehouseId: string | null;
+};
 
 /**
  * Loading (bill of lading) — the SINGLE operational event of Phase 6 (domain
  * boundaries §2): registered ONCE (header + lines + allocations) and shown on
- * both the sale and the purchase side. Lifecycle DRAFT → CONFIRMED (+DRAFT →
- * CANCELLED).
+ * both the sale and the purchase side. Lifecycle DRAFT → CONFIRMED →
+ * REVERSED (+DRAFT → CANCELLED); a REVERSED loading is immutable forever.
+ *
+ * The physical ROUTE is explicit (Integrity Gate #10 — never inferred):
+ *   - DIRECT_SUPPLIER_TO_CUSTOMER: SUPPLIER → CUSTOMER, no internal impact;
+ *   - WAREHOUSE_TO_CUSTOMER:       INTERNAL(warehouse) → CUSTOMER;
+ *   - SUPPLIER_TO_WAREHOUSE:       SUPPLIER → INTERNAL(warehouse).
+ * WAREHOUSE routes require an explicit warehouseId (WAREHOUSE_REQUIRED).
  *
  * confirm() is ONE serializable transaction that:
- *   (a) re-validates every allocation with FOR UPDATE row locks (same
- *       consistent-id-order locking pattern as the sales↔purchase allocations;
- *       loading allocations consume ordered quantity on BOTH line kinds);
- *   (b) generates one OUT StockMovement per loading line (idempotencyKey
- *       `loading:{loadingId}:line:{lineId}` — P2002 means "already moved",
- *       never a duplicate);
- *   (c) updates `operationalLoadedAmount` on every allocated sales/purchase
- *       document (Decimal math: Σ allocatedQuantity × line.unitPrice) and
- *       recomputes the document status → PARTIALLY_LOADED / COMPLETED (only
- *       from SALES_ORDER/ORDER_PLACED+ — a document still earlier in its own
- *       lifecycle keeps its status, amounts still move);
+ *   (a) re-validates every allocation with FOR UPDATE row locks —
+ *       allocatedQuantity is expressed in the LOADING LINE's uom and is
+ *       converted to the TARGET document line's uom before every comparison
+ *       (ALLOCATION_UOM_INCOMPATIBLE when no conversion exists);
+ *   (b) generates one StockMovement per loading line ALONG THE ROUTE
+ *       (idempotencyKey `loading:{loadingId}:line:{lineId}` — the unique key
+ *       is the only duplicate authority, ON CONFLICT DO NOTHING);
+ *   (c) recomputes `operationalLoadedAmount` on every touched sales/purchase
+ *       document from the TOTAL loaded quantities (converted to each
+ *       document line's uom) × line.unitPrice and recomputes the document
+ *       status → PARTIALLY_LOADED / COMPLETED (only from the document's
+ *       "active" statuses);
  *   (d) applies the DEBT GATE (REQUIREMENTS §20): a customer whose
  *       PartyOperationalBalance.balance > 0 gets a PENDING ApprovalRequest
  *       (RELEASE_DRIVER_INFO) and driverInfoRestricted = true — the debt
@@ -110,6 +135,14 @@ interface AllocationLineRow {
  *   (e) writes loading ↔ sales_document RELATED DocumentRelations and the
  *       audit + party timeline rows — all atomic (audit failure rolls the
  *       whole confirmation back, p6-13).
+ *
+ * reverse() (Integrity Gate #11) is ONE serializable transaction: the
+ * original flips to REVERSED + reason, one COMPENSATING movement per
+ * original movement (swapped endpoints, reversalOfMovementId linkage, key
+ * `loading-rev:{loadingId}:line:{lineId}`), the operational loaded amount is
+ * recomputed (rollback by construction), PENDING driver-info approvals are
+ * CANCELLED and the audit + timeline rows commit together. A reversed
+ * loading can never be confirmed, updated, cancelled or deleted again.
  *
  * Driver-info visibility (p6-08): responses strip driver/carrier details
  * while driverInfoRestricted = true UNLESS the caller holds
@@ -124,6 +157,7 @@ export class LoadingService {
     private readonly relations: DocumentRelationService,
     private readonly inventory: InventoryService,
     private readonly approvals: ApprovalRequestService,
+    private readonly normalization: NormalizationService,
   ) {}
 
   // ───────────────────────── create (DRAFT) ─────────────────────────
@@ -135,19 +169,21 @@ export class LoadingService {
     ctx: RequestContext,
   ) {
     const lines = this.normalizeLineInputs(input.lines);
+    this.assertRouteWarehouse(input.route, input.warehouseId ?? null);
 
     const loading = await this.prisma.$transaction(
       async (tx) => {
         await this.assertHeaderParties(tx, companyId, input);
         await this.assertWarehouse(tx, companyId, input.warehouseId ?? null);
-        await this.resolveLines(tx, companyId, lines);
-        await this.validateAllocations(tx, companyId, lines, {});
+        const effectiveUoms = await this.resolveEffectiveUoms(tx, companyId, lines);
+        await this.validateAllocations(tx, companyId, lines, effectiveUoms, {});
 
-        return tx.loading.create({
+        const created = await tx.loading.create({
           data: {
             companyId,
             loadingDate: input.loadingDate,
             status: LoadingStatus.DRAFT,
+            route: input.route ?? LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER,
             warehouseId: input.warehouseId ?? null,
             customerPartyId: input.customerPartyId ?? null,
             driverPartyId: input.driverPartyId ?? null,
@@ -173,20 +209,36 @@ export class LoadingService {
           },
           include: { lines: { include: { allocations: true } } },
         });
+
+        // Atomic audit + timeline (a failure rolls the WHOLE create back).
+        await this.auditService.recordTx(tx, {
+          entityType: 'loading',
+          entityId: created.id,
+          action: 'CREATE',
+          companyId,
+          actor,
+          newValues: { loadingDate: created.loadingDate, route: created.route, lineCount: lines.length },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+        const partyId = created.customerPartyId ?? created.driverPartyId ?? created.carrierPartyId;
+        if (partyId) {
+          await this.timeline.record(tx, {
+            companyId,
+            entityType: 'PARTY',
+            entityId: partyId,
+            type: 'LOADING_REGISTERED',
+            title: 'بارگیری ثبت شد',
+            description: 'بارگیری به صورت پیش‌نویس ثبت شد',
+            data: { loadingId: created.id },
+            actorUserId: actor.id,
+          });
+        }
+        return created;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    await this.auditService.record({
-      entityType: 'loading',
-      entityId: loading.id,
-      action: AuditAction.CREATE,
-      companyId,
-      actor,
-      newValues: { loadingDate: loading.loadingDate, lineCount: lines.length },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return loading;
   }
 
@@ -194,9 +246,10 @@ export class LoadingService {
 
   /**
    * Full-header update; lines (when provided) are REPLACED wholesale. DRAFT
-   * only — a confirmed loading is immutable. Optimistic concurrency without a
-   * version column (schema frozen): the caller may pass `expectedUpdatedAt`;
-   * a mismatch is a 409 VERSION_CONFLICT.
+   * only — a confirmed loading is immutable and a REVERSED one can never be
+   * touched again. Optimistic concurrency without a version column (schema
+   * frozen): the caller may pass `expectedUpdatedAt`; a mismatch is a 409
+   * VERSION_CONFLICT.
    */
   async update(
     companyId: string,
@@ -218,6 +271,10 @@ export class LoadingService {
     }
 
     const lines = input.lines ? this.normalizeLineInputs(input.lines) : null;
+    if (input.route !== undefined) {
+      const effectiveWarehouse = input.warehouseId === undefined ? existing.warehouseId : input.warehouseId;
+      this.assertRouteWarehouse(input.route, effectiveWarehouse);
+    }
 
     const updated = await this.prisma.$transaction(
       async (tx) => {
@@ -233,17 +290,18 @@ export class LoadingService {
         }
 
         if (lines) {
-          await this.resolveLines(tx, companyId, lines);
-          await this.validateAllocations(tx, companyId, lines, {
+          const effectiveUoms = await this.resolveEffectiveUoms(tx, companyId, lines);
+          await this.validateAllocations(tx, companyId, lines, effectiveUoms, {
             excludeLoadingId: existing.id,
           });
           await tx.loadingLine.deleteMany({ where: { loadingId: existing.id } });
         }
 
-        return tx.loading.update({
+        const row = await tx.loading.update({
           where: { id: existing.id },
           data: {
             loadingDate: input.loadingDate ? new Date(input.loadingDate) : undefined,
+            ...(input.route === undefined ? {} : { route: input.route }),
             ...(input.warehouseId === undefined ? {} : { warehouseId: input.warehouseId }),
             ...(input.customerPartyId === undefined ? {} : { customerPartyId: input.customerPartyId }),
             ...(input.driverPartyId === undefined ? {} : { driverPartyId: input.driverPartyId }),
@@ -254,9 +312,9 @@ export class LoadingService {
                   lines: {
                     create: lines.map((line) => ({
                       productVariantId: line.productVariantId,
-                      actualQuantity: line.actualQuantity,
-                      uomId: line.uomId,
-                      notes: line.notes,
+                      actualQuantity: roundQuantity(D(line.actualQuantity)),
+                      uomId: line.uomId ?? null,
+                      notes: line.notes ?? null,
                       allocations: {
                         create: (line.allocations ?? []).map((allocation) => ({
                           companyId,
@@ -272,27 +330,43 @@ export class LoadingService {
           },
           include: { lines: { include: { allocations: true } } },
         });
+
+        // Atomic audit + timeline (a failure rolls the WHOLE update back).
+        await this.auditService.recordTx(tx, {
+          entityType: 'loading',
+          entityId: row.id,
+          action: 'UPDATE',
+          companyId,
+          actor,
+          oldValues: { status: existing.status, notes: existing.notes, route: existing.route },
+          newValues: { lineCount: lines ? lines.length : undefined, notes: row.notes, route: row.route },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+        const partyId = row.customerPartyId ?? row.driverPartyId ?? row.carrierPartyId;
+        if (partyId) {
+          await this.timeline.record(tx, {
+            companyId,
+            entityType: 'PARTY',
+            entityId: partyId,
+            type: 'LOADING_UPDATED',
+            title: 'بارگیری ویرایش شد',
+            description: 'پیش‌نویس بارگیری ویرایش شد',
+            data: { loadingId: row.id },
+            actorUserId: actor.id,
+          });
+        }
+        return row;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    await this.auditService.record({
-      entityType: 'loading',
-      entityId: updated.id,
-      action: AuditAction.UPDATE,
-      companyId,
-      actor,
-      oldValues: { status: existing.status, notes: existing.notes },
-      newValues: { lineCount: lines ? lines.length : undefined, notes: updated.notes },
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    });
     return updated;
   }
 
   // ───────────────────────── delete / cancel ─────────────────────────
 
-  /** DRAFT → removed (lines + allocations cascade). CONFIRMED → 403. */
+  /** DRAFT → removed (lines + allocations cascade). CONFIRMED/REVERSED → 403. */
   async delete(
     companyId: string,
     id: string,
@@ -301,6 +375,9 @@ export class LoadingService {
   ): Promise<void> {
     const existing = await this.prisma.loading.findFirst({ where: { id, companyId } });
     if (!existing) throw new NotFoundError('Loading not found', { id });
+    if (existing.status === LoadingStatus.REVERSED) {
+      throw new ForbiddenError('LOADING_REVERSED', { id });
+    }
     if (existing.status === LoadingStatus.CONFIRMED) {
       throw new ForbiddenError(LOADING_MESSAGES.confirmed, { id });
     }
@@ -309,7 +386,7 @@ export class LoadingService {
       await this.auditService.recordTx(tx, {
         entityType: 'loading',
         entityId: existing.id,
-        action: AuditAction.DELETE,
+        action: 'DELETE',
         companyId,
         actor,
         oldValues: { status: existing.status, loadingDate: existing.loadingDate },
@@ -319,7 +396,10 @@ export class LoadingService {
     });
   }
 
-  /** DRAFT → CANCELLED (idempotent on an already-cancelled row). CONFIRMED → 403 LOADING_CONFIRMED. */
+  /**
+   * DRAFT → CANCELLED (idempotent on an already-cancelled row).
+   * CONFIRMED → 403 LOADING_CONFIRMED; REVERSED is immutable forever.
+   */
   async cancel(
     companyId: string,
     id: string,
@@ -328,6 +408,9 @@ export class LoadingService {
   ) {
     const existing = await this.prisma.loading.findFirst({ where: { id, companyId } });
     if (!existing) throw new NotFoundError('Loading not found', { id });
+    if (existing.status === LoadingStatus.REVERSED) {
+      throw new ForbiddenError('LOADING_REVERSED', { id });
+    }
     if (existing.status === LoadingStatus.CONFIRMED) {
       throw new ForbiddenError(LOADING_MESSAGES.confirmed, { id });
     }
@@ -350,6 +433,19 @@ export class LoadingService {
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });
+      const partyId = row.customerPartyId ?? row.driverPartyId ?? row.carrierPartyId;
+      if (partyId) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: partyId,
+          type: 'LOADING_CANCELLED',
+          title: 'بارگیری لغو شد',
+          description: 'پیش‌نویس بارگیری لغو شد',
+          data: { loadingId: row.id },
+          actorUserId: actor.id,
+        });
+      }
       return row;
     });
     return cancelled;
@@ -362,7 +458,7 @@ export class LoadingService {
    * see the class doc for the (a)…(e) breakdown. Idempotent double-confirm
    * protection: a locked status re-check throws 403 LOADING_CONFIRMED, and the
    * movement idempotency keys make even a forced re-run of the generation a
-   * no-op (P2002 swallowed).
+   * no-op. REVERSED loadings are immutable forever.
    */
   async confirm(
     companyId: string,
@@ -382,34 +478,43 @@ export class LoadingService {
         if (loading.status === LoadingStatus.CONFIRMED) {
           throw new ForbiddenError(LOADING_MESSAGES.confirmed, { id });
         }
-        if (loading.status === LoadingStatus.CANCELLED) {
+        if (loading.status !== LoadingStatus.DRAFT) {
           throw new ValidationError(LOADING_MESSAGES.invalidTransition, {
             from: loading.status,
             to: 'CONFIRMED',
           });
         }
 
-        // (a) re-validate allocations under FOR UPDATE locks (proposed = the
-        // stored allocations; existing sums exclude this loading → net effect
-        // equals "sum of all non-cancelled loading allocations ≤ ordered").
-        await this.resolveLines(tx, companyId, loading.lines);
-        const { salesLines, purchaseLines } = await this.validateAllocations(
+        // (a) effective per-line uoms + allocation re-validation under FOR
+        // UPDATE locks (converted quantities returned for the amount math).
+        const effectiveUoms = await this.resolveEffectiveUoms(tx, companyId, loading.lines);
+        const { salesLines, purchaseLines, converted } = await this.validateAllocations(
           tx,
           companyId,
           loading.lines,
+          effectiveUoms,
           { excludeLoadingId: loading.id },
         );
 
-        // Warehouse: explicit (already validated) or the company default.
-        const warehouse = loading.warehouseId
-          ? { id: loading.warehouseId }
-          : await this.inventory.ensureDefaultWarehouse(tx, companyId);
+        // (b) movements ALONG THE ROUTE (Integrity Gate #10).
+        const { perLine, warehouseId } = await this.resolveRouteEndpoints(
+          tx,
+          companyId,
+          loading,
+          loading.lines,
+          effectiveUoms,
+          salesLines,
+          purchaseLines,
+        );
+        await this.generateMovements(tx, loading, loading.lines, perLine, effectiveUoms, actor.id);
 
-        // (b) OUT movements — one per line, idempotent on the unique key.
-        await this.generateOutMovements(tx, loading, loading.lines, warehouse.id, actor.id);
-
-        // (c) operational loaded amounts + document status recompute.
-        await this.applyOperationalAmounts(tx, companyId, salesLines, purchaseLines, loading.lines);
+        // (c) operational loaded amounts + document status recompute (full
+        // recompute from the allocations — confirm and reverse share it).
+        const docIds = {
+          sales: new Set([...salesLines.values()].map((l) => l.documentId)),
+          purchase: new Set([...purchaseLines.values()].map((l) => l.documentId)),
+        };
+        await this.recomputeOperationalState(tx, companyId, docIds);
 
         // (d) debt gate (REQUIREMENTS §20).
         const driverInfoRestricted = await this.applyDebtGate(tx, companyId, loading, actor);
@@ -420,8 +525,7 @@ export class LoadingService {
         });
 
         // (e) loading ↔ sales_document RELATED relations (both directions).
-        const salesDocIds = [...new Set([...salesLines.values()].map((l) => l.documentId))];
-        for (const docId of salesDocIds) {
+        for (const docId of docIds.sales) {
           await this.relations.createRelation(
             companyId,
             { fromType: 'loading', fromId: loading.id, toType: 'sales_document', toId: docId, relationType: 'RELATED' },
@@ -447,8 +551,9 @@ export class LoadingService {
           oldValues: { status: loading.status },
           newValues: {
             status: LoadingStatus.CONFIRMED,
+            route: loading.route,
             driverInfoRestricted,
-            warehouseId: warehouse.id,
+            warehouseId,
             movementCount: loading.lines.length,
           },
           ip: ctx.ip,
@@ -463,8 +568,8 @@ export class LoadingService {
             entityId: partyId,
             type: 'LOADING_CONFIRMED',
             title: 'بارگیری تایید شد',
-            description: 'بارگیری تایید و خروج از انبار ثبت شد',
-            data: { loadingId: loading.id },
+            description: 'بارگیری تایید و حرکت کالا ثبت شد',
+            data: { loadingId: loading.id, route: loading.route },
             actorUserId: actor.id,
           });
         }
@@ -478,55 +583,133 @@ export class LoadingService {
     );
   }
 
+  // ───────────────────────── reverse (Integrity Gate #11) ─────────────────────────
+
   /**
-   * Movement generation seam (also exercised directly by p6-02): OUT rows per
-   * line with `loading:{loadingId}:line:{lineId}` idempotency keys — the
-   * unique key is the only duplicate authority (inserted via ON CONFLICT DO
-   * NOTHING, see insertStockMovementIfAbsent: a mid-transaction P2002 would
-   * poison the transaction), so a re-run can never double-count stock
-   * (domain boundaries §4). The effective uom is the line's own, else the
-   * variant (else template) default.
+   * CONFIRMED → REVERSED with a REQUIRED reason. One atomic transaction —
+   * see the class doc. The compensating movements swap the original
+   * endpoints and reference the original via reversalOfMovementId; the
+   * idempotency key `loading-rev:{loadingId}:line:{lineId}` makes a re-run a
+   * no-op (a reversed loading is rejected before anything is written, so
+   * this only protects against pathological races).
    */
-  async generateOutMovements(
-    tx: Client,
-    loading: { id: string; companyId: string; loadingDate: Date },
-    lines: { id: string; productVariantId: string; actualQuantity: Prisma.Decimal; uomId: string | null }[],
-    warehouseId: string,
-    actorId: string,
-  ): Promise<number> {
-    const withUom = new Map<string, string>();
-    const missing = lines.filter((l) => !l.uomId).map((l) => l.productVariantId);
-    if (missing.length > 0) {
-      const variants = await tx.productVariant.findMany({
-        where: { id: { in: [...new Set(missing)] } },
-        select: { id: true, defaultUomId: true, template: { select: { defaultSalesUomId: true } } },
-      });
-      for (const variant of variants) {
-        const fallback = variant.defaultUomId ?? variant.template.defaultSalesUomId;
-        if (fallback) withUom.set(variant.id, fallback);
-      }
+  async reverse(
+    companyId: string,
+    id: string,
+    dto: { reason: string },
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ) {
+    const reason = dto.reason?.trim();
+    if (!reason) {
+      throw new ValidationError(LOADING_MESSAGES.reversalReasonRequired, { id });
     }
 
-    let created = 0;
-    for (const line of lines) {
-      const uomId = line.uomId ?? withUom.get(line.productVariantId);
-      if (!uomId) throw new ValidationError(LOADING_MESSAGES.uomRequired, { productVariantId: line.productVariantId });
-      const inserted = await insertStockMovementIfAbsent(tx, {
-        companyId: loading.companyId,
-        warehouseId,
-        productVariantId: line.productVariantId,
-        direction: 'OUT',
-        quantity: line.actualQuantity,
-        uomId,
-        movementDate: loading.loadingDate,
-        sourceEntityType: 'LOADING',
-        sourceEntityId: loading.id,
-        idempotencyKey: `loading:${loading.id}:line:${line.id}`,
-        createdBy: actorId,
-      });
-      if (inserted) created += 1; // already moved — never duplicate
-    }
-    return created;
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM loadings WHERE id = ${id}::uuid FOR UPDATE`;
+        const loading = await tx.loading.findFirst({
+          where: { id, companyId },
+          include: { lines: { include: { allocations: true } } },
+        });
+        if (!loading) throw new NotFoundError('Loading not found', { id });
+        if (loading.status !== LoadingStatus.CONFIRMED) {
+          throw new ConflictError(LOADING_MESSAGES.notReversible, { status: loading.status });
+        }
+
+        // Compensating movements: one per original, endpoints swapped,
+        // normalized values reused verbatim (the compensation un-does the
+        // exact normalized quantity that was applied).
+        const originals = await tx.stockMovement.findMany({
+          where: {
+            sourceEntityType: 'LOADING',
+            sourceEntityId: loading.id,
+            reversalOfMovementId: null,
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+        let created = 0;
+        for (const original of originals) {
+          const lineId = original.idempotencyKey.split(':line:')[1] ?? original.id;
+          const inserted = await NormalizationService.insertNormalizedMovement(tx, {
+            companyId: loading.companyId,
+            productVariantId: original.productVariantId,
+            sourceQuantity: original.sourceQuantity,
+            sourceUomId: original.sourceUomId,
+            normalizedQuantity: original.normalizedQuantity,
+            inventoryUomId: original.inventoryUomId,
+            direction: original.direction === 'IN' ? 'OUT' : 'IN',
+            sourceLocationId: original.destinationLocationId,
+            destinationLocationId: original.sourceLocationId,
+            warehouseId: original.warehouseId,
+            movementDate: new Date(),
+            sourceEntityType: 'LOADING_REVERSAL',
+            sourceEntityId: loading.id,
+            idempotencyKey: `loading-rev:${loading.id}:line:${lineId}`,
+            reversalOfMovementId: original.id,
+            createdBy: actor.id,
+          });
+          if (inserted) created += 1;
+        }
+
+        // Operational rollback: full recompute over the remaining active
+        // loadings (this one drops out of the filter below once REVERSED).
+        const docIds = await this.loadingDocumentIds(tx, companyId, loading.lines);
+        await tx.loading.update({
+          where: { id: loading.id },
+          data: { status: LoadingStatus.REVERSED, reversalReason: reason },
+        });
+        await this.recomputeOperationalState(tx, companyId, docIds, 'reverse');
+
+        // The debt-gate release request (if any) dies with the loading.
+        await tx.approvalRequest.updateMany({
+          where: {
+            companyId,
+            entityType: 'loading',
+            entityId: loading.id,
+            approvalType: 'RELEASE_DRIVER_INFO',
+            status: 'PENDING',
+          },
+          data: { status: 'CANCELLED' },
+        });
+
+        await this.auditService.recordTx(tx, {
+          entityType: 'loading',
+          entityId: loading.id,
+          action: 'LOADING_REVERSED',
+          companyId,
+          actor,
+          oldValues: { status: LoadingStatus.CONFIRMED },
+          newValues: { status: LoadingStatus.REVERSED, reversalReason: reason, compensatingMovements: created },
+          reason,
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+
+        const partyId = loading.customerPartyId ?? loading.driverPartyId ?? loading.carrierPartyId;
+        if (partyId) {
+          await this.timeline.record(tx, {
+            companyId,
+            entityType: 'PARTY',
+            entityId: partyId,
+            type: 'LOADING_REVERSED',
+            title: 'بارگیری برعکس شد',
+            description: 'بارگیری با حرکات جبرانی لغو و موجودی اصلاح شد',
+            data: { loadingId: loading.id, compensatingMovements: created },
+            actorUserId: actor.id,
+          });
+        }
+
+        return tx.loading.findUniqueOrThrow({
+          where: { id: loading.id },
+          include: {
+            lines: { include: { allocations: true } },
+            reversals: { select: { id: true, status: true } },
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
   }
 
   // ───────────────────────── driver-info release (debt gate) ─────────────────────────
@@ -564,8 +747,8 @@ export class LoadingService {
   // ───────────────────────── reads ─────────────────────────
 
   /**
-   * Full view (lines + allocations) — shared by the sale & purchase sides.
-   * While `driverInfoRestricted` is set, driver/carrier details are stripped
+   * Full view (lines + allocations + reversal linkage). While
+   * `driverInfoRestricted` is set, driver/carrier details are stripped
    * unless the viewer may see them (`restricted: true` marks a stripped
    * payload).
    */
@@ -592,18 +775,27 @@ export class LoadingService {
           },
         },
         warehouse: { select: { id: true, code: true, nameFa: true } },
-        approvals: {
-          where: { status: 'PENDING' },
-          select: { id: true, approvalType: true, status: true, createdAt: true },
+        // Reversal linkage (Integrity Gate #11).
+        reversalOf: { select: { id: true, status: true, reversalReason: true } },
+        reversals: { select: { id: true, status: true, reversalReason: true } },
+        movements: {
+          select: { id: true, idempotencyKey: true, reversalOfMovementId: true },
         },
       },
     });
     if (!loading || loading.companyId !== companyId) {
       throw new NotFoundError('Loading not found', { id });
     }
+    // The generic approval reference has NO physical FK (Integrity Gate #13)
+    // — pending release requests are queried on (entityType, entityId).
+    const approvals = await this.prisma.approvalRequest.findMany({
+      where: { companyId, entityType: 'loading', entityId: id, status: 'PENDING' },
+      select: { id: true, approvalType: true, status: true, createdAt: true },
+    });
     const restricted = loading.driverInfoRestricted && !viewer.canViewDriverInfo;
     return {
       ...loading,
+      approvals,
       driver: restricted ? null : loading.driver,
       carrier: restricted ? null : loading.carrier,
       restricted,
@@ -653,6 +845,7 @@ export class LoadingService {
         id: loading.id,
         loadingDate: loading.loadingDate,
         status: loading.status,
+        route: loading.route,
         driverInfoRestricted: loading.driverInfoRestricted,
         warehouse: loading.warehouse,
         customer: loading.customer,
@@ -665,6 +858,179 @@ export class LoadingService {
       page: query.page,
       pageSize: query.pageSize,
     };
+  }
+
+  // ───────────────────────── movement generation seam ─────────────────────────
+
+  /**
+   * Movement generation seam (also exercised directly by p6-02): one
+   * StockMovement per line along the pre-resolved ROUTE endpoints, with the
+   * `loading:{loadingId}:line:{lineId}` idempotency keys — the unique key is
+   * the only duplicate authority (ON CONFLICT DO NOTHING), so a re-run can
+   * never double-count stock (domain boundaries §4). The effective uom is
+   * the line's own, else the variant (else template) default; the
+   * normalizedQuantity/inventoryUom pair is computed by the normalization
+   * service (Integrity Gate #1).
+   */
+  async generateMovements(
+    tx: Client,
+    loading: { id: string; companyId: string; loadingDate: Date; route: LoadingRoute },
+    lines: { productVariantId: string; actualQuantity: Prisma.Decimal | number | string }[],
+    endpoints: Map<object, MovementEndpoints>,
+    effectiveUoms: Map<object, string>,
+    actorId: string,
+  ): Promise<number> {
+    const direction = loading.route === LoadingRoute.SUPPLIER_TO_WAREHOUSE ? 'IN' : 'OUT';
+    let created = 0;
+    for (const line of lines) {
+      const endpoint = endpoints.get(line);
+      if (!endpoint) {
+        throw new ValidationError('LOADING_ROUTE_ENDPOINTS_MISSING', { loadingId: loading.id });
+      }
+      const uomId = effectiveUoms.get(line);
+      if (!uomId) throw new ValidationError(LOADING_MESSAGES.uomRequired, { loadingId: loading.id });
+      const inserted = await this.normalization.insertStockMovement(tx, {
+        companyId: loading.companyId,
+        productVariantId: line.productVariantId,
+        quantity: line.actualQuantity,
+        uomId,
+        direction,
+        sourceLocationId: endpoint.sourceLocationId,
+        destinationLocationId: endpoint.destinationLocationId,
+        warehouseId: endpoint.warehouseId,
+        movementDate: loading.loadingDate,
+        sourceEntityType: 'LOADING',
+        sourceEntityId: loading.id,
+        idempotencyKey: `loading:${loading.id}:line:${(line as { id?: string }).id ?? ''}`,
+        createdBy: actorId,
+      });
+      if (inserted) created += 1; // already moved — never duplicate
+    }
+    return created;
+  }
+
+  // ───────────────────────── route endpoint resolution ─────────────────────────
+
+  /**
+   * Resolve the physical endpoints per line from the ROUTE (Integrity Gate
+   * #10) — never from the presence of a warehouse:
+   *   DIRECT_SUPPLIER_TO_CUSTOMER: SUPPLIER(purchase supplier or default) →
+   *     CUSTOMER(loading.customerPartyId or sale customer); warehouse null;
+   *   WAREHOUSE_TO_CUSTOMER: INTERNAL(warehouse) → CUSTOMER(same rule);
+   *   SUPPLIER_TO_WAREHOUSE: SUPPLIER(same rule) → INTERNAL(warehouse).
+   * External endpoints are find-or-created per party (resolveLocation).
+   */
+  private async resolveRouteEndpoints(
+    tx: Client,
+    companyId: string,
+    loading: { id: string; route: LoadingRoute; warehouseId: string | null; customerPartyId: string | null },
+    lines: { allocations?: { salesLineId: string | null; purchaseLineId: string | null }[] }[],
+    effectiveUoms: Map<object, string>,
+    salesLines: Map<string, AllocationLineRow>,
+    purchaseLines: Map<string, AllocationLineRow>,
+  ): Promise<{ perLine: Map<object, MovementEndpoints>; warehouseId: string | null }> {
+    // Purchase-supplier + sales-customer resolution (loading-level fallbacks).
+    const purchaseDocIds = new Set<string>();
+    const salesDocIds = new Set<string>();
+    for (const line of lines) {
+      for (const allocation of line.allocations ?? []) {
+        if (allocation.purchaseLineId) {
+          const row = purchaseLines.get(allocation.purchaseLineId);
+          if (row) purchaseDocIds.add(row.documentId);
+        }
+        if (allocation.salesLineId) {
+          const row = salesLines.get(allocation.salesLineId);
+          if (row) salesDocIds.add(row.documentId);
+        }
+      }
+    }
+    const purchaseSuppliers = new Map<string, string>();
+    if (purchaseDocIds.size > 0) {
+      const docs = await tx.purchaseDocument.findMany({
+        where: { id: { in: [...purchaseDocIds] }, companyId },
+        select: { id: true, supplierPartyId: true },
+      });
+      for (const doc of docs) purchaseSuppliers.set(doc.id, doc.supplierPartyId);
+    }
+    const salesCustomers = new Map<string, string>();
+    if (salesDocIds.size > 0) {
+      const docs = await tx.salesDocument.findMany({
+        where: { id: { in: [...salesDocIds] }, companyId },
+        select: { id: true, customerPartyId: true },
+      });
+      for (const doc of docs) salesCustomers.set(doc.id, doc.customerPartyId);
+    }
+    const fallbackSupplier = [...new Set(purchaseSuppliers.values())][0] ?? null;
+    const fallbackCustomer = loading.customerPartyId ?? ([...new Set(salesCustomers.values())][0] ?? null);
+
+    // Warehouse routes need the INTERNAL location (explicit or default).
+    let internalWarehouseId: string | null = null;
+    let internalLocationId: string | null = null;
+    if (loading.route !== LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER) {
+      const warehouse = loading.warehouseId
+        ? await tx.warehouse.findFirst({
+            where: { id: loading.warehouseId, companyId },
+            select: { id: true },
+          })
+        : await this.inventory.ensureDefaultWarehouse(tx, companyId);
+      if (!warehouse) throw new NotFoundError('Warehouse not found', { warehouseId: loading.warehouseId });
+      internalWarehouseId = warehouse.id;
+      const internal = await this.inventory.resolveLocation(tx, companyId, {
+        type: 'INTERNAL',
+        warehouseId: warehouse.id,
+      });
+      internalLocationId = internal.id;
+    }
+
+    const perLine = new Map<object, MovementEndpoints>();
+    for (const line of lines) {
+      if (!effectiveUoms.has(line)) {
+        throw new ValidationError(LOADING_MESSAGES.uomRequired, { loadingId: loading.id });
+      }
+      const supplierPartyId =
+        line.allocations?.map((a) => (a.purchaseLineId ? purchaseSuppliers.get(purchaseLines.get(a.purchaseLineId)?.documentId ?? '') : undefined)).find((id): id is string => !!id) ??
+        fallbackSupplier;
+      const customerPartyId =
+        loading.customerPartyId ??
+        line.allocations?.map((a) => (a.salesLineId ? salesCustomers.get(salesLines.get(a.salesLineId)?.documentId ?? '') : undefined)).find((id): id is string => !!id) ??
+        fallbackCustomer;
+
+      const supplierLocation = await this.inventory.resolveLocation(tx, companyId, {
+        type: 'SUPPLIER',
+        partyId: supplierPartyId,
+      });
+      const customerLocation = await this.inventory.resolveLocation(tx, companyId, {
+        type: 'CUSTOMER',
+        partyId: customerPartyId,
+      });
+
+      let endpoints: MovementEndpoints;
+      switch (loading.route) {
+        case LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER:
+          endpoints = {
+            sourceLocationId: supplierLocation.id,
+            destinationLocationId: customerLocation.id,
+            warehouseId: null,
+          };
+          break;
+        case LoadingRoute.WAREHOUSE_TO_CUSTOMER:
+          endpoints = {
+            sourceLocationId: internalLocationId as string,
+            destinationLocationId: customerLocation.id,
+            warehouseId: internalWarehouseId,
+          };
+          break;
+        case LoadingRoute.SUPPLIER_TO_WAREHOUSE:
+          endpoints = {
+            sourceLocationId: supplierLocation.id,
+            destinationLocationId: internalLocationId as string,
+            warehouseId: internalWarehouseId,
+          };
+          break;
+      }
+      perLine.set(line, endpoints);
+    }
+    return { perLine, warehouseId: internalWarehouseId };
   }
 
   // ───────────────────────── validation internals ─────────────────────────
@@ -690,6 +1056,16 @@ export class LoadingService {
       }
     }
     return lines;
+  }
+
+  /** WAREHOUSE routes demand an explicit warehouse (Integrity Gate #10). */
+  private assertRouteWarehouse(route: LoadingRoute | undefined, warehouseId: string | null): void {
+    if (
+      (route === LoadingRoute.WAREHOUSE_TO_CUSTOMER || route === LoadingRoute.SUPPLIER_TO_WAREHOUSE) &&
+      !warehouseId
+    ) {
+      throw new ValidationError(LOADING_MESSAGES.warehouseRequired, { route });
+    }
   }
 
   /** Driver/carrier/customer must hold the role IN THIS company. */
@@ -723,15 +1099,17 @@ export class LoadingService {
   }
 
   /**
-   * Resolve variants (same company) + uoms for every line — validation only.
-   * The effective uom is the line's own, else the variant default, else the
-   * template's default sales uom — none resolvable is a 422 UOM_REQUIRED.
+   * Resolve variants (same company) + uoms for every line and compute each
+   * line's EFFECTIVE uom (the line's own, else the variant default, else the
+   * template's default sales uom — none resolvable is a 422 UOM_REQUIRED).
+   * Returns the effective uom per line OBJECT (works for both API inputs and
+   * DB-loaded rows).
    */
-  private async resolveLines(
+  private async resolveEffectiveUoms(
     tx: Client,
     companyId: string,
-    lines: LoadingLineInput[],
-  ): Promise<void> {
+    lines: { productVariantId: string; uomId?: string | null }[],
+  ): Promise<Map<object, string>> {
     const variantIds = [...new Set(lines.map((l) => l.productVariantId))];
     const variants = await tx.productVariant.findMany({
       where: { id: { in: variantIds }, companyId },
@@ -756,6 +1134,7 @@ export class LoadingService {
     });
     const uomSet = new Set(uoms.map((u) => u.id));
 
+    const map = new Map<object, string>();
     for (const line of lines) {
       const variant = variantMap.get(line.productVariantId);
       if (!variant) {
@@ -770,28 +1149,34 @@ export class LoadingService {
       if (line.uomId && !uomSet.has(line.uomId)) {
         throw new ValidationError(LOADING_MESSAGES.uomNotInCompany, { uomId: line.uomId });
       }
+      map.set(line, effective);
     }
+    return map;
   }
 
   /**
    * The over-allocation guard — the sales↔purchase allocation locking pattern
    * (SERIALIZABLE caller + FOR UPDATE row locks in consistent id order).
    * Loading allocations consume ordered quantity on BOTH sales and purchase
-   * lines: Σ(loading allocations of every non-cancelled loading) + proposed
-   * ≤ orderedQuantity, per line. Variant mismatch and foreign-company lines
-   * are rejected here too.
+   * lines: Σ(loading allocations of every non-cancelled AND non-reversed
+   * loading) + proposed ≤ orderedQuantity, per line — everything converted
+   * into the TARGET document line's uom first (the allocation quantity is
+   * expressed in the loading line's uom; Integrity Gate #3). Variant
+   * mismatch, foreign-company lines and impossible conversions are rejected.
    *
-   * Returns the locked target lines (used by confirm for the operational
-   * amount math) so confirm never needs a second unlocked read.
+   * Returns the locked target lines AND the converted quantity per
+   * allocation OBJECT (used by the operational amount recompute).
    */
   private async validateAllocations(
     tx: Client,
     companyId: string,
-    lines: LoadingLineInput[],
+    lines: { productVariantId: string; allocations?: LoadingAllocationInput[] }[],
+    effectiveUoms: Map<object, string>,
     options: { excludeLoadingId?: string },
   ): Promise<{
     salesLines: Map<string, AllocationLineRow>;
     purchaseLines: Map<string, AllocationLineRow>;
+    converted: Map<object, Prisma.Decimal>;
   }> {
     const salesLineIds = new Set<string>();
     const purchaseLineIds = new Set<string>();
@@ -822,6 +1207,7 @@ export class LoadingService {
           productVariantId: true,
           orderedQuantity: true,
           unitPrice: true,
+          uomId: true,
           salesDocumentId: true,
         },
       });
@@ -831,6 +1217,7 @@ export class LoadingService {
           productVariantId: row.productVariantId,
           orderedQuantity: row.orderedQuantity,
           unitPrice: row.unitPrice,
+          uomId: row.uomId,
           documentId: row.salesDocumentId,
         });
       }
@@ -843,6 +1230,7 @@ export class LoadingService {
           productVariantId: true,
           orderedQuantity: true,
           unitPrice: true,
+          uomId: true,
           purchaseDocumentId: true,
         },
       });
@@ -852,6 +1240,7 @@ export class LoadingService {
           productVariantId: row.productVariantId,
           orderedQuantity: row.orderedQuantity,
           unitPrice: row.unitPrice,
+          uomId: row.uomId,
           documentId: row.purchaseDocumentId,
         });
       }
@@ -877,49 +1266,122 @@ export class LoadingService {
       }
     }
 
-    // Consumed = loading allocations of every non-cancelled loading (DRAFT
-    // reservations count — fail fast; confirm re-validates under lock).
+    // Consumed = loading allocations of every non-cancelled AND non-reversed
+    // loading (DRAFT reservations count — fail fast; confirm re-validates
+    // under lock), each converted into the TARGET line's uom (mixed source
+    // uoms must never be raw-summed — Integrity Gate #1).
     const loadingFilter = {
-      status: { not: LoadingStatus.CANCELLED },
+      status: { notIn: [LoadingStatus.CANCELLED, LoadingStatus.REVERSED] },
       ...(options.excludeLoadingId ? { id: { not: options.excludeLoadingId } } : {}),
     };
     const consumed = new Map<string, Prisma.Decimal>();
-    const accumulate = (lineId: string, quantity: Prisma.Decimal | null | undefined) => {
-      consumed.set(lineId, D(consumed.get(lineId)).plus(D(quantity ?? 0)));
+    const accumulate = (lineId: string, quantity: Prisma.Decimal) => {
+      consumed.set(lineId, D(consumed.get(lineId)).plus(quantity));
     };
-    if (salesLineIds.size > 0) {
-      const sums = await tx.loadingAllocation.groupBy({
-        by: ['salesLineId'],
-        where: {
-          companyId,
-          salesLineId: { in: [...salesLineIds] },
-          loadingLine: { loading: loadingFilter },
-        },
-        _sum: { allocatedQuantity: true },
-      });
-      for (const sum of sums) if (sum.salesLineId) accumulate(sum.salesLineId, sum._sum.allocatedQuantity);
+
+    // Variant defaults for stored loading lines without an explicit uom.
+    const storedVariantIds = new Set<string>();
+    interface StoredAllocationRow {
+      salesLineId: string | null;
+      purchaseLineId: string | null;
+      allocatedQuantity: Prisma.Decimal;
+      loadingLine: { productVariantId: string; uomId: string | null };
     }
-    if (purchaseLineIds.size > 0) {
-      const sums = await tx.loadingAllocation.groupBy({
-        by: ['purchaseLineId'],
-        where: {
-          companyId,
-          purchaseLineId: { in: [...purchaseLineIds] },
-          loadingLine: { loading: loadingFilter },
-        },
-        _sum: { allocatedQuantity: true },
-      });
-      for (const sum of sums) if (sum.purchaseLineId) accumulate(sum.purchaseLineId, sum._sum.allocatedQuantity);
+    const fetchStored = async (
+      field: 'salesLineId' | 'purchaseLineId',
+      ids: string[],
+    ): Promise<StoredAllocationRow[]> =>
+      ids.length === 0
+        ? []
+        : ((await tx.loadingAllocation.findMany({
+            where: {
+              companyId,
+              [field]: { in: ids },
+              loadingLine: { loading: loadingFilter },
+            },
+            select: {
+              salesLineId: true,
+              purchaseLineId: true,
+              allocatedQuantity: true,
+              loadingLine: { select: { productVariantId: true, uomId: true } },
+            },
+          })) as StoredAllocationRow[]);
+    const [storedSales, storedPurchase] = await Promise.all([
+      fetchStored('salesLineId', [...salesLineIds]),
+      fetchStored('purchaseLineId', [...purchaseLineIds]),
+    ]);
+    for (const row of [...storedSales, ...storedPurchase]) {
+      storedVariantIds.add(row.loadingLine.productVariantId);
+    }
+    const storedVariants =
+      storedVariantIds.size > 0
+        ? await tx.productVariant.findMany({
+            where: { id: { in: [...storedVariantIds] }, companyId },
+            select: { id: true, defaultUomId: true, template: { select: { defaultSalesUomId: true } } },
+          })
+        : [];
+    const storedVariantMap = new Map(storedVariants.map((v) => [v.id, v]));
+
+    const convertedConsumed = async (
+      row: {
+        allocatedQuantity: Prisma.Decimal;
+        loadingLine: { productVariantId: string; uomId: string | null };
+      },
+      targetUomId: string,
+    ): Promise<Prisma.Decimal> => {
+      const variant = storedVariantMap.get(row.loadingLine.productVariantId);
+      const sourceUom =
+        row.loadingLine.uomId ?? variant?.defaultUomId ?? variant?.template.defaultSalesUomId;
+      if (!sourceUom) throw new ValidationError(LOADING_MESSAGES.uomRequired);
+      return this.normalization.convertBetween(
+        companyId,
+        row.loadingLine.productVariantId,
+        row.allocatedQuantity,
+        sourceUom,
+        targetUomId,
+      );
+    };
+
+    for (const row of storedSales) {
+      const target = row.salesLineId ? salesLines.get(row.salesLineId) : undefined;
+      if (target) accumulate(target.id, await convertedConsumed(row, target.uomId));
+    }
+    for (const row of storedPurchase) {
+      const target = row.purchaseLineId ? purchaseLines.get(row.purchaseLineId) : undefined;
+      if (target) accumulate(target.id, await convertedConsumed(row, target.uomId));
     }
 
+    // Proposed allocations, converted to the target uom before comparison.
+    const converted = new Map<object, Prisma.Decimal>();
     for (const line of lines) {
+      const lineUom = effectiveUoms.get(line);
+      if (!lineUom) throw new ValidationError(LOADING_MESSAGES.uomRequired);
       for (const allocation of line.allocations ?? []) {
         const lineId = (allocation.salesLineId ?? allocation.purchaseLineId) as string;
         const target = salesLines.get(lineId) ?? purchaseLines.get(lineId);
         if (!target) {
           throw new NotFoundError('Allocation target line not found', { lineId });
         }
-        const proposed = D(consumed.get(lineId)).plus(roundQuantity(D(allocation.allocatedQuantity)));
+        let allocatedInTargetUom: Prisma.Decimal;
+        try {
+          allocatedInTargetUom = await this.normalization.convertBetween(
+            companyId,
+            line.productVariantId,
+            allocation.allocatedQuantity,
+            lineUom,
+            target.uomId,
+          );
+        } catch (error) {
+          if (error instanceof ValidationError && error.message === 'UOM_CONVERSION_IMPOSSIBLE') {
+            throw new ValidationError(LOADING_MESSAGES.allocationUomIncompatible, {
+              lineId,
+              loadingUomId: lineUom,
+              targetUomId: target.uomId,
+            });
+          }
+          throw error;
+        }
+        const proposed = D(consumed.get(lineId)).plus(allocatedInTargetUom);
         if (proposed.gt(target.orderedQuantity)) {
           throw new ConflictError(LOADING_MESSAGES.exceedsQuantity, {
             lineId,
@@ -928,143 +1390,255 @@ export class LoadingService {
           });
         }
         consumed.set(lineId, proposed);
+        converted.set(allocation, allocatedInTargetUom);
       }
     }
 
-    return { salesLines, purchaseLines };
+    return { salesLines, purchaseLines, converted };
+  }
+
+  // ───────────────────────── operational amounts (full recompute) ─────────────────────────
+
+  /** All document ids touched by a loading's allocations (sales + purchase). */
+  private async loadingDocumentIds(
+    tx: Client,
+    companyId: string,
+    lines: { allocations?: { salesLineId: string | null; purchaseLineId: string | null }[] }[],
+  ): Promise<{ sales: Set<string>; purchase: Set<string> }> {
+    const salesIds = new Set<string>();
+    const purchaseIds = new Set<string>();
+    const salesLineIds: string[] = [];
+    const purchaseLineIds: string[] = [];
+    for (const line of lines) {
+      for (const allocation of line.allocations ?? []) {
+        if (allocation.salesLineId) salesLineIds.push(allocation.salesLineId);
+        if (allocation.purchaseLineId) purchaseLineIds.push(allocation.purchaseLineId);
+      }
+    }
+    if (salesLineIds.length > 0) {
+      const rows = await tx.salesLine.findMany({
+        where: { id: { in: salesLineIds }, companyId },
+        select: { salesDocumentId: true },
+      });
+      rows.forEach((r) => salesIds.add(r.salesDocumentId));
+    }
+    if (purchaseLineIds.length > 0) {
+      const rows = await tx.purchaseLine.findMany({
+        where: { id: { in: purchaseLineIds }, companyId },
+        select: { purchaseDocumentId: true },
+      });
+      rows.forEach((r) => purchaseIds.add(r.purchaseDocumentId));
+    }
+    return { sales: salesIds, purchase: purchaseIds };
   }
 
   /**
-   * (c) operational loaded amounts + status recompute. Amount delta per
-   * document = Σ(allocatedQuantity × line.unitPrice) of THIS loading's
-   * allocations (exact Decimal); status recomputes from the TOTAL loaded
-   * quantity across ALL non-cancelled loading allocations per line.
+   * (c) operational loaded amounts + status recompute — FULL recompute from
+   * the allocations of every non-cancelled AND non-reversed loading: each
+   * allocation is converted from its loading line's uom into the DOCUMENT
+   * line's uom (Integrity Gate #3), the amount = Σ converted × line.unitPrice
+   * (exact Decimal). Shared by confirm (upgrade-only status) and reverse
+   * (status may fall back to the base active status).
    */
-  private async applyOperationalAmounts(
+  private async recomputeOperationalState(
     tx: Client,
     companyId: string,
-    salesLines: Map<string, AllocationLineRow>,
-    purchaseLines: Map<string, AllocationLineRow>,
-    loadingLines: { allocations: { salesLineId: string | null; purchaseLineId: string | null; allocatedQuantity: Prisma.Decimal }[] }[],
+    docIds: { sales: Set<string>; purchase: Set<string> },
+    mode: 'confirm' | 'reverse' = 'confirm',
   ): Promise<void> {
-    // This loading's contribution per document (exact Decimal math).
-    const salesDelta = new Map<string, Prisma.Decimal>();
-    const purchaseDelta = new Map<string, Prisma.Decimal>();
-    for (const line of loadingLines) {
-      for (const allocation of line.allocations) {
-        if (allocation.salesLineId) {
-          const target = salesLines.get(allocation.salesLineId);
-          if (target) {
-            salesDelta.set(
-              target.documentId,
-              D(salesDelta.get(target.documentId)).plus(D(allocation.allocatedQuantity).times(target.unitPrice)),
-            );
-          }
-        } else if (allocation.purchaseLineId) {
-          const target = purchaseLines.get(allocation.purchaseLineId);
-          if (target) {
-            purchaseDelta.set(
-              target.documentId,
-              D(purchaseDelta.get(target.documentId)).plus(D(allocation.allocatedQuantity).times(target.unitPrice)),
-            );
-          }
+    const activeLoadingFilter = {
+      status: { notIn: [LoadingStatus.CANCELLED, LoadingStatus.REVERSED] },
+    };
+    if (docIds.sales.size === 0 && docIds.purchase.size === 0) return;
+
+    // Variant defaults for stored loading lines without an explicit uom
+    // (one pre-pass over every allocation of the touched documents).
+    const prePass = async (kind: 'sales' | 'purchase') => {
+      const ids = kind === 'sales' ? docIds.sales : docIds.purchase;
+      if (ids.size === 0) return [];
+      return kind === 'sales'
+        ? tx.salesLine.findMany({
+            where: { salesDocumentId: { in: [...ids] }, companyId },
+            select: {
+              loadingAllocations: {
+                where: { loadingLine: { loading: activeLoadingFilter } },
+                select: { loadingLine: { select: { productVariantId: true } } },
+              },
+            },
+          })
+        : tx.purchaseLine.findMany({
+            where: { purchaseDocumentId: { in: [...ids] }, companyId },
+            select: {
+              loadingAllocations: {
+                where: { loadingLine: { loading: activeLoadingFilter } },
+                select: { loadingLine: { select: { productVariantId: true } } },
+              },
+            },
+          });
+    };
+    const [salesPre, purchasePre] = await Promise.all([prePass('sales'), prePass('purchase')]);
+
+    const variantIds = new Set<string>();
+    for (const row of [...salesPre, ...purchasePre]) {
+      for (const alloc of row.loadingAllocations) variantIds.add(alloc.loadingLine.productVariantId);
+    }
+    const variants =
+      variantIds.size > 0
+        ? await tx.productVariant.findMany({
+            where: { id: { in: [...variantIds] }, companyId },
+            select: { id: true, defaultUomId: true, template: { select: { defaultSalesUomId: true } } },
+          })
+        : [];
+    const variantMap = new Map(
+      variants.map((v) => [
+        v.id,
+        { defaultUomId: v.defaultUomId, template: { defaultSalesUomId: v.template.defaultSalesUomId } },
+      ]),
+    );
+
+    // ── Per-document aggregation (one update per document) ──
+    for (const kind of ['sales', 'purchase'] as const) {
+      const ids = kind === 'sales' ? docIds.sales : docIds.purchase;
+      for (const docId of ids) {
+        const doc =
+          kind === 'sales'
+            ? await tx.salesDocument.findFirst({
+                where: { id: docId, companyId },
+                select: {
+                  id: true,
+                  status: true,
+                  lines: {
+                    select: {
+                      id: true,
+                      orderedQuantity: true,
+                      uomId: true,
+                      unitPrice: true,
+                      loadingAllocations: {
+                        where: { loadingLine: { loading: activeLoadingFilter } },
+                        select: {
+                          allocatedQuantity: true,
+                          loadingLine: { select: { productVariantId: true, uomId: true } },
+                        },
+                      },
+                    },
+                  },
+                },
+              })
+            : await tx.purchaseDocument.findFirst({
+                where: { id: docId, companyId },
+                select: {
+                  id: true,
+                  status: true,
+                  lines: {
+                    select: {
+                      id: true,
+                      orderedQuantity: true,
+                      uomId: true,
+                      unitPrice: true,
+                      loadingAllocations: {
+                        where: { loadingLine: { loading: activeLoadingFilter } },
+                        select: {
+                          allocatedQuantity: true,
+                          loadingLine: { select: { productVariantId: true, uomId: true } },
+                        },
+                      },
+                    },
+                  },
+                },
+              });
+        if (!doc) continue;
+        let loadedAmount = D(0);
+        let someLoaded = false;
+        let allFullyLoaded = doc.lines.length > 0;
+        for (const line of doc.lines) {
+          const loaded = await this.lineLoadedQuantity(companyId, line, variantMap);
+          loadedAmount = loadedAmount.plus(loaded.times(line.unitPrice));
+          if (loaded.gt(0)) someLoaded = true;
+          if (loaded.lt(D(line.orderedQuantity))) allFullyLoaded = false;
+        }
+        const status = this.documentStatusAfter(kind, doc.status, someLoaded, allFullyLoaded, mode);
+        if (kind === 'sales') {
+          await tx.salesDocument.update({
+            where: { id: doc.id },
+            data: {
+              operationalLoadedAmount: loadedAmount,
+              ...(status ? { status: status as SalesDocumentStatus } : {}),
+            },
+          });
+        } else {
+          await tx.purchaseDocument.update({
+            where: { id: doc.id },
+            data: {
+              operationalLoadedAmount: loadedAmount,
+              ...(status ? { status: status as PurchaseDocumentStatus } : {}),
+            },
+          });
         }
       }
     }
+  }
 
-    for (const [docId, delta] of salesDelta) {
-      const doc = await tx.salesDocument.findFirst({
-        where: { id: docId, companyId },
-        select: {
-          id: true,
-          status: true,
-          operationalLoadedAmount: true,
-          lines: {
-            select: {
-              id: true,
-              orderedQuantity: true,
-              loadingAllocations: {
-                where: { loadingLine: { loading: { status: { not: LoadingStatus.CANCELLED } } } },
-                select: { allocatedQuantity: true },
-              },
-            },
-          },
-        },
-      });
-      if (!doc) continue;
-      const loadedAmount = D(doc.operationalLoadedAmount).plus(delta);
-      const status = this.recomputeStatus(
-        doc.status,
-        doc.lines.map((line) => ({ orderedQuantity: line.orderedQuantity, allocations: line.loadingAllocations })),
-        ['SALES_ORDER', 'PARTIALLY_LOADED'],
+  /** Loaded quantity of ONE document line across all active loadings (converted). */
+  private async lineLoadedQuantity(
+    companyId: string,
+    line: {
+      uomId: string;
+      orderedQuantity: Prisma.Decimal;
+      loadingAllocations: {
+        allocatedQuantity: Prisma.Decimal;
+        loadingLine: { productVariantId: string; uomId: string | null };
+      }[];
+    },
+    variantMap: Map<string, { defaultUomId: string | null; template: { defaultSalesUomId: string | null } }>,
+  ): Promise<Prisma.Decimal> {
+    let loaded = D(0);
+    for (const alloc of line.loadingAllocations) {
+      const variant = variantMap.get(alloc.loadingLine.productVariantId);
+      const sourceUom =
+        alloc.loadingLine.uomId ?? variant?.defaultUomId ?? variant?.template.defaultSalesUomId;
+      if (!sourceUom) throw new ValidationError(LOADING_MESSAGES.uomRequired);
+      loaded = loaded.plus(
+        await this.normalization.convertBetween(
+          companyId,
+          alloc.loadingLine.productVariantId,
+          alloc.allocatedQuantity,
+          sourceUom,
+          line.uomId,
+        ),
       );
-      await tx.salesDocument.update({
-        where: { id: doc.id },
-        data: {
-          operationalLoadedAmount: loadedAmount,
-          ...(status ? { status: status as SalesDocumentStatus } : {}),
-        },
-      });
     }
-
-    for (const [docId, delta] of purchaseDelta) {
-      const doc = await tx.purchaseDocument.findFirst({
-        where: { id: docId, companyId },
-        select: {
-          id: true,
-          status: true,
-          operationalLoadedAmount: true,
-          lines: {
-            select: {
-              id: true,
-              orderedQuantity: true,
-              loadingAllocations: {
-                where: { loadingLine: { loading: { status: { not: LoadingStatus.CANCELLED } } } },
-                select: { allocatedQuantity: true },
-              },
-            },
-          },
-        },
-      });
-      if (!doc) continue;
-      const loadedAmount = D(doc.operationalLoadedAmount).plus(delta);
-      const status = this.recomputeStatus(
-        doc.status,
-        doc.lines.map((line) => ({ orderedQuantity: line.orderedQuantity, allocations: line.loadingAllocations })),
-        ['ORDER_PLACED', 'PARTIALLY_LOADED'],
-      );
-      await tx.purchaseDocument.update({
-        where: { id: doc.id },
-        data: {
-          operationalLoadedAmount: loadedAmount,
-          ...(status ? { status: status as PurchaseDocumentStatus } : {}),
-        },
-      });
-    }
+    return loaded;
   }
 
   /**
-   * COMPLETED when every line's loaded quantity (across all non-cancelled
-   * loading allocations) ≥ ordered; PARTIALLY_LOADED when something is
-   * loaded. Only applied from the document's "active" statuses — earlier
-   * lifecycle stages (quotation, draft purchase) keep their status while the
-   * amounts still move; COMPLETED is never downgraded.
+   * Document status after a confirm (upgrade-only) or a reversal (may fall
+   * back to the base active status). COMPLETED is never upgraded twice;
+   * only the document's "active" statuses participate.
    */
-  private recomputeStatus(
+  private documentStatusAfter(
+    kind: 'sales' | 'purchase',
     current: string,
-    lines: { orderedQuantity: Prisma.Decimal; allocations: { allocatedQuantity: Prisma.Decimal }[] }[],
-    applicableFrom: string[],
+    someLoaded: boolean,
+    allFullyLoaded: boolean,
+    mode: 'confirm' | 'reverse',
   ): string | null {
-    if (!applicableFrom.includes(current) || current === 'COMPLETED') return null;
-
-    let someLoaded = false;
-    let allFullyLoaded = lines.length > 0;
-    for (const line of lines) {
-      const loaded = line.allocations.reduce((acc, a) => acc.plus(D(a.allocatedQuantity)), D(0));
-      if (loaded.gt(0)) someLoaded = true;
-      if (loaded.lt(D(line.orderedQuantity))) allFullyLoaded = false;
+    const base = kind === 'sales' ? 'SALES_ORDER' : 'ORDER_PLACED';
+    const applicable =
+      mode === 'confirm'
+        ? kind === 'sales'
+          ? ['SALES_ORDER', 'PARTIALLY_LOADED']
+          : ['ORDER_PLACED', 'PARTIALLY_LOADED']
+        : kind === 'sales'
+          ? ['SALES_ORDER', 'PARTIALLY_LOADED', 'COMPLETED']
+          : ['ORDER_PLACED', 'PARTIALLY_LOADED', 'COMPLETED'];
+    if (!applicable.includes(current)) return null;
+    if (mode === 'confirm') {
+      if (current === 'COMPLETED') return null;
+      if (!someLoaded) return null;
+      return allFullyLoaded ? 'COMPLETED' : 'PARTIALLY_LOADED';
     }
-    if (!someLoaded) return null;
+    // reverse: recompute outright (a reversal can strip a document back).
+    if (!someLoaded) return base;
     return allFullyLoaded ? 'COMPLETED' : 'PARTIALLY_LOADED';
   }
 

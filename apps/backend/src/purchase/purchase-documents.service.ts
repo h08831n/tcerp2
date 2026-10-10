@@ -7,11 +7,10 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
-import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { assertActiveCompanyMember } from '../common/utils/company-member';
 import { assertSupplier } from '../common/utils/party-roles';
 import { D, calcPurchaseLineTotal, roundMoney, roundQuantity, sumDocumentTotals } from '../common/utils/money';
-import { insertStockMovementIfAbsent } from '../common/utils/stock-movement';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
@@ -619,76 +618,17 @@ export class PurchaseDocumentsService {
   }
 
   /**
-   * Phase 6 goods receipt (domain boundaries §4): generates one IN
-   * StockMovement PER PURCHASE LINE (idempotencyKey
-   * `purchase:{id}:line:{lineId}`) into the company default warehouse.
-   *
-   * The purchase STATUS stays ORDER_PLACED — receipt is tracked via movement
-   * existence (no schema change; `receivedAt` deliberately not added).
-   * Re-receiving is a NO-OP SUCCESS: the idempotency keys make a second call
-   * create nothing (`moved: false`), so stock can never double-count. Only
-   * ORDER_PLACED purchases can receive; DRAFT must be placed first.
+   * DEPRECATED (Integrity Gate #9): blind PO-receipt is gone — physical stock
+   * comes ONLY from real GoodsReceipts (per-line ACTUAL quantities, over/
+   * under receipt, reversals). The endpoint stays as a tombstone so old
+   * clients get a stable machine-readable 403 instead of a 404.
    */
-  async receive(companyId: string, id: string, actor: { id: string; username: string }, ctx: RequestContext) {
+  async receive(companyId: string, id: string): Promise<never> {
     const doc = await this.loadForTransition(companyId, id);
-    if (doc.status !== PurchaseDocumentStatus.ORDER_PLACED) {
-      throw new ValidationError('INVALID_STATUS_TRANSITION', { from: doc.status, to: 'RECEIVED' });
-    }
-
-    const summary = await this.prisma.$transaction(async (tx) => {
-      const full = await tx.purchaseDocument.findFirstOrThrow({
-        where: { id: doc.id, companyId },
-        include: { lines: { orderBy: { lineOrder: 'asc' } } },
-      });
-      const warehouse = await this.inventory.ensureDefaultWarehouse(tx, companyId);
-
-      let created = 0;
-      for (const line of full.lines) {
-        // ON CONFLICT DO NOTHING (not create + P2002 catch): a unique
-        // violation mid-transaction would poison it (Postgres 25P02) and the
-        // rest of the receive would fail. Already received (re-receive /
-        // concurrent receive) — never duplicate.
-        const inserted = await insertStockMovementIfAbsent(tx, {
-          companyId,
-          warehouseId: warehouse.id,
-          productVariantId: line.productVariantId,
-          direction: 'IN',
-          quantity: line.orderedQuantity,
-          uomId: line.uomId,
-          movementDate: new Date(),
-          sourceEntityType: 'PURCHASE',
-          sourceEntityId: full.id,
-          idempotencyKey: `purchase:${full.id}:line:${line.id}`,
-          createdBy: actor.id,
-        });
-        if (inserted) created += 1;
-      }
-
-      await this.auditService.recordTx(tx, {
-        entityType: 'purchase_document',
-        entityId: full.id,
-        action: 'RECEIVE',
-        companyId,
-        actor,
-        newValues: {
-          warehouseId: warehouse.id,
-          lineCount: full.lines.length,
-          movementsCreated: created,
-          moved: created > 0,
-        },
-        ip: ctx.ip,
-        userAgent: ctx.userAgent,
-      });
-      return { created, lineCount: full.lines.length, warehouseId: warehouse.id };
+    throw new ForbiddenError('RECEIVE_DEPRECATED', {
+      purchaseDocumentId: doc.id,
+      hint: 'Use POST /api/goods-receipts (real partial receipts drive stock).',
     });
-
-    return {
-      moved: summary.created > 0,
-      movementsCreated: summary.created,
-      movementCount: summary.lineCount,
-      warehouseId: summary.warehouseId,
-      document: await this.getById(companyId, id),
-    };
   }
 
   /** ORDER_PLACED|PARTIALLY_LOADED → COMPLETED. */

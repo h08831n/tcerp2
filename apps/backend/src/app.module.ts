@@ -29,6 +29,7 @@ import { AllocationsModule } from './allocations/allocations.module';
 import { PriceRequestModule } from './price-request/price-request.module';
 import { DocumentFlowModule } from './document-flow/document-flow.module';
 import { LoadingModule } from './loading/loading.module';
+import { GoodsReceiptModule } from './goods-receipt/goods-receipt.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
@@ -79,6 +80,7 @@ import { HealthModule } from './health/health.module';
     DocumentFlowModule,
     LoadingModule,
     InventoryModule,
+    GoodsReceiptModule,
     ApprovalsModule,
     WorkflowTimerModule,
     NotificationsModule,
