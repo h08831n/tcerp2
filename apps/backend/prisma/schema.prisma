@@ -93,6 +93,7 @@ model Company {
   publishBatches     PublishBatch[]
   publishingTemplates PublishingTemplate[]
   automationRules    AutomationRule[]
+  fiscalYears        FiscalYear[]
   warehouses         Warehouse[]
   stockLocations     StockLocation[]
   stockMovements     StockMovement[]
@@ -2284,7 +2285,7 @@ enum AccountType {
   ASSET
   LIABILITY
   EQUITY
-  INCOME
+  REVENUE
   EXPENSE
 }
 
@@ -2320,6 +2321,80 @@ model JournalEntry {
   @@map("journal_entries")
 }
 
+// ─────────────── Phase 7A: Fiscal years & periods (Jalali) ───────────────
+// Posting guard: a journal entry may only post into an OPEN period. When no
+// period rows exist for the year, the FiscalYear status alone decides.
+
+model FiscalYear {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  code           String // e.g. 1405 (Jalali year)
+  nameFa         String   @map("name_fa")
+  startDate      DateTime @map("start_date") @db.Date
+  endDate        DateTime @map("end_date") @db.Date
+  status         FiscalYearStatus @default(OPEN)
+  closingEntryId String?  @map("closing_entry_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company        @relation(fields: [companyId], references: [id])
+  periods FiscalPeriod[]
+
+  @@unique([companyId, code])
+  @@map("fiscal_years")
+}
+
+enum FiscalYearStatus {
+  OPEN
+  CLOSED
+}
+
+// Monthly sub-periods; when a year defines periods, each posting date must
+// fall in an OPEN one.
+model FiscalPeriod {
+  id           String   @id @default(uuid()) @db.Uuid
+  fiscalYearId String   @map("fiscal_year_id") @db.Uuid
+  code         String // 1405-01 … 1405-12 (Jalali months)
+  nameFa       String   @map("name_fa")
+  startDate    DateTime @map("start_date") @db.Date
+  endDate      DateTime @map("end_date") @db.Date
+  status       FiscalYearStatus @default(OPEN)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+
+  @@unique([fiscalYearId, code])
+  @@map("fiscal_periods")
+}
+
+// ─────────────── Analytical dimensions on journal lines (7A-3) ───────────────
+// Customer/Supplier receivable-payable tracking plus future
+// Employee/Project/Cost-center. partyId on JournalLine stays the first-class
+// customer/supplier analytic; this child table carries the general set.
+
+enum AnalyticDimensionType {
+  CUSTOMER
+  SUPPLIER
+  EMPLOYEE
+  PROJECT
+  COST_CENTER
+}
+
+model JournalLineAnalytic {
+  id             String               @id @default(uuid()) @db.Uuid
+  journalLineId  String               @map("journal_line_id") @db.Uuid
+  dimensionType  AnalyticDimensionType @map("dimension_type")
+  dimensionId    String               @map("dimension_id") @db.Uuid
+  label          String?
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  journalLine JournalLine @relation(fields: [journalLineId], references: [id], onDelete: Cascade)
+
+  @@unique([journalLineId, dimensionType, dimensionId])
+  @@index([dimensionType, dimensionId])
+  @@map("journal_line_analytics")
+}
+
 // Invariants enforced in DB (migration CHECKs) and in JournalService:
 //   debit >= 0, credit >= 0, never both positive on one line,
 //   SUM(debit) == SUM(credit) enforced inside the POST transaction,
@@ -2334,8 +2409,9 @@ model JournalLine {
   debit          Decimal @default(0) @db.Decimal(20, 4)
   credit         Decimal @default(0) @db.Decimal(20, 4)
 
-  entry   JournalEntry   @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
-  account ChartOfAccount @relation(fields: [accountId], references: [id])
+  entry     JournalEntry          @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account   ChartOfAccount        @relation(fields: [accountId], references: [id])
+  analytics JournalLineAnalytic[]
 
   @@index([journalEntryId])
   @@index([accountId])

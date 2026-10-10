@@ -256,6 +256,14 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 ### Accounting Architecture Checkpoint (2026-10-12 — docs only, no code)
 - docs/05-accounting-architecture.md ratified: accounting docs independent from operational; profit = fulfillment ledger + loading allocations + cost snapshots + price snapshots (never tax invoices); valuation = Specific Identification linked to purchase fulfillment (FIFO/Average documented as future); double-entry design on existing schema (posting rules, immutable posted, reversal); treasury boundary confirmed in code (only Receipt/Payment/Transfer/Check clear/write bank); tax/Moadian M:N boundary; financial records immutability rules. Phase 7 checklist included.
 
+### Phase 7A — Accounting Foundation (COMPLETED)
+- FiscalYear + 12 monthly FiscalPeriods (Jalali labels, company-scoped); posting guard assertOpenPeriod: CLOSED year/period rejected (FISCAL_YEAR_CLOSED/PERIOD_CLOSED/PERIOD_NOT_FOUND); no calendar = unguarded (documented); reversals bypass guard by design
+- AccountType INCOME → REVENUE (enum migrated with data mapping)
+- JournalLineAnalytic dimensions (CUSTOMER/SUPPLIER/EMPLOYEE/PROJECT/COST_CENTER) + partyId analytic on lines — receivable/payable analytical tracking (Ravan group pattern)
+- Journal engine: guard integrated; analytics persisted in post(); fiscal-year API (list/create/close/period status, accounting.fiscal.manage permission, audited)
+- Migration 20241014000000 with fiscal 1405 seeding per company; INCOME→REVENUE data mapping in-migration
+- Tests g7-01..06 (balanced/unbalanced/closed-period/immutable/reversal/analytics) — 174 suites, 635/635 integration
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

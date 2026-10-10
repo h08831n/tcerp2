@@ -47,6 +47,7 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'sequences.view', module: 'sequences', action: 'view', description: 'View sequence configurations' },
   { code: 'sequences.edit', module: 'sequences', action: 'edit', description: 'Change sequence config (prospective only)' },
   // audit
+  { code: 'accounting.fiscal.manage', module: 'accounting', action: 'manage', description: 'Manage fiscal years and periods' },
   { code: 'audit.view', module: 'audit', action: 'view', description: 'View the audit trail' },
   // files
   { code: 'files.view', module: 'files', action: 'view', description: 'View file metadata and attachments' },
@@ -305,7 +306,7 @@ const CHART_OF_ACCOUNTS = [
   { code: 'CHECKS_IN_TRANSIT', name: 'چک‌های در جریان وصول', type: 'ASSET' as const },
   { code: 'PAYABLE', name: 'حساب‌های پرداختنی', type: 'LIABILITY' as const },
   { code: 'VAT_PAYABLE', name: 'مالیات بر ارزش افزوده پرداختنی', type: 'LIABILITY' as const },
-  { code: 'SALES_REVENUE', name: 'درآمد فروش', type: 'INCOME' as const },
+  { code: 'SALES_REVENUE', name: 'درآمد فروش', type: 'REVENUE' as const },
   { code: 'BANK_FEE_EXPENSE', name: 'کارمزد بانکی', type: 'EXPENSE' as const },
   { code: 'PURCHASE_EXPENSE', name: 'هزینه خرید', type: 'EXPENSE' as const },
 ];

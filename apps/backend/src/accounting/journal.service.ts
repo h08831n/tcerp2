@@ -4,12 +4,21 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 
+export interface JournalLineAnalyticInput {
+  dimensionType: 'CUSTOMER' | 'SUPPLIER' | 'EMPLOYEE' | 'PROJECT' | 'COST_CENTER';
+  dimensionId: string;
+  label?: string;
+}
+
 export interface JournalLineInput {
   accountCode: string;
   partyId?: string | null;
   debit: number;
   credit: number;
   description?: string;
+  /** Analytical dimensions (7A-3): CUSTOMER/SUPPLIER receivable-payable
+   *  tracking plus future EMPLOYEE/PROJECT/COST_CENTER. */
+  analytics?: JournalLineAnalyticInput[];
 }
 
 export interface PostJournalInput {
@@ -75,6 +84,11 @@ export class JournalService {
   async post(tx: Tx, input: PostJournalInput): Promise<JournalEntry & { lines: unknown[] }> {
     JournalService.validateLines(input.lines);
 
+    // Fiscal guard (Phase 7A-1): postings are rejected into CLOSED fiscal
+    // years/periods. No fiscal calendar → no guard (documented). Reversals
+    // intentionally bypass this guard and date back to the original entry.
+    await this.assertOpenPeriod(tx, input.companyId, input.entryDate);
+
     const codes = [...new Set(input.lines.map((l) => l.accountCode))];
     const accounts = await tx.chartOfAccount.findMany({
       where: { companyId: input.companyId, code: { in: codes } },
@@ -111,6 +125,13 @@ export class JournalService {
             description: line.description,
             debit: line.debit,
             credit: line.credit,
+            analytics: {
+              create: (line.analytics ?? []).map((a) => ({
+                dimensionType: a.dimensionType,
+                dimensionId: a.dimensionId,
+                label: a.label ?? null,
+              })),
+            },
           })),
         },
       },
@@ -122,6 +143,49 @@ export class JournalService {
       data: { status: 'POSTED', postedAt: new Date() },
       include: { lines: true },
     }) as Promise<JournalEntry & { lines: unknown[] }>;
+  }
+
+
+  /**
+   * Fiscal guard (Phase 7A-1): reject postings into CLOSED fiscal years or
+   * periods. Resolution order for `date`:
+   *   1. the FiscalYear containing it — CLOSED → FISCAL_YEAR_CLOSED;
+   *   2. when that year defines monthly periods, the containing period —
+   *      CLOSED → PERIOD_CLOSED, missing → PERIOD_NOT_FOUND;
+   *   3. no fiscal calendar at all → posting allowed (documented).
+   */
+  async assertOpenPeriod(
+    tx: Tx,
+    companyId: string,
+    date: Date,
+  ): Promise<void> {
+    // Optional-chain + guard: some callers (legacy unit tests) hand a stubbed
+    // tx without fiscal delegates — treated as "no fiscal calendar".
+    const year = (await tx.fiscalYear?.findFirst?.({
+      where: {
+        companyId,
+        startDate: { lte: date },
+        endDate: { gte: date },
+      },
+    })) ?? null;
+    if (!year) return; // no fiscal calendar → unguarded (documented)
+    if (year.status === 'CLOSED') {
+      throw new ValidationError('FISCAL_YEAR_CLOSED', { fiscalYearCode: year.code });
+    }
+    const period = (await tx.fiscalPeriod?.findFirst?.({
+      where: {
+        fiscalYearId: year.id,
+        startDate: { lte: date },
+        endDate: { gte: date },
+      },
+    })) ?? null;
+    if (period) {
+      if (period.status === 'CLOSED') {
+        throw new ValidationError('PERIOD_CLOSED', { periodCode: period.code });
+      }
+    } else {
+      throw new ValidationError('PERIOD_NOT_FOUND', { fiscalYearCode: year.code });
+    }
   }
 
   /**
