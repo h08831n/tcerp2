@@ -94,6 +94,7 @@ model Company {
   publishingTemplates PublishingTemplate[]
   automationRules    AutomationRule[]
   warehouses         Warehouse[]
+  stockLocations     StockLocation[]
   stockMovements     StockMovement[]
   approvalRequests   ApprovalRequest[]
 
@@ -184,6 +185,7 @@ model Party {
   loadingAsCustomer Loading[]    @relation("LoadingCustomer")
   loadingAsDriver   Loading[]    @relation("LoadingDriver")
   loadingAsCarrier  Loading[]    @relation("LoadingCarrier")
+  stockLocations    StockLocation[] @relation("LocationParty")
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -1086,13 +1088,16 @@ model Uom {
   salesTemplates    ProductTemplate[] @relation("TemplateSalesUom")
   purchaseTemplates ProductTemplate[] @relation("TemplatePurchaseUom")
   weightVariants    ProductVariant[]  @relation("VariantWeightUom")
+  inventoryVariants ProductVariant[]  @relation("VariantInventoryUom")
   variants          ProductVariant[]
+  movementSourceUoms    StockMovement[] @relation("MovementSourceUom")
+  movementInventoryUoms StockMovement[] @relation("MovementInventoryUom")
+  goodsReceiptLines GoodsReceiptLine[]
   salesLines        SalesLine[]
   purchaseLines     PurchaseLine[]
   priceRequestLines PriceRequestLine[]
   supplierOffers    SupplierOffer[]
   dailyPrices       DailyPrice[]
-  stockMovements    StockMovement[]
 
   @@unique([companyId, symbol])
   @@index([companyId, categoryId])
@@ -1215,6 +1220,10 @@ model ProductVariant {
   // must belong to the company's Weight category (service-validated).
   weightUomId   String?  @map("weight_uom_id") @db.Uuid
   defaultUomId  String?  @map("default_uom_id") @db.Uuid
+  // Authoritative UOM for inventory aggregation; all normalizedQuantity
+  // values are expressed in it. Same-company; controlled after movements
+  // exist (service-blocked) — Integrity Gate #2.
+  inventoryUomId String? @map("inventory_uom_id") @db.Uuid
   isPublic      Boolean  @default(true) @map("is_public") // website price API visibility (Phase 5 review)
   active        Boolean  @default(true)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -1225,6 +1234,7 @@ model ProductVariant {
   template   ProductTemplate @relation(fields: [templateId], references: [id])
   defaultUom Uom?            @relation(fields: [defaultUomId], references: [id])
   weightUom  Uom?            @relation("VariantWeightUom", fields: [weightUomId], references: [id])
+  inventoryUom Uom?          @relation("VariantInventoryUom", fields: [inventoryUomId], references: [id])
   values     VariantAttributeValue[]
   supplierMappings SupplierProduct[]
   salesLines SalesLine[]
@@ -1563,6 +1573,7 @@ model PurchaseDocument {
   paymentTerm  PaymentTerm? @relation(fields: [paymentTermId], references: [id])
   priceRequest PriceRequest? @relation(fields: [priceRequestId], references: [id])
   lines        PurchaseLine[]
+  goodsReceipts GoodsReceipt[]
 
   @@unique([companyId, documentNumber])
   @@index([companyId, status, documentDate])
@@ -1591,6 +1602,7 @@ model PurchaseLine {
   uom           Uom              @relation(fields: [uomId], references: [id])
   purchaseAllocations SalesPurchaseAllocation[]
   loadingAllocations LoadingAllocation[]
+  goodsReceiptLines GoodsReceiptLine[]
 
   @@index([purchaseDocumentId])
   @@index([productVariantId])
@@ -1946,9 +1958,43 @@ model Warehouse {
   company   Company        @relation(fields: [companyId], references: [id])
   movements StockMovement[]
   loadings  Loading[]
+  locations StockLocation[]
 
   @@unique([companyId, code])
   @@map("warehouses")
+}
+
+enum StockLocationType {
+  SUPPLIER
+  INTERNAL
+  CUSTOMER
+  TRANSIT
+}
+
+// Location-based movement model (Integrity Gate #6): a movement goes FROM a
+// location TO a location. Warehouses own one or more INTERNAL locations.
+// Company physical stock = INTERNAL locations only (#7).
+model StockLocation {
+  id          String           @id @default(uuid()) @db.Uuid
+  companyId   String           @map("company_id") @db.Uuid
+  type        StockLocationType
+  warehouseId String?          @map("warehouse_id") @db.Uuid // INTERNAL: owning warehouse
+  partyId     String?          @map("party_id") @db.Uuid // SUPPLIER/CUSTOMER party when external
+  code        String
+  nameFa      String           @map("name_fa")
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  company   Company        @relation(fields: [companyId], references: [id])
+  warehouse Warehouse?     @relation(fields: [warehouseId], references: [id])
+  party     Party?         @relation("LocationParty", fields: [partyId], references: [id])
+  movementsFrom StockMovement[] @relation("MovementFrom")
+  movementsTo   StockMovement[] @relation("MovementTo")
+  goodsReceipts GoodsReceipt[]
+
+  @@unique([companyId, code])
+  @@index([companyId, type])
+  @@map("stock_locations")
 }
 
 enum StockDirection {
@@ -1959,31 +2005,98 @@ enum StockDirection {
 model StockMovement {
   id               String        @id @default(uuid()) @db.Uuid
   companyId        String        @map("company_id") @db.Uuid
-  warehouseId      String        @map("warehouse_id") @db.Uuid
   productVariantId String        @map("product_variant_id") @db.Uuid
+  // Original source quantity/UOM — preserved verbatim for audit (#1).
+  sourceQuantity   Decimal       @map("source_quantity") @db.Decimal(18, 4)
+  sourceUomId      String        @map("source_uom_id") @db.Uuid
+  // Normalized to the variant's inventoryUom via the UOM engine (#1/#3) —
+  // the ONLY column stock aggregation may ever SUM.
+  normalizedQuantity Decimal    @map("normalized_quantity") @db.Decimal(18, 4)
+  inventoryUomId   String       @map("inventory_uom_id") @db.Uuid
+  // Location-based flow (#6): warehouseId kept for INTERNAL convenience.
   direction        StockDirection
-  quantity         Decimal       @db.Decimal(18, 4) // stored in the variant's uom context of the source document
-  uomId            String        @map("uom_id") @db.Uuid
+  sourceLocationId String        @map("source_location_id") @db.Uuid
+  destinationLocationId String   @map("destination_location_id") @db.Uuid
+  warehouseId      String?       @map("warehouse_id") @db.Uuid
   movementDate     DateTime      @map("movement_date") @db.Timestamptz(6)
-  sourceEntityType String        @map("source_entity_type") // PURCHASE | LOADING
+  sourceEntityType String        @map("source_entity_type") // PURCHASE_RECEIPT | LOADING | LOADING_REVERSAL | RECEIPT_REVERSAL
   sourceEntityId   String        @map("source_entity_id") @db.Uuid
-  idempotencyKey   String        @unique @map("idempotency_key") // e.g. loading:{id} — document re-confirm can never double-count
+  idempotencyKey   String        @unique @map("idempotency_key")
+  reversalOfMovementId String?   @map("reversal_of_movement_id") @db.Uuid // compensating movement linkage
   createdBy        String?       @map("created_by") @db.Uuid
   createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company        Company        @relation(fields: [companyId], references: [id])
-  warehouse      Warehouse      @relation(fields: [warehouseId], references: [id])
   productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
-  uom            Uom            @relation(fields: [uomId], references: [id])
+  sourceUom      Uom            @relation("MovementSourceUom", fields: [sourceUomId], references: [id])
+  inventoryUom   Uom            @relation("MovementInventoryUom", fields: [inventoryUomId], references: [id])
+  sourceLocation      StockLocation @relation("MovementFrom", fields: [sourceLocationId], references: [id])
+  destinationLocation StockLocation @relation("MovementTo", fields: [destinationLocationId], references: [id])
+  warehouse      Warehouse?     @relation(fields: [warehouseId], references: [id])
   loading        Loading?       @relation(fields: [sourceEntityId], references: [id])
 
   @@index([companyId, productVariantId, movementDate])
-  @@index([warehouseId, productVariantId])
+  @@index([destinationLocationId, productVariantId])
+  @@index([sourceLocationId, productVariantId])
   @@index([sourceEntityType, sourceEntityId])
   @@map("stock_movements")
 }
 
-// ─────────────── Lean approval engine (debt gate + reusable) ───────────────
+
+// Real partial warehouse receipts (Integrity Gate #9): actual physical
+// quantity drives stock, never the PO ordered quantity. Confirmed receipts
+// are immutable — corrections go through REVERSED + compensating movements.
+
+enum GoodsReceiptStatus {
+  DRAFT
+  CONFIRMED
+  REVERSED
+  CANCELLED
+}
+
+model GoodsReceipt {
+  id                String           @id @default(uuid()) @db.Uuid
+  companyId         String           @map("company_id") @db.Uuid
+  receiptNumber     String           @map("receipt_number")
+  purchaseDocumentId String          @map("purchase_document_id") @db.Uuid
+  destinationLocationId String       @map("destination_location_id") @db.Uuid // INTERNAL location
+  receiptDate       DateTime         @map("receipt_date") @db.Timestamptz(6)
+  status            GoodsReceiptStatus @default(DRAFT)
+  notes             String?
+  reversalOfId      String?          @map("reversal_of_id") @db.Uuid
+  reversalReason    String?          @map("reversal_reason")
+  createdBy         String?          @map("created_by") @db.Uuid
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  purchaseDocument PurchaseDocument @relation(fields: [purchaseDocumentId], references: [id])
+  destinationLocation StockLocation @relation(fields: [destinationLocationId], references: [id])
+  lines       GoodsReceiptLine[]
+
+  @@unique([companyId, receiptNumber])
+  @@index([companyId, status, receiptDate])
+  @@map("goods_receipts")
+}
+
+model GoodsReceiptLine {
+  id              String  @id @default(uuid()) @db.Uuid
+  goodsReceiptId  String  @map("goods_receipt_id") @db.Uuid
+  purchaseLineId  String  @map("purchase_line_id") @db.Uuid
+  actualQuantity  Decimal @map("actual_quantity") @db.Decimal(18, 4)
+  uomId           String  @map("uom_id") @db.Uuid
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  receipt      GoodsReceipt  @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  purchaseLine PurchaseLine @relation(fields: [purchaseLineId], references: [id])
+  uom          Uom          @relation(fields: [uomId], references: [id])
+
+  @@unique([goodsReceiptId, purchaseLineId])
+  @@index([purchaseLineId])
+  @@map("goods_receipt_lines")
+}
+
+// ─────────────── Lean approval engine// ─────────────── Lean approval engine (debt gate + reusable) ───────────────
 // Minimal Phase 6 subset of REQUIREMENTS §51: single approver requests used by
 // the Loading debt gate; sequential/multi-approver lands with Workflow (Phase 9).
 
@@ -1997,7 +2110,9 @@ enum ApprovalStatus {
 model ApprovalRequest {
   id          String         @id @default(uuid()) @db.Uuid
   companyId   String         @map("company_id") @db.Uuid
-  entityType  String         @map("entity_type") // loading | ...
+  // Fully generic entity reference (Integrity Gate #13): NO physical FK —
+  // services validate existence. Loading queries by (entityType='loading').
+  entityType  String         @map("entity_type")
   entityId    String         @map("entity_id") @db.Uuid
   approvalType String         @map("approval_type") // RELEASE_DRIVER_INFO | ...
   requestedBy String?        @map("requested_by") @db.Uuid
@@ -2010,7 +2125,6 @@ model ApprovalRequest {
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company  Company  @relation(fields: [companyId], references: [id])
-  loading  Loading? @relation("LoadingApprovals", fields: [entityId], references: [id])
 
   @@index([companyId, status, createdAt])
   @@index([entityType, entityId])
@@ -2024,7 +2138,16 @@ model ApprovalRequest {
 enum LoadingStatus {
   DRAFT
   CONFIRMED
+  REVERSED
   CANCELLED
+}
+
+// Explicit physical route (Integrity Gate #10) — never inferred from the
+// presence of a warehouse.
+enum LoadingRoute {
+  DIRECT_SUPPLIER_TO_CUSTOMER
+  WAREHOUSE_TO_CUSTOMER
+  SUPPLIER_TO_WAREHOUSE
 }
 
 model Loading {
@@ -2032,6 +2155,9 @@ model Loading {
   companyId      String       @map("company_id") @db.Uuid
   loadingDate    DateTime     @map("loading_date") @db.Timestamptz(6)
   status         LoadingStatus @default(DRAFT)
+  route          LoadingRoute @default(DIRECT_SUPPLIER_TO_CUSTOMER)
+  reversalOfId   String?      @map("reversal_of_id") @db.Uuid // this loading compensates that original
+  reversalReason String?      @map("reversal_reason")
   // Debt gate (REQUIREMENTS §20): driver/carrier info stays hidden from
   // customer-facing surfaces while driverInfoRestricted = true.
   driverInfoRestricted Boolean @default(false) @map("driver_info_restricted")
@@ -2046,10 +2172,11 @@ model Loading {
 
   company Company       @relation(fields: [companyId], references: [id])
   warehouse Warehouse?  @relation(fields: [warehouseId], references: [id])
+  reversalOf Loading?   @relation("LoadingReversalOf", fields: [reversalOfId], references: [id])
+  reversals  Loading[]  @relation("LoadingReversalOf")
   customer Party?       @relation("LoadingCustomer", fields: [customerPartyId], references: [id])
   driver  Party?        @relation("LoadingDriver", fields: [driverPartyId], references: [id])
   carrier Party?        @relation("LoadingCarrier", fields: [carrierPartyId], references: [id])
-  approvals ApprovalRequest[] @relation("LoadingApprovals")
   lines   LoadingLine[]
   movements StockMovement[]
 
