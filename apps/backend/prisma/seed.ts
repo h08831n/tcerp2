@@ -36,6 +36,7 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'roles.edit', module: 'roles', action: 'edit', description: 'Edit roles and their permissions' },
   { code: 'accounting.posting.manage', module: 'accounting', action: 'manage', description: 'Manage posting rules and retry accounting events' },
   { code: 'accounting.fiscal.manage', module: 'accounting', action: 'manage', description: 'Manage fiscal years and periods' },
+  { code: 'accounting.report', module: 'accounting', action: 'report', description: 'View financial reports (GL, trial balance, ledgers, profit, valuation)' },
   { code: 'roles.delete', module: 'roles', action: 'delete', description: 'Delete non-system roles' },
   // teams
   { code: 'teams.view', module: 'teams', action: 'view', description: 'View teams and members' },

@@ -275,6 +275,15 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 ### Reporting Architecture Checkpoint (2026-10-12 — docs only)
 - docs/06-reporting-architecture.md ratified: reports read ONLY from accounting entries + cost snapshots (never sales/purchase tables); GL with running balances + drill-down; trial balance with explicit balanced assertion; subsidiary ledger on partyId/analytics with financial-responsibility grouped view (no identity merge) and operational-balance reconciliation column; operational profit from SALES/PURCHASE journals only; inventory valuation via specific-identification cost snapshots (customer/supplier locations reported separately); opening balances = balanced OPENING journal entries via import; endpoints listed. Phase 7C checklist embedded.
 
+### Phase 7C — Reporting Engine (COMPLETED — commits 25dacd7 schema + impl)
+- ReportsService: General Ledger (opening balance, running balance with normal-side sign, drill-down fields, reversed flag) + Trial Balance (opening/movement/closing placed by normal side, explicit balanced assertion)
+- SubsidiaryLedgerService: party balances from accounting lines (CUSTOMER/SUPPLIER role join), per-party ledger drill-down, responsibility-group view (individual + group total), reconciliation delta vs PartyOperationalBalance
+- ProfitReportService: per sales doc revenue/COGS/grossProfit/margin from SALES_COMPLETED_LOADING journals (never tax invoices), dimensions date/customer/salesperson/variant/supplier via journal→event→document joins
+- ValuationReportService: quantity/value per variant from normalizedQuantity × unitCostSnapshot on INTERNAL locations, warehouse breakdown, per-variant history with running quantity
+- OpeningBalanceService: stage (validation, side-mismatch guard) → generate ONE balanced OPENING journal (residual to OPENING_EQUITY) + endpoints (accounting.report / accounting.fiscal.manage)
+- placement bug found by tests fixed (both-columns bug on negative signed balances); p5c-05 made hermetic; p5-12 timeout
+- Tests: 175 suites — 641/641 integration (g7c-01..06)
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

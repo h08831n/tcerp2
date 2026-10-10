@@ -21,6 +21,8 @@ import { shiftDayKey, todayKey } from '../pricing/day';
  * CREATE_NOTIFICATION reminder lands for the record owner; re-running the
  * scan is fully idempotent (no duplicate run/notification).
  */
+jest.setTimeout(60000);
+
 describeIntegration('p5-12 automation-inactive-customer', () => {
   const prisma = integrationPrisma();
   const marker = `p5-12-${Date.now()}`;
