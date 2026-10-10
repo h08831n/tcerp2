@@ -6,6 +6,7 @@ import { DailyPriceService } from '../pricing/daily-price.service';
 import { PurchaseController } from './purchase.controller';
 import { SalesToPurchaseFlowController } from './flow.controller';
 import { PurchaseDocumentsService } from './purchase-documents.service';
+import { PurchaseFulfillmentService } from './purchase-fulfillment.service';
 
 /**
  * Purchase documents (Phase 4, REQUIREMENTS §11-12). SequencesService is
@@ -17,11 +18,16 @@ import { PurchaseDocumentsService } from './purchase-documents.service';
  * because that import is circular (PricingModule → PriceRequestModule →
  * PurchaseModule). DailyPriceService only needs the global Prisma/Audit
  * modules — it reads today's price for the p5c line price-source wiring.
+ *
+ * PurchaseFulfillmentService (final correction #1) is the shared ledger for
+ * the goods-receipt and loading flows: both modules import THIS module to
+ * upsert/reverse PurchaseLineFulfillment rows and to recompute the purchase
+ * operational state from the ledger.
  */
 @Module({
   imports: [PartiesModule, DocumentFlowModule, InventoryModule],
   controllers: [PurchaseController, SalesToPurchaseFlowController],
-  providers: [PurchaseDocumentsService, DailyPriceService],
-  exports: [PurchaseDocumentsService],
+  providers: [PurchaseDocumentsService, DailyPriceService, PurchaseFulfillmentService],
+  exports: [PurchaseDocumentsService, PurchaseFulfillmentService],
 })
 export class PurchaseModule {}

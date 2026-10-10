@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { applyConversion } from '../products/uom-conversion.service';
-import { D, roundQuantity } from '../common/utils/money';
+import { D, roundMoney, roundQuantity, roundUnitCost } from '../common/utils/money';
 
 type Client = Prisma.TransactionClient | PrismaService;
 
@@ -236,6 +236,13 @@ export class NormalizationService {
    * source quantity into the variant's inventory UOM and inserts the row
    * with ON CONFLICT DO NOTHING (see class doc — the unique idempotency_key
    * is the only duplicate authority). Returns true when a row was inserted.
+   *
+   * Cost snapshots (final correction #3): when a `unitCostSnapshot` is given
+   * (per ONE inventory UOM unit), the writer computes
+   * `totalCostSnapshot = normalizedQuantity × unitCostSnapshot` (Decimal,
+   * rounded to the money scale) — callers never do that multiplication. An
+   * explicit `totalCostSnapshot` (reversals negate the original's) wins
+   * verbatim. Rows are NEVER updated after insert.
    */
   async insertStockMovement(
     tx: Client,
@@ -254,6 +261,8 @@ export class NormalizationService {
       idempotencyKey: string;
       reversalOfMovementId?: string | null;
       createdBy?: string | null;
+      unitCostSnapshot?: Prisma.Decimal | number | string | null;
+      totalCostSnapshot?: Prisma.Decimal | number | string | null;
     },
   ): Promise<boolean> {
     const normalizedQuantity = await this.normalizeQuantity(
@@ -275,6 +284,13 @@ export class NormalizationService {
       data.productVariantId,
       D(normalizedQuantity).neg(),
     );
+    const unitCostSnapshot = data.unitCostSnapshot ?? null;
+    const totalCostSnapshot =
+      data.totalCostSnapshot !== undefined && data.totalCostSnapshot !== null
+        ? roundMoney(D(data.totalCostSnapshot))
+        : unitCostSnapshot === null
+          ? null
+          : roundMoney(D(normalizedQuantity).times(D(unitCostSnapshot)));
     return NormalizationService.insertNormalizedMovement(tx, {
       companyId: data.companyId,
       productVariantId: data.productVariantId,
@@ -292,12 +308,15 @@ export class NormalizationService {
       idempotencyKey: data.idempotencyKey,
       reversalOfMovementId: data.reversalOfMovementId ?? null,
       createdBy: data.createdBy ?? null,
+      unitCostSnapshot: unitCostSnapshot === null ? null : roundUnitCost(D(unitCostSnapshot)),
+      totalCostSnapshot,
     });
   }
 
   /**
    * Raw idempotent insert of an ALREADY-normalized movement (reversals reuse
-   * the original row's normalized values verbatim). ON CONFLICT DO NOTHING.
+   * the original row's normalized values verbatim, cost snapshots copied with
+   * the total negated by the caller). ON CONFLICT DO NOTHING.
    */
   static async insertNormalizedMovement(
     tx: Client,
@@ -318,6 +337,8 @@ export class NormalizationService {
       idempotencyKey: string;
       reversalOfMovementId: string | null;
       createdBy: string | null;
+      unitCostSnapshot?: Prisma.Decimal | null;
+      totalCostSnapshot?: Prisma.Decimal | null;
     },
   ): Promise<boolean> {
     const inserted = await tx.$executeRaw`
@@ -325,7 +346,8 @@ export class NormalizationService {
         (id, company_id, product_variant_id, source_quantity, source_uom_id,
          normalized_quantity, inventory_uom_id, direction, source_location_id,
          destination_location_id, warehouse_id, movement_date, source_entity_type,
-         source_entity_id, idempotency_key, reversal_of_movement_id, created_by)
+         source_entity_id, idempotency_key, reversal_of_movement_id, created_by,
+         unit_cost_snapshot, total_cost_snapshot)
       VALUES
         (${randomUUID()}::uuid, ${data.companyId}::uuid, ${data.productVariantId}::uuid,
          ${data.sourceQuantity}, ${data.sourceUomId}::uuid, ${data.normalizedQuantity},
@@ -333,7 +355,7 @@ export class NormalizationService {
          ${data.sourceLocationId}::uuid, ${data.destinationLocationId}::uuid,
          ${data.warehouseId}::uuid, ${data.movementDate}, ${data.sourceEntityType},
          ${data.sourceEntityId}::uuid, ${data.idempotencyKey}, ${data.reversalOfMovementId}::uuid,
-         ${data.createdBy}::uuid)
+         ${data.createdBy}::uuid, ${data.unitCostSnapshot ?? null}, ${data.totalCostSnapshot ?? null})
       ON CONFLICT (idempotency_key) DO NOTHING
     `;
     return inserted === 1;

@@ -11,6 +11,7 @@ import { DocumentRelationService } from '../document-flow/document-relation.serv
 import { LoadingService } from './loading.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
+import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { QueueService } from '../queue/queue.service';
@@ -50,6 +51,7 @@ describeIntegration('p6-13 audit-atomicity', () => {
       new InventoryService(prisma as never, audit),
       approvals,
       new NormalizationService(prisma as never),
+      new PurchaseFulfillmentService(prisma as never, new NormalizationService(prisma as never)),
     );
   }
 

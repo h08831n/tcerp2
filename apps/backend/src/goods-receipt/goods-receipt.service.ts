@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   GoodsReceiptStatus,
   Prisma,
-  PurchaseDocumentStatus,
+  PurchaseFulfillmentType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -10,6 +10,7 @@ import { TimelineService } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
+import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
 import { SequencesService } from '../sequences/sequences.service';
 import {
   ConflictError,
@@ -62,18 +63,31 @@ export interface GoodsReceiptLineInput {
  *   (a) inserts one IN StockMovement per line SUPPLIER(po supplier) →
  *       INTERNAL(destination) with idempotencyKey
  *       `grn:{receiptId}:line:{lineId}` (ON CONFLICT DO NOTHING — the unique
- *       key is the only duplicate authority);
- *   (b) increments the purchase `operationalLoadedAmount` by the receipt
- *       amount — Σ convertedQty(line uom → PO line uom) × line.unitPrice,
- *       exact Decimal — and upgrades the purchase status
- *       (ORDER_PLACED/PARTIALLY_LOADED → PARTIALLY_LOADED/COMPLETED);
- *   (c) writes purchase_document ↔ goods_receipt RELATED relations and the
+ *       key is the only duplicate authority), each carrying the COST
+ *       SNAPSHOT (final correction #3): unitCost = PO line unitPrice
+ *       converted to a per-inventory-UOM cost via the normalization service,
+ *       totalCost = normalizedQuantity × unitCost computed by the writer;
+ *   (b) upserts one PurchaseLineFulfillment GOODS_RECEIPT row per line
+ *       (final correction #1) — quantity converted to the PO line's uom,
+ *       amount = convertedQty × PO line unitPrice — and RECOMPUTES the
+ *       purchase `operationalLoadedAmount` + status from the fulfillment
+ *       ledger (absolute recompute, shared with the loading flow);
+ *   (c) persists the per-line OVER-RECEIPT SNAPSHOTS (final correction #2):
+ *       orderedQuantitySnapshot (PO ordered quantity in the receipt line's
+ *       uom), receivedQuantitySnapshot (all CONFIRMED receipt quantities of
+ *       that purchase line in the receipt line's uom, INCLUDING this one)
+ *       and overReceivedSnapshot = max(0, received − ordered) — immutable
+ *       history, never recomputed afterwards;
+ *   (d) writes purchase_document ↔ goods_receipt RELATED relations and the
  *       audit + timeline rows — all atomic.
  * reverse() — ONE serializable transaction: reason REQUIRED, compensating
  *             movements (swapped endpoints, reversalOfMovementId linkage,
- *             key `grn-rev:{receiptId}:line:{lineId}`), the operational
- *             amount is rolled back and the purchase status recomputed; the
- *             original receipt is REVERSED forever.
+ *             key `grn-rev:{receiptId}:line:{lineId}`, unitCost copied and
+ *             totalCost NEGATED), the GOODS_RECEIPT fulfillment rows are
+ *             marked reversedAt (kept for history) and the purchase
+ *             operational amount + status are recomputed from the ledger;
+ *             the original receipt is REVERSED forever and its snapshots
+ *             stay untouched (immutable).
  *
  * The `overReceipt` flag is DERIVED (no column): cumulative received across
  * CONFIRMED receipts of the purchase line (converted into the PO line's uom)
@@ -89,6 +103,7 @@ export class GoodsReceiptService {
     private readonly relations: DocumentRelationService,
     private readonly inventory: InventoryService,
     private readonly normalization: NormalizationService,
+    private readonly fulfillments: PurchaseFulfillmentService,
   ) {}
 
   // ───────────────────────── create (DRAFT) ─────────────────────────
@@ -210,18 +225,32 @@ export class GoodsReceiptService {
         const purchaseLineIds = receipt.lines.map((l) => l.purchaseLineId);
         const purchaseLines = await tx.purchaseLine.findMany({
           where: { id: { in: purchaseLineIds }, companyId },
-          select: { id: true, productVariantId: true },
+          select: {
+            id: true,
+            productVariantId: true,
+            orderedQuantity: true,
+            uomId: true,
+            unitPrice: true,
+          },
         });
-        const variantByLine = new Map(purchaseLines.map((l) => [l.id, l.productVariantId]));
+        const poLineByLine = new Map(purchaseLines.map((l) => [l.id, l]));
 
         for (const line of receipt.lines) {
-          const productVariantId = variantByLine.get(line.purchaseLineId);
-          if (!productVariantId) {
+          const poLine = poLineByLine.get(line.purchaseLineId);
+          if (!poLine) {
             throw new NotFoundError('Purchase line not found', { purchaseLineId: line.purchaseLineId });
           }
+          // Cost snapshot (final #3): PO unit price per ONE inventory-UOM unit
+          // (unitPrice ÷ factor(purchaseUom → inventoryUom)); the writer
+          // multiplies it by the normalized quantity into totalCost.
+          const unitCost = await this.fulfillments.unitCostPerInventoryUom(
+            companyId,
+            poLine.productVariantId,
+            poLine,
+          );
           await this.normalization.insertStockMovement(tx, {
             companyId,
-            productVariantId,
+            productVariantId: poLine.productVariantId,
             quantity: line.actualQuantity,
             uomId: line.uomId,
             direction: 'IN',
@@ -233,6 +262,23 @@ export class GoodsReceiptService {
             sourceEntityId: receipt.id,
             idempotencyKey: `grn:${receipt.id}:line:${line.id}`,
             createdBy: actor.id,
+            unitCostSnapshot: unitCost,
+          });
+          // Fulfillment ledger row (final #1): THIS receipt's contribution to
+          // the purchase line, in the PO line's uom.
+          const converted = await this.normalization.convertBetween(
+            companyId,
+            poLine.productVariantId,
+            line.actualQuantity,
+            line.uomId,
+            poLine.uomId,
+          );
+          await this.fulfillments.upsertGoodsReceiptFulfillment(tx, companyId, {
+            purchaseLineId: line.purchaseLineId,
+            goodsReceiptId: receipt.id,
+            quantity: converted,
+            uomId: poLine.uomId,
+            amount: converted.times(poLine.unitPrice),
           });
         }
 
@@ -241,9 +287,14 @@ export class GoodsReceiptService {
           data: { status: GoodsReceiptStatus.CONFIRMED },
         });
 
-        // Purchase operational amount += converted actual × PO unitPrice,
-        // status upgrade-only (receipt coverage drives it).
-        await this.applyPurchaseOperationalState(tx, companyId, purchase.id, receipt.lines, 'confirm');
+        // Over-receipt snapshots (final #2) — after the status flip above, so
+        // "all CONFIRMED receipt quantities" naturally includes THIS receipt.
+        await this.persistOverReceiptSnapshots(tx, companyId, receipt);
+
+        // Purchase operational amount + status recomputed from the fulfillment
+        // ledger (GRN + direct-loading rows; absolute recompute, shared with
+        // the loading flow).
+        await this.fulfillments.recomputeDocuments(tx, companyId, [purchase.id], 'confirm');
 
         // purchase_document ↔ goods_receipt RELATED relations (both ways).
         await this.relations.createRelation(
@@ -335,7 +386,10 @@ export class GoodsReceiptService {
 
         // Compensating movements: one per original, endpoints swapped, the
         // original's normalized values reused verbatim (the compensation
-        // un-does exactly what was applied).
+        // un-does exactly what was applied). Cost snapshots (final #3): the
+        // compensating row copies the original's unitCost and carries the
+        // NEGATED totalCost — the valuation is un-done without ever touching
+        // the original row.
         const originals = await tx.stockMovement.findMany({
           where: {
             sourceEntityType: 'PURCHASE_RECEIPT',
@@ -363,6 +417,8 @@ export class GoodsReceiptService {
             idempotencyKey: `grn-rev:${receipt.id}:line:${lineId}`,
             reversalOfMovementId: original.id,
             createdBy: actor.id,
+            unitCostSnapshot: original.unitCostSnapshot,
+            totalCostSnapshot: original.totalCostSnapshot === null ? null : D(original.totalCostSnapshot).neg(),
           });
         }
 
@@ -371,8 +427,16 @@ export class GoodsReceiptService {
           data: { status: GoodsReceiptStatus.REVERSED, reversalReason: reason },
         });
 
-        // Operational rollback on the purchase (+ status may fall back).
-        await this.applyPurchaseOperationalState(tx, companyId, receipt.purchaseDocumentId, receipt.lines, 'reverse');
+        // The receipt's fulfillment rows stay (history) but flip reversedAt;
+        // the purchase operational amount + status are then recomputed from
+        // the live ledger rows only (absolute recompute — may fall back).
+        await this.fulfillments.reverseBySource(tx, PurchaseFulfillmentType.GOODS_RECEIPT, receipt.id);
+        await this.fulfillments.recomputeDocuments(
+          tx,
+          companyId,
+          [receipt.purchaseDocumentId],
+          'reverse',
+        );
 
         await this.auditService.recordTx(tx, {
           entityType: 'goods_receipt',
@@ -648,117 +712,62 @@ export class GoodsReceiptService {
   }
 
   /**
-   * Purchase operational amount + status, driven by receipt coverage.
-   *   confirm: operationalLoadedAmount += Σ converted(actual) × unitPrice of
-   *            THIS receipt's lines; status upgrade-only.
-   *   reverse: the SAME amount is subtracted (exact rollback by
-   *            construction); status recomputed from the remaining active
-   *            (CONFIRMED) receipts, may fall back to ORDER_PLACED.
+   * Over-receipt snapshots (final correction #2) — persisted ONCE, at confirm
+   * time, and NEVER recomputed (immutable reporting history):
+   *   - orderedQuantitySnapshot:  the PO line's ordered quantity expressed in
+   *     THIS receipt line's uom (converted only when the uoms differ);
+   *   - receivedQuantitySnapshot: every CONFIRMED receipt quantity of the
+   *     purchase line converted into THIS receipt line's uom, INCLUDING this
+   *     receipt itself (the status flip above makes the "all CONFIRMED"
+   *     query see it);
+   *   - overReceivedSnapshot:     max(0, received − ordered).
+   * A later reversal (or any other recalculation) never rewrites them.
    */
-  private async applyPurchaseOperationalState(
+  private async persistOverReceiptSnapshots(
     tx: Client,
     companyId: string,
-    purchaseDocumentId: string,
-    receiptLines: { purchaseLineId: string; actualQuantity: Prisma.Decimal; uomId: string }[],
-    mode: 'confirm' | 'reverse',
+    receipt: { id: string; purchaseDocumentId: string; lines: { id: string; purchaseLineId: string; actualQuantity: Prisma.Decimal; uomId: string }[] },
   ): Promise<void> {
-    const doc = await tx.purchaseDocument.findFirst({
-      where: { id: purchaseDocumentId, companyId },
-      select: {
-        id: true,
-        status: true,
-        operationalLoadedAmount: true,
-        lines: {
-          select: { id: true, orderedQuantity: true, uomId: true, unitPrice: true, productVariantId: true },
+    if (receipt.lines.length === 0) return;
+    const purchaseLineIds = [...new Set(receipt.lines.map((l) => l.purchaseLineId))];
+    const [purchaseLines, confirmedLines] = await Promise.all([
+      tx.purchaseLine.findMany({
+        where: { id: { in: purchaseLineIds }, purchaseDocumentId: receipt.purchaseDocumentId, companyId },
+        select: { id: true, orderedQuantity: true, uomId: true, productVariantId: true },
+      }),
+      tx.goodsReceiptLine.findMany({
+        where: {
+          purchaseLineId: { in: purchaseLineIds },
+          receipt: { companyId, status: GoodsReceiptStatus.CONFIRMED },
         },
-      },
-    });
-    if (!doc) return;
-    // Serialize concurrent amount/status updates on the same purchase
-    // document (a plain `increment` would be lost-update prone AND a SQL
-    // NULL + x stays NULL on the nullable column — absolute set instead).
-    await tx.$queryRaw`SELECT id FROM purchase_documents WHERE id = ${doc.id}::uuid FOR UPDATE`;
-    const lineById = new Map(doc.lines.map((l) => [l.id, l]));
+        select: { purchaseLineId: true, actualQuantity: true, uomId: true },
+      }),
+    ]);
+    const poByLine = new Map(purchaseLines.map((l) => [l.id, l]));
 
-    // This receipt's contribution (confirm and reverse use the SAME
-    // conversion, so the pair cancels exactly).
-    let delta = D(0);
-    for (const line of receiptLines) {
-      const target = lineById.get(line.purchaseLineId);
-      if (!target) continue;
-      const converted = await this.normalization.convertBetween(
-        companyId,
-        target.productVariantId,
-        line.actualQuantity,
-        line.uomId,
-        target.uomId,
-      );
-      delta = delta.plus(converted.times(target.unitPrice));
-    }
+    for (const line of receipt.lines) {
+      const poLine = poByLine.get(line.purchaseLineId);
+      if (!poLine) continue;
+      const toLineUom = (quantity: Prisma.Decimal, fromUomId: string): Promise<Prisma.Decimal> =>
+        fromUomId === line.uomId
+          ? Promise.resolve(D(quantity))
+          : this.normalization.convertBetween(companyId, poLine.productVariantId, quantity, fromUomId, line.uomId);
 
-    // Receipt coverage over EVERY line of the document (the flipped receipt
-    // status participates as of the update above).
-    const activeReceiptLines = await tx.goodsReceiptLine.findMany({
-      where: {
-        receipt: { purchaseDocumentId, companyId, status: GoodsReceiptStatus.CONFIRMED },
-      },
-      select: { purchaseLineId: true, actualQuantity: true, uomId: true },
-    });
-    const receivedByLine = new Map<string, Prisma.Decimal>();
-    for (const line of activeReceiptLines) {
-      const target = lineById.get(line.purchaseLineId);
-      if (!target) continue;
-      const converted = await this.normalization.convertBetween(
-        companyId,
-        target.productVariantId,
-        line.actualQuantity,
-        line.uomId,
-        target.uomId,
-      );
-      receivedByLine.set(
-        line.purchaseLineId,
-        D(receivedByLine.get(line.purchaseLineId) ?? 0).plus(converted),
-      );
+      const ordered = await toLineUom(poLine.orderedQuantity, poLine.uomId);
+      let received = D(0);
+      for (const confirmed of confirmedLines.filter((c) => c.purchaseLineId === line.purchaseLineId)) {
+        received = received.plus(await toLineUom(confirmed.actualQuantity, confirmed.uomId));
+      }
+      const over = received.gt(ordered) ? received.minus(ordered) : D(0);
+      await tx.goodsReceiptLine.update({
+        where: { id: line.id },
+        data: {
+          orderedQuantitySnapshot: roundQuantity(ordered),
+          receivedQuantitySnapshot: roundQuantity(received),
+          overReceivedSnapshot: roundQuantity(over),
+        },
+      });
     }
-    let someReceived = false;
-    let allFullyReceived = doc.lines.length > 0;
-    for (const line of doc.lines) {
-      const received = receivedByLine.get(line.id) ?? D(0);
-      if (received.gt(0)) someReceived = true;
-      if (received.lt(D(line.orderedQuantity))) allFullyReceived = false;
-    }
-
-    const status = this.purchaseStatusAfter(doc.status, someReceived, allFullyReceived, mode);
-    const currentAmount = doc.operationalLoadedAmount ? D(doc.operationalLoadedAmount) : D(0);
-    const nextAmount =
-      mode === 'confirm' ? currentAmount.plus(delta) : currentAmount.minus(delta);
-    await tx.purchaseDocument.update({
-      where: { id: doc.id },
-      data: {
-        operationalLoadedAmount: nextAmount,
-        ...(status ? { status: status as PurchaseDocumentStatus } : {}),
-      },
-    });
-  }
-
-  /** Upgrade-only on confirm; outright recompute on reverse (may fall back). */
-  private purchaseStatusAfter(
-    current: string,
-    someReceived: boolean,
-    allFullyReceived: boolean,
-    mode: 'confirm' | 'reverse',
-  ): string | null {
-    const applicable =
-      mode === 'confirm'
-        ? ['ORDER_PLACED', 'PARTIALLY_LOADED']
-        : ['ORDER_PLACED', 'PARTIALLY_LOADED', 'COMPLETED'];
-    if (!applicable.includes(current)) return null;
-    if (mode === 'confirm') {
-      if (!someReceived) return null;
-      return allFullyReceived ? 'COMPLETED' : 'PARTIALLY_LOADED';
-    }
-    if (!someReceived) return 'ORDER_PLACED';
-    return allFullyReceived ? 'COMPLETED' : 'PARTIALLY_LOADED';
   }
 
   /**

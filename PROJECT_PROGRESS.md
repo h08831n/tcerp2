@@ -246,6 +246,13 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - inventory.negative_stock_policy setting (ALLOW/WARN/BLOCK); POST /inventory/transfer (INTERNAL→INTERNAL preserves company total)
 - 25 new g6 tests (170 suites, 626/626 integration); live smoke A (direct, mixed kg/ton: 40,000kg→40ton, amounts 14.2B/13.6B exact, no internal stock) and B (GRN 101t in, loading 25,000kg→25t out → stock 76, reversal → back to 101, opLoaded rolled back)
 
+### Phase 6 final corrections (COMPLETED — commits 13eb22e schema + final impl)
+- PurchaseLineFulfillment ledger (GOODS_RECEIPT | DIRECT_LOADING rows, unique per line+type+source): received / directLoaded / fulfilled coexist — GET /api/purchase/:id/fulfillment reports all three (ordered/received/directLoaded/fulfilled/remaining/overReceived + amount split)
+- GRN over-receipt snapshots persisted at confirm (ordered/received/overReceived per line, immutable)
+- StockMovement unitCostSnapshot/totalCostSnapshot (immutable valuation foundation for Accounting): GRN cost = PO unitPrice converted per inventory-UOM; loading OUT mirrors linked PO cost; reversals negate totalCost and never touch originals
+- operationalLoadedAmount now recomputed from the fulfillment ledger under FOR UPDATE (no last-write-wins)
+- Tests: 173 suites — 629/629 integration (g6f-01..03); live smoke: PO 100t = GRN 60t + direct loading 40t → fulfilled 100t COMPLETED, ledger rows verified
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

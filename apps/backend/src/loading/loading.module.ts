@@ -5,6 +5,7 @@ import { PartiesModule } from '../parties/parties.module';
 import { DocumentFlowModule } from '../document-flow/document-flow.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
+import { PurchaseModule } from '../purchase/purchase.module';
 
 /**
  * Loading (Phase 6): header + lines + allocations with the ratified
@@ -13,7 +14,7 @@ import { ApprovalsModule } from '../approvals/approvals.module';
  * resolution + stock), ApprovalsModule (debt-gate release decisions).
  */
 @Module({
-  imports: [PartiesModule, DocumentFlowModule, InventoryModule, ApprovalsModule],
+  imports: [PartiesModule, DocumentFlowModule, InventoryModule, ApprovalsModule, PurchaseModule],
   controllers: [LoadingController],
   providers: [LoadingService],
   exports: [LoadingService],

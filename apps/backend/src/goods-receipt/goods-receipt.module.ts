@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PartiesModule } from '../parties/parties.module';
 import { DocumentFlowModule } from '../document-flow/document-flow.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { PurchaseModule } from '../purchase/purchase.module';
 import { GoodsReceiptController } from './goods-receipt.controller';
 import { GoodsReceiptService } from './goods-receipt.service';
 
@@ -12,7 +13,7 @@ import { GoodsReceiptService } from './goods-receipt.service';
  * SequencesService is global (GRN numbering).
  */
 @Module({
-  imports: [PartiesModule, DocumentFlowModule, InventoryModule],
+  imports: [PartiesModule, DocumentFlowModule, InventoryModule, PurchaseModule],
   controllers: [GoodsReceiptController],
   providers: [GoodsReceiptService],
   exports: [GoodsReceiptService],

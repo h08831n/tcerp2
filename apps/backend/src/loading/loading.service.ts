@@ -22,6 +22,8 @@ import {
 } from '../common/errors';
 import { D, roundQuantity } from '../common/utils/money';
 import { NormalizationService } from '../inventory/normalization.service';
+import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
+import { PurchaseFulfillmentType } from '@prisma/client';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import {
@@ -122,12 +124,20 @@ type MovementEndpoints = {
  *       (ALLOCATION_UOM_INCOMPATIBLE when no conversion exists);
  *   (b) generates one StockMovement per loading line ALONG THE ROUTE
  *       (idempotencyKey `loading:{loadingId}:line:{lineId}` — the unique key
- *       is the only duplicate authority, ON CONFLICT DO NOTHING);
- *   (c) recomputes `operationalLoadedAmount` on every touched sales/purchase
- *       document from the TOTAL loaded quantities (converted to each
- *       document line's uom) × line.unitPrice and recomputes the document
- *       status → PARTIALLY_LOADED / COMPLETED (only from the document's
- *       "active" statuses);
+ *       is the only duplicate authority, ON CONFLICT DO NOTHING), each with
+ *       the COST SNAPSHOT of its purchase allocation when one exists (final
+ *       correction #3 — PO unit price per inventory UOM, totalCost computed
+ *       by the movement writer);
+ *   (b2) upserts PurchaseLineFulfillment DIRECT_LOADING rows for purchase-line
+ *       allocations of DIRECT_SUPPLIER_TO_CUSTOMER loadings (final correction
+ *       #1 — quantity in the PO line's uom, amount = quantity × unitPrice;
+ *       separate rows that never overwrite GOODS_RECEIPT rows);
+ *   (c) recomputes `operationalLoadedAmount` + status on every touched
+ *       document: PURCHASE documents from the fulfillment LEDGER (absolute
+ *       recompute, shared with the goods-receipt flow), SALES documents from
+ *       the TOTAL loaded quantities (converted to each document line's uom) ×
+ *       line.unitPrice → PARTIALLY_LOADED / COMPLETED (only from the
+ *       document's "active" statuses);
  *   (d) applies the DEBT GATE (REQUIREMENTS §20): a customer whose
  *       PartyOperationalBalance.balance > 0 gets a PENDING ApprovalRequest
  *       (RELEASE_DRIVER_INFO) and driverInfoRestricted = true — the debt
@@ -158,6 +168,7 @@ export class LoadingService {
     private readonly inventory: InventoryService,
     private readonly approvals: ApprovalRequestService,
     private readonly normalization: NormalizationService,
+    private readonly fulfillments: PurchaseFulfillmentService,
   ) {}
 
   // ───────────────────────── create (DRAFT) ─────────────────────────
@@ -496,7 +507,11 @@ export class LoadingService {
           { excludeLoadingId: loading.id },
         );
 
-        // (b) movements ALONG THE ROUTE (Integrity Gate #10).
+        // (b) movements ALONG THE ROUTE (Integrity Gate #10). Cost snapshots
+        // (final #3): a line allocated to a PURCHASE line carries that PO
+        // line's per-inventory-UOM cost (same conversion as the receipt
+        // movements); without a purchase allocation the movement has no cost.
+        const unitCosts = await this.lineUnitCosts(companyId, loading.lines, purchaseLines);
         const { perLine, warehouseId } = await this.resolveRouteEndpoints(
           tx,
           companyId,
@@ -506,10 +521,34 @@ export class LoadingService {
           salesLines,
           purchaseLines,
         );
-        await this.generateMovements(tx, loading, loading.lines, perLine, effectiveUoms, actor.id);
+        await this.generateMovements(tx, loading, loading.lines, perLine, effectiveUoms, actor.id, unitCosts);
 
-        // (c) operational loaded amounts + document status recompute (full
-        // recompute from the allocations — confirm and reverse share it).
+        // (b2) fulfillment ledger (final correction #1): DIRECT
+        // supplier→customer loadings contribute DIRECT_LOADING rows to their
+        // purchase lines — separate from (never overwriting) GOODS_RECEIPT
+        // rows. Warehouse routes keep the allocation guard but do not touch
+        // the purchase fulfillment ledger.
+        if (loading.route === LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER) {
+          for (const line of loading.lines) {
+            for (const allocation of line.allocations ?? []) {
+              if (!allocation.purchaseLineId) continue;
+              const target = purchaseLines.get(allocation.purchaseLineId);
+              if (!target) continue;
+              await this.fulfillments.upsertDirectLoadingFulfillment(tx, companyId, {
+                purchaseLineId: allocation.purchaseLineId,
+                loadingId: loading.id,
+                quantity: converted.get(allocation) ?? D(0),
+                uomId: target.uomId,
+                amount: D(converted.get(allocation) ?? 0).times(target.unitPrice),
+              });
+            }
+          }
+        }
+
+        // (c) operational loaded amounts + document status: SALES documents
+        // recompute from the allocations (full recompute), PURCHASE documents
+        // recompute from the fulfillment ledger (absolute — GRN + direct
+        // loading rows; confirm and reverse share it).
         const docIds = {
           sales: new Set([...salesLines.values()].map((l) => l.documentId)),
           purchase: new Set([...purchaseLines.values()].map((l) => l.documentId)),
@@ -588,10 +627,13 @@ export class LoadingService {
   /**
    * CONFIRMED → REVERSED with a REQUIRED reason. One atomic transaction —
    * see the class doc. The compensating movements swap the original
-   * endpoints and reference the original via reversalOfMovementId; the
-   * idempotency key `loading-rev:{loadingId}:line:{lineId}` makes a re-run a
-   * no-op (a reversed loading is rejected before anything is written, so
-   * this only protects against pathological races).
+   * endpoints and reference the original via reversalOfMovementId (unitCost
+   * copied, totalCost NEGATED — final correction #3); the DIRECT_LOADING
+   * fulfillment rows flip reversedAt (kept for history) and the purchase
+   * operational state recomputes from the live ledger; the idempotency key
+   * `loading-rev:{loadingId}:line:{lineId}` makes a re-run a no-op (a
+   * reversed loading is rejected before anything is written, so this only
+   * protects against pathological races).
    */
   async reverse(
     companyId: string,
@@ -619,7 +661,10 @@ export class LoadingService {
 
         // Compensating movements: one per original, endpoints swapped,
         // normalized values reused verbatim (the compensation un-does the
-        // exact normalized quantity that was applied).
+        // exact normalized quantity that was applied). Cost snapshots (final
+        // #3): the compensating row copies the original's unitCost and
+        // carries the NEGATED totalCost — the valuation is un-done without
+        // ever touching the original row.
         const originals = await tx.stockMovement.findMany({
           where: {
             sourceEntityType: 'LOADING',
@@ -648,17 +693,22 @@ export class LoadingService {
             idempotencyKey: `loading-rev:${loading.id}:line:${lineId}`,
             reversalOfMovementId: original.id,
             createdBy: actor.id,
+            unitCostSnapshot: original.unitCostSnapshot,
+            totalCostSnapshot: original.totalCostSnapshot === null ? null : D(original.totalCostSnapshot).neg(),
           });
           if (inserted) created += 1;
         }
 
-        // Operational rollback: full recompute over the remaining active
-        // loadings (this one drops out of the filter below once REVERSED).
+        // Operational rollback: the DIRECT_LOADING fulfillment rows flip
+        // reversedAt (kept for history) and the purchase documents recompute
+        // from the live ledger (this loading drops out once REVERSED); sales
+        // documents recompute from the remaining active loadings' allocations.
         const docIds = await this.loadingDocumentIds(tx, companyId, loading.lines);
         await tx.loading.update({
           where: { id: loading.id },
           data: { status: LoadingStatus.REVERSED, reversalReason: reason },
         });
+        await this.fulfillments.reverseBySource(tx, PurchaseFulfillmentType.DIRECT_LOADING, loading.id);
         await this.recomputeOperationalState(tx, companyId, docIds, 'reverse');
 
         // The debt-gate release request (if any) dies with the loading.
@@ -871,6 +921,10 @@ export class LoadingService {
    * the line's own, else the variant (else template) default; the
    * normalizedQuantity/inventoryUom pair is computed by the normalization
    * service (Integrity Gate #1).
+   *
+   * `unitCosts` (final correction #3) carries the per-line cost snapshot (per
+   * ONE inventory-UOM unit) — the writer multiplies it by the normalized
+   * quantity into totalCostSnapshot. Absent/null → NULL cost columns.
    */
   async generateMovements(
     tx: Client,
@@ -879,6 +933,7 @@ export class LoadingService {
     endpoints: Map<object, MovementEndpoints>,
     effectiveUoms: Map<object, string>,
     actorId: string,
+    unitCosts?: Map<object, Prisma.Decimal | null>,
   ): Promise<number> {
     const direction = loading.route === LoadingRoute.SUPPLIER_TO_WAREHOUSE ? 'IN' : 'OUT';
     let created = 0;
@@ -903,10 +958,42 @@ export class LoadingService {
         sourceEntityId: loading.id,
         idempotencyKey: `loading:${loading.id}:line:${(line as { id?: string }).id ?? ''}`,
         createdBy: actorId,
+        unitCostSnapshot: unitCosts?.get(line) ?? null,
       });
       if (inserted) created += 1; // already moved — never duplicate
     }
     return created;
+  }
+
+  /**
+   * Per-line movement cost snapshots (final correction #3): a loading line
+   * allocated to a PURCHASE line is valued at that PO line's unit price,
+   * converted to a per-inventory-UOM cost (unitPrice ÷ factor(purchaseUom →
+   * inventoryUom) — the SAME conversion the goods-receipt movements use, so
+   * received and directly-loaded goods carry the same cost). Lines without a
+   * purchase allocation get no cost (null). When a line carries several
+   * purchase allocations, the FIRST one (allocation order) sets the cost —
+   * documented convention, one PO line per movement row.
+   */
+  private async lineUnitCosts(
+    companyId: string,
+    lines: { productVariantId: string; allocations?: LoadingAllocationInput[] }[],
+    purchaseLines: Map<string, AllocationLineRow>,
+  ): Promise<Map<object, Prisma.Decimal | null>> {
+    const costs = new Map<object, Prisma.Decimal | null>();
+    for (const line of lines) {
+      const purchaseAllocation = (line.allocations ?? []).find((a) => a.purchaseLineId);
+      const target = purchaseAllocation?.purchaseLineId
+        ? purchaseLines.get(purchaseAllocation.purchaseLineId)
+        : undefined;
+      costs.set(
+        line,
+        target
+          ? await this.fulfillments.unitCostPerInventoryUom(companyId, line.productVariantId, target)
+          : null,
+      );
+    }
+    return costs;
   }
 
   // ───────────────────────── route endpoint resolution ─────────────────────────
@@ -1433,8 +1520,16 @@ export class LoadingService {
   }
 
   /**
-   * (c) operational loaded amounts + status recompute — FULL recompute from
-   * the allocations of every non-cancelled AND non-reversed loading: each
+   * (c) operational loaded amounts + status recompute.
+   *
+   * PURCHASE documents (final correction #1): absolute recompute from the
+   * PurchaseLineFulfillment LEDGER (GOODS_RECEIPT + DIRECT_LOADING rows,
+   * reversedAt IS NULL) — replacing the old last-write-wins allocation
+   * recompute; a purchase document touched by ANY loading reflects the
+   * receipts and direct loadings of ALL its lines.
+   *
+   * SALES documents keep the allocation-driven FULL recompute from the
+   * allocations of every non-cancelled AND non-reversed loading: each
    * allocation is converted from its loading line's uom into the DOCUMENT
    * line's uom (Integrity Gate #3), the amount = Σ converted × line.unitPrice
    * (exact Decimal). Shared by confirm (upgrade-only status) and reverse
@@ -1451,35 +1546,23 @@ export class LoadingService {
     };
     if (docIds.sales.size === 0 && docIds.purchase.size === 0) return;
 
+    await this.fulfillments.recomputeDocuments(tx, companyId, docIds.purchase, mode);
+    if (docIds.sales.size === 0) return;
+
     // Variant defaults for stored loading lines without an explicit uom
-    // (one pre-pass over every allocation of the touched documents).
-    const prePass = async (kind: 'sales' | 'purchase') => {
-      const ids = kind === 'sales' ? docIds.sales : docIds.purchase;
-      if (ids.size === 0) return [];
-      return kind === 'sales'
-        ? tx.salesLine.findMany({
-            where: { salesDocumentId: { in: [...ids] }, companyId },
-            select: {
-              loadingAllocations: {
-                where: { loadingLine: { loading: activeLoadingFilter } },
-                select: { loadingLine: { select: { productVariantId: true } } },
-              },
-            },
-          })
-        : tx.purchaseLine.findMany({
-            where: { purchaseDocumentId: { in: [...ids] }, companyId },
-            select: {
-              loadingAllocations: {
-                where: { loadingLine: { loading: activeLoadingFilter } },
-                select: { loadingLine: { select: { productVariantId: true } } },
-              },
-            },
-          });
-    };
-    const [salesPre, purchasePre] = await Promise.all([prePass('sales'), prePass('purchase')]);
+    // (one pre-pass over every sales allocation of the touched documents).
+    const salesPre = await tx.salesLine.findMany({
+      where: { salesDocumentId: { in: [...docIds.sales] }, companyId },
+      select: {
+        loadingAllocations: {
+          where: { loadingLine: { loading: activeLoadingFilter } },
+          select: { loadingLine: { select: { productVariantId: true } } },
+        },
+      },
+    });
 
     const variantIds = new Set<string>();
-    for (const row of [...salesPre, ...purchasePre]) {
+    for (const row of salesPre) {
       for (const alloc of row.loadingAllocations) variantIds.add(alloc.loadingLine.productVariantId);
     }
     const variants =
@@ -1496,85 +1579,48 @@ export class LoadingService {
       ]),
     );
 
-    // ── Per-document aggregation (one update per document) ──
-    for (const kind of ['sales', 'purchase'] as const) {
-      const ids = kind === 'sales' ? docIds.sales : docIds.purchase;
-      for (const docId of ids) {
-        const doc =
-          kind === 'sales'
-            ? await tx.salesDocument.findFirst({
-                where: { id: docId, companyId },
+    // ── Per-sales-document aggregation (one update per document) ──
+    for (const docId of docIds.sales) {
+      const doc = await tx.salesDocument.findFirst({
+        where: { id: docId, companyId },
+        select: {
+          id: true,
+          status: true,
+          lines: {
+            select: {
+              id: true,
+              orderedQuantity: true,
+              uomId: true,
+              unitPrice: true,
+              loadingAllocations: {
+                where: { loadingLine: { loading: activeLoadingFilter } },
                 select: {
-                  id: true,
-                  status: true,
-                  lines: {
-                    select: {
-                      id: true,
-                      orderedQuantity: true,
-                      uomId: true,
-                      unitPrice: true,
-                      loadingAllocations: {
-                        where: { loadingLine: { loading: activeLoadingFilter } },
-                        select: {
-                          allocatedQuantity: true,
-                          loadingLine: { select: { productVariantId: true, uomId: true } },
-                        },
-                      },
-                    },
-                  },
+                  allocatedQuantity: true,
+                  loadingLine: { select: { productVariantId: true, uomId: true } },
                 },
-              })
-            : await tx.purchaseDocument.findFirst({
-                where: { id: docId, companyId },
-                select: {
-                  id: true,
-                  status: true,
-                  lines: {
-                    select: {
-                      id: true,
-                      orderedQuantity: true,
-                      uomId: true,
-                      unitPrice: true,
-                      loadingAllocations: {
-                        where: { loadingLine: { loading: activeLoadingFilter } },
-                        select: {
-                          allocatedQuantity: true,
-                          loadingLine: { select: { productVariantId: true, uomId: true } },
-                        },
-                      },
-                    },
-                  },
-                },
-              });
-        if (!doc) continue;
-        let loadedAmount = D(0);
-        let someLoaded = false;
-        let allFullyLoaded = doc.lines.length > 0;
-        for (const line of doc.lines) {
-          const loaded = await this.lineLoadedQuantity(companyId, line, variantMap);
-          loadedAmount = loadedAmount.plus(loaded.times(line.unitPrice));
-          if (loaded.gt(0)) someLoaded = true;
-          if (loaded.lt(D(line.orderedQuantity))) allFullyLoaded = false;
-        }
-        const status = this.documentStatusAfter(kind, doc.status, someLoaded, allFullyLoaded, mode);
-        if (kind === 'sales') {
-          await tx.salesDocument.update({
-            where: { id: doc.id },
-            data: {
-              operationalLoadedAmount: loadedAmount,
-              ...(status ? { status: status as SalesDocumentStatus } : {}),
+              },
             },
-          });
-        } else {
-          await tx.purchaseDocument.update({
-            where: { id: doc.id },
-            data: {
-              operationalLoadedAmount: loadedAmount,
-              ...(status ? { status: status as PurchaseDocumentStatus } : {}),
-            },
-          });
-        }
+          },
+        },
+      });
+      if (!doc) continue;
+      let loadedAmount = D(0);
+      let someLoaded = false;
+      let allFullyLoaded = doc.lines.length > 0;
+      for (const line of doc.lines) {
+        const loaded = await this.lineLoadedQuantity(companyId, line, variantMap);
+        loadedAmount = loadedAmount.plus(loaded.times(line.unitPrice));
+        if (loaded.gt(0)) someLoaded = true;
+        if (loaded.lt(D(line.orderedQuantity))) allFullyLoaded = false;
       }
+      const status = this.documentStatusAfter('sales', doc.status, someLoaded, allFullyLoaded, mode);
+      await tx.salesDocument.update({
+        where: { id: doc.id },
+        data: {
+          operationalLoadedAmount: loadedAmount,
+          ...(status ? { status: status as SalesDocumentStatus } : {}),
+        },
+      });
     }
   }
 

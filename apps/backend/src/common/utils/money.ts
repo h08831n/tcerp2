@@ -16,6 +16,8 @@ export type DecimalInput = string | number | Prisma.Decimal | null | undefined;
 export const MONEY_SCALE = 4;
 /** Scale of quantity columns (Decimal(18,4)). */
 export const QTY_SCALE = 4;
+/** Scale of the StockMovement.unitCostSnapshot column (Decimal(20,6)). */
+export const UNIT_COST_SCALE = 6;
 
 /** Coerce any accepted input to an exact Prisma.Decimal (null/undefined → 0). */
 export function D(value: DecimalInput): Prisma.Decimal {
@@ -31,6 +33,11 @@ export function roundMoney(value: Prisma.Decimal): Prisma.Decimal {
 /** Round to the quantity column scale. */
 export function roundQuantity(value: Prisma.Decimal): Prisma.Decimal {
   return value.toDecimalPlaces(QTY_SCALE, Prisma.Decimal.ROUND_HALF_UP);
+}
+
+/** Round to the movement unit-cost snapshot column scale (Decimal(20,6)). */
+export function roundUnitCost(value: Prisma.Decimal): Prisma.Decimal {
+  return value.toDecimalPlaces(UNIT_COST_SCALE, Prisma.Decimal.ROUND_HALF_UP);
 }
 
 /** Prisma column representation for a Decimal value. */

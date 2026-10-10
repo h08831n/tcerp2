@@ -70,6 +70,19 @@ export class PurchaseController {
     return this.purchaseService.getById(companyId, id);
   }
 
+  /**
+   * Fulfillment report (final corrections #1/#2): per-line received (goods
+   * receipts) / direct-loaded / fulfilled quantities + amounts, over-receipt
+   * headroom, and the raw fulfillment ledger rows (reversed included for
+   * history, excluded from the operational sums).
+   */
+  @Get(':id/fulfillment')
+  @RequirePermissions('purchase.view')
+  async fulfillment(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = await this.companyIdOf(user, request);
+    return this.purchaseService.fulfillment(companyId, id);
+  }
+
   @Patch(':id')
   @RequirePermissions('purchase.edit')
   async update(

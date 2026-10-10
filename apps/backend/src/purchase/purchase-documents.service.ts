@@ -305,6 +305,98 @@ export class PurchaseDocumentsService {
     return doc;
   }
 
+  /**
+   * Fulfillment report (final corrections #1 + #2) — per purchase line:
+   *   - orderedQuantity, unitPrice (with the line's uom/variant labels);
+   *   - receivedQty        = Σ GOODS_RECEIPT fulfillments (reversedAt IS NULL);
+   *   - directLoadedQty    = Σ DIRECT_LOADING fulfillments (reversedAt IS NULL);
+   *   - fulfilledQty       = receivedQty + directLoadedQty;
+   *   - remainingQuantity  = orderedQuantity − receivedQty (over-receipt
+   *                          headroom; negative once over-received) and
+   *   - overReceivedQuantity = max(0, receivedQty − orderedQuantity);
+   *   - amount split: receivedAmount / directLoadedAmount / fulfilledAmount.
+   * The raw fulfillment rows (INCLUDING reversed ones) are returned per line
+   * for history; the operational sums above always exclude them. The GRN
+   * over-receipt snapshots live on the goods-receipt lines themselves (see
+   * GET /api/goods-receipts/:id).
+   */
+  async fulfillment(companyId: string, id: string) {
+    const doc = await this.prisma.purchaseDocument.findFirst({
+      where: { id, companyId },
+      select: {
+        id: true,
+        documentNumber: true,
+        status: true,
+        operationalLoadedAmount: true,
+        lines: {
+          orderBy: { lineOrder: 'asc' },
+          select: {
+            id: true,
+            orderedQuantity: true,
+            unitPrice: true,
+            productVariant: { select: { id: true, sku: true, nameFa: true } },
+            uom: { select: { id: true, symbol: true, nameFa: true } },
+            fulfillments: { orderBy: { createdAt: 'asc' } },
+          },
+        },
+      },
+    });
+    if (!doc) throw new NotFoundError('Purchase document not found', { id });
+
+    let totalReceivedAmount = new Prisma.Decimal(0);
+    let totalDirectLoadedAmount = new Prisma.Decimal(0);
+    const lines = doc.lines.map((line) => {
+      const live = line.fulfillments.filter((f) => f.reversedAt === null);
+      let receivedQty = new Prisma.Decimal(0);
+      let directLoadedQty = new Prisma.Decimal(0);
+      let receivedAmount = new Prisma.Decimal(0);
+      let directLoadedAmount = new Prisma.Decimal(0);
+      for (const row of live) {
+        if (row.type === 'GOODS_RECEIPT') {
+          receivedQty = receivedQty.plus(row.quantity);
+          receivedAmount = receivedAmount.plus(D(row.amount));
+        } else {
+          directLoadedQty = directLoadedQty.plus(row.quantity);
+          directLoadedAmount = directLoadedAmount.plus(D(row.amount));
+        }
+      }
+      totalReceivedAmount = totalReceivedAmount.plus(receivedAmount);
+      totalDirectLoadedAmount = totalDirectLoadedAmount.plus(directLoadedAmount);
+
+      const ordered = D(line.orderedQuantity);
+      const fulfilledQty = receivedQty.plus(directLoadedQty);
+      return {
+        purchaseLineId: line.id,
+        productVariant: line.productVariant,
+        uom: line.uom,
+        orderedQuantity: line.orderedQuantity,
+        unitPrice: line.unitPrice,
+        receivedQty,
+        directLoadedQty,
+        fulfilledQty,
+        remainingQuantity: ordered.minus(receivedQty),
+        overReceivedQuantity: Prisma.Decimal.max(receivedQty.minus(ordered), new Prisma.Decimal(0)),
+        receivedAmount,
+        directLoadedAmount,
+        fulfilledAmount: receivedAmount.plus(directLoadedAmount),
+        fulfillments: line.fulfillments,
+      };
+    });
+
+    return {
+      purchaseDocumentId: doc.id,
+      documentNumber: doc.documentNumber,
+      status: doc.status,
+      operationalLoadedAmount: doc.operationalLoadedAmount,
+      lines,
+      totals: {
+        receivedAmount: totalReceivedAmount,
+        directLoadedAmount: totalDirectLoadedAmount,
+        fulfilledAmount: totalReceivedAmount.plus(totalDirectLoadedAmount),
+      },
+    };
+  }
+
   /** Lightweight grid projection — 3 queries per page (findMany, count, groupBy). */
   async list(companyId: string, query: PurchaseDocumentQueryDto): Promise<Paginated<unknown>> {
     const where: Prisma.PurchaseDocumentWhereInput = {

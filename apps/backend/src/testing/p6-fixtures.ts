@@ -6,6 +6,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
 import { LoadingService } from '../loading/loading.service';
 import { GoodsReceiptService } from '../goods-receipt/goods-receipt.service';
+import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { SequencesService } from '../sequences/sequences.service';
@@ -61,7 +62,12 @@ export function loadingService(prisma: PrismaClient): LoadingService {
     inventoryService(prisma),
     approvalRequestService(prisma),
     normalizationService(prisma),
+    purchaseFulfillmentService(prisma),
   );
+}
+
+export function purchaseFulfillmentService(prisma: PrismaClient): PurchaseFulfillmentService {
+  return new PurchaseFulfillmentService(prisma as never, normalizationService(prisma));
 }
 
 export function goodsReceiptService(prisma: PrismaClient): GoodsReceiptService {
@@ -76,6 +82,7 @@ export function goodsReceiptService(prisma: PrismaClient): GoodsReceiptService {
     relations,
     inventoryService(prisma),
     normalizationService(prisma),
+    purchaseFulfillmentService(prisma),
   );
 }
 
@@ -120,6 +127,7 @@ export async function mainWarehouse(prisma: PrismaClient, companyId = INTEGRATIO
  */
 export async function cleanupLoading(prisma: PrismaClient, loadingId: string): Promise<void> {
   if (!loadingId) return; // a failed beforeAll/beforeEach can leave '' — never clean up with it
+  await prisma.purchaseLineFulfillment.deleteMany({ where: { type: 'DIRECT_LOADING', sourceId: loadingId } });
   await prisma.approvalRequest.deleteMany({ where: { entityType: 'loading', entityId: loadingId } });
   await prisma.documentRelation.deleteMany({
     where: { OR: [{ fromType: 'loading', fromId: loadingId }, { toType: 'loading', toId: loadingId }] },
@@ -138,6 +146,7 @@ export async function cleanupPurchaseReceive(prisma: PrismaClient, purchaseDocum
 /** Delete one goods receipt + its movements (business rows; audits stay). */
 export async function cleanupGoodsReceipt(prisma: PrismaClient, receiptId: string): Promise<void> {
   if (!receiptId) return;
+  await prisma.purchaseLineFulfillment.deleteMany({ where: { type: 'GOODS_RECEIPT', sourceId: receiptId } });
   await prisma.stockMovement.deleteMany({
     where: { sourceEntityType: { in: ['PURCHASE_RECEIPT', 'RECEIPT_REVERSAL'] }, sourceEntityId: receiptId },
   });
@@ -167,6 +176,7 @@ export async function cleanupCompanyPhase6(prisma: PrismaClient, companyId: stri
   await prisma.approvalRequest.deleteMany({ where: { companyId } });
   await prisma.documentRelation.deleteMany({ where: { companyId } });
   await prisma.stockMovement.deleteMany({ where: { companyId } });
+  await prisma.purchaseLineFulfillment.deleteMany({ where: { companyId } });
   await prisma.goodsReceiptLine.deleteMany({ where: { receipt: { companyId } } });
   await prisma.goodsReceipt.deleteMany({ where: { companyId } });
   await prisma.stockLocation.deleteMany({ where: { companyId } });

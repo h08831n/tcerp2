@@ -449,11 +449,13 @@ sequence, destination = explicit INTERNAL `destinationLocationId`, or a
 `warehouseId`, or the company default warehouse; over-receipt is allowed).
 `confirm()` is ONE SERIALIZABLE transaction: one IN movement per line
 SUPPLIER(po supplier) → INTERNAL(destination) with idempotencyKey
-`grn:{receiptId}:line:{lineId}`; the purchase `operationalLoadedAmount`
-grows by Σ convertedQty(line uom → PO line uom) × line.unitPrice (exact
-rollback on reverse) and the purchase status is recomputed
-(`PARTIALLY_LOADED` / `COMPLETED` from receipt coverage); purchase ↔
-goods_receipt RELATED relations are written both ways. The `overReceipt`
+`grn:{receiptId}:line:{lineId}` (each movement carrying the COST snapshot —
+see final corrections below); a `PurchaseLineFulfillment` GOODS_RECEIPT row
+per line (quantity converted into the PO line's uom, amount = quantity ×
+unitPrice) and the purchase `operationalLoadedAmount` + status RECOMPUTED
+from the fulfillment ledger (`PARTIALLY_LOADED` / `COMPLETED` from fulfilled
+totals); purchase ↔ goods_receipt RELATED relations are written both ways.
+Each line also gets its immutable over-receipt snapshots. The `overReceipt`
 flag is DERIVED: cumulative received across CONFIRMED receipts of the PO
 line (converted into the PO line's uom) > orderedQuantity — g6-14 (30+35+36
 vs 100 flags the third receipt). `reverse` (`goods_receipt.reverse`, reason
@@ -483,9 +485,10 @@ default per company.
 | POST | `/api/loadings/:id/cancel` — DRAFT → CANCELLED; CONFIRMED → 403 `LOADING_CONFIRMED` | `loading.cancel` |
 | POST | `/api/loadings/:id/driver-info/release` · `/:id/driver-info/reject` — manager decision on the debt-gate approval | `loading.driver_info.release` |
 | GET | `/api/loadings/:id/relations` — related documents (document-flow; loading labelled «بارگیری {date}») | `loading.view` |
+| GET | `/api/purchase/:id/fulfillment` — fulfillment report (received / direct-loaded / fulfilled qty + amount split, over-receipt, ledger rows) | `purchase.view` |
 | POST | `/api/purchase/:id/receive` — DEPRECATED tombstone → 403 `RECEIVE_DEPRECATED` | `purchase.edit` |
-| POST/GET | `/api/goods-receipts` (+ GET `:id`, GET `:id/relations`) — DRAFT receipts / list / detail (per-line `overReceipt`, movements, reversal linkage) | `goods_receipt.view` / `create` |
-| POST | `/api/goods-receipts/:id/confirm` — IN movements + purchase amounts + relations | `goods_receipt.confirm` |
+| POST/GET | `/api/goods-receipts` (+ GET `:id`, GET `:id/relations`) — DRAFT receipts / list / detail (per-line `overReceipt` + over-receipt snapshots, movements, reversal linkage) | `goods_receipt.view` / `create` |
+| POST | `/api/goods-receipts/:id/confirm` — IN movements (cost snapshots) + fulfillment ledger rows + over-receipt snapshots + purchase recompute + relations | `goods_receipt.confirm` |
 | POST | `/api/goods-receipts/:id/reverse` `{reason}` — compensating movements + rollback | `goods_receipt.reverse` |
 | POST | `/api/goods-receipts/:id/cancel` — DRAFT → CANCELLED | `goods_receipt.edit` |
 | GET | `/api/inventory/stock?warehouseId&variantId&categoryId&search&page&pageSize` — computed stock per variant (location semantics, `negative` flag) | `inventory.view` |
@@ -501,6 +504,50 @@ Phase 6 party timeline events: `LOADING_CONFIRMED`, `LOADING_REVERSED`,
 `RECEIPT_CONFIRMED`, `RECEIPT_REVERSED`, `DRIVER_INFO_RELEASED`.
 Movement `sourceEntityType` values: `PURCHASE_RECEIPT`, `LOADING`,
 `LOADING_REVERSAL`, `RECEIPT_REVERSAL`, `TRANSFER`.
+
+#### Phase 6 final corrections — fulfillment ledger + snapshots (g6f-01…03)
+
+**Purchase line fulfillment ledger (final #1).** `PurchaseLineFulfillment`
+rows are the single source of truth for purchase fulfillment — receipts and
+direct loadings are SEPARATE contribution rows (unique
+`(purchaseLineId, type, sourceId)`) that never overwrite each other:
+
+- `GOODS_RECEIPT` — written by the GRN confirm (one row per receipt line;
+  quantity in the PO line's uom, amount = quantity × line.unitPrice);
+- `DIRECT_LOADING` — written by the loading confirm for purchase-line
+  allocations of `DIRECT_SUPPLIER_TO_CUSTOMER` loadings only (warehouse-route
+  loadings keep the allocation guard but do not contribute).
+
+Reversals flip `reversedAt` (rows stay for history). The purchase
+`operationalLoadedAmount` = Σ live rows' amount (absolute recompute —
+replacing the old GRN increment/rollback and the loading last-write-wins
+allocation recompute) and the document status (upgrade-only on confirm,
+outright recompute on reverse) come from the ledger in BOTH the
+goods-receipt and loading confirm/reverse paths
+(`PurchaseFulfillmentService`). `GET /api/purchase/:id/fulfillment`
+(`purchase.view`) is the report view: per line orderedQuantity, receivedQty,
+directLoadedQty, fulfilledQty, remainingQuantity (ordered − received),
+overReceivedQuantity, the received/directLoaded/fulfilled amount split, and
+the raw ledger rows (reversed included for history, excluded from sums).
+
+**GRN over-receipt snapshots (final #2).** At confirm, each receipt line
+persists `orderedQuantitySnapshot` (PO ordered quantity in the RECEIPT
+line's uom), `receivedQuantitySnapshot` (all CONFIRMED receipt quantities of
+that purchase line in the receipt line's uom, INCLUDING this receipt) and
+`overReceivedSnapshot` = max(0, received − ordered). They are immutable —
+later reversals/recalculations never rewrite them; `GET
+/api/goods-receipts/:id` exposes them per line.
+
+**Movement cost snapshots (final #3).** The movement write seam accepts an
+optional `unitCostSnapshot` (per ONE inventory-UOM unit) and computes
+`totalCostSnapshot = normalizedQuantity × unitCost` itself (Decimal, rounded
+to the money scale). Sources: GRN confirm — PO line unitPrice ÷ factor(1
+purchaseUom → inventoryUom) via the normalization service; loading confirm —
+the same PO-linked cost when the line has a purchase allocation (FIRST
+allocation's PO line, documented convention; no allocation → NULL cost).
+Reverse movements copy the original's unitCost and NEGATE the totalCost.
+Rows are append-only: a confirm → reverse → forced re-confirm chain leaves
+the original rows byte-identical (ON CONFLICT DO NOTHING — g6f-03).
 
 ### Parties / CRM core (Phase 3A)
 
