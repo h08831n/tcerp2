@@ -1,0 +1,93 @@
+// ─────────────── Phase 7B: Operational → Accounting event engine ───────────────
+// Operational Event → PostingRule → JournalEntry (docs/05 §2: revenue/COGS from
+// snapshots, never tax invoices). Engine failures mark the AccountingEvent
+// FAILED (retryable) — operational confirms are never blocked by accounting.
+
+enum AccountingEventType {
+  SALES_COMPLETED_LOADING
+  PURCHASE_FULFILLED
+  GOODS_RECEIPT_CONFIRMED
+  INVENTORY_REVERSAL
+  PAYMENT_RECEIVED
+  PAYMENT_MADE
+}
+
+enum AccountingEventStatus {
+  POSTED
+  FAILED
+  SKIPPED
+}
+
+model PostingRule {
+  id        String             @id @default(uuid()) @db.Uuid
+  companyId String             @map("company_id") @db.Uuid
+  code      String
+  nameFa    String             @map("name_fa")
+  eventType AccountingEventType @map("event_type")
+  enabled   Boolean            @default(true)
+  version   Int                @default(1)
+  createdAt DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company           @relation(fields: [companyId], references: [id])
+  lines   PostingRuleLine[]
+
+  @@unique([companyId, code])
+  @@index([eventType, enabled])
+  @@map("posting_rules")
+}
+
+// measure decides which amount the engine substitutes:
+//   RECEIVABLE → revenue amount (sales loaded × price snapshot)
+//   REVENUE    → same revenue amount (credit side)
+//   COGS       → Σ cost snapshots of the loading OUT movements
+//   INVENTORY  → purchase/GRN cost amount (Cr on receipt, Dr on direct)
+//   PAYABLE    → supplier fulfillment amount
+enum PostingMeasure {
+  RECEIVABLE
+  PAYABLE
+  REVENUE
+  COGS
+  INVENTORY
+}
+
+model PostingRuleLine {
+  id          String         @id @default(uuid()) @db.Uuid
+  ruleId      String         @map("rule_id") @db.Uuid
+  side        JournalSide
+  accountCode String         @map("account_code")
+  measure     PostingMeasure
+  memo        String?
+  order       Int            @default(0)
+
+  rule PostingRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId, order])
+  @@map("posting_rule_lines")
+}
+
+enum JournalSide {
+  DEBIT
+  CREDIT
+}
+
+// Immutable operational→accounting event log; one row per (companyId,
+// idempotencyKey). FAILED rows are retryable (POST /accounting/events/:id/post).
+model AccountingEvent {
+  id               String              @id @default(uuid()) @db.Uuid
+  companyId        String              @map("company_id") @db.Uuid
+  eventType        AccountingEventType @map("event_type")
+  sourceEntityType String              @map("source_entity_type")
+  sourceEntityId   String              @map("source_entity_id") @db.Uuid
+  payload          Json?
+  status           AccountingEventStatus @default(PENDING)
+  journalEntryId   String?             @map("journal_entry_id") @db.Uuid
+  error            String?
+  idempotencyKey   String              @unique @map("idempotency_key")
+  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  postedAt         DateTime?           @map("posted_at") @db.Timestamptz(6)
+
+  @@index([companyId, status, createdAt])
+  @@index([eventType, sourceEntityId])
+  @@map("accounting_events")
+}
