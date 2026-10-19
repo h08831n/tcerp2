@@ -3,8 +3,6 @@ import { AccountType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ValidationError } from '../common/errors';
 
-type Tx = Prisma.TransactionClient;
-
 export interface LedgerRow {
   entryId: string;
   entryNumber: string;
@@ -15,15 +13,20 @@ export interface LedgerRow {
   debit: Prisma.Decimal;
   credit: Prisma.Decimal;
   runningBalance: Prisma.Decimal;
+  /** true for the REVERSED side of a reversal pair (original or mirror). */
   reversed: boolean;
+  /** mirror entry of a reversal pair for audit drill-down. */
+  reversalEntryId: string | null;
 }
 
 export interface LedgerReport {
   accountCode: string;
   accountName: string;
+  accountIds: string[];
   normalSide: 'DEBIT' | 'CREDIT';
   openingBalance: Prisma.Decimal;
   rows: LedgerRow[];
+  nextCursor: string | null;
   totals: { debit: Prisma.Decimal; credit: Prisma.Decimal; closingBalance: Prisma.Decimal };
 }
 
@@ -36,51 +39,127 @@ export class ReportsService {
     return type === 'ASSET' || type === 'EXPENSE' ? 'DEBIT' : 'CREDIT';
   }
 
+  /** Resolve an account code to its subtree ids (account + all descendants). */
+  async resolveAccountSubtree(
+    companyId: string,
+    accountCode: string,
+  ): Promise<{ account: { id: string; code: string; name: string; type: AccountType }; ids: string[] }> {
+    const all = await this.prisma.chartOfAccount.findMany({
+      where: { companyId },
+      select: { id: true, code: true, name: true, type: true, parentId: true },
+    });
+    const root = all.find((a) => a.code === accountCode);
+    if (!root) throw new ValidationError('ACCOUNT_NOT_FOUND', { accountCode });
+    const ids = [root.id];
+    let frontier = [root.id];
+    while (frontier.length > 0) {
+      const children = all.filter((a) => a.parentId && frontier.includes(a.parentId));
+      if (children.length === 0) break;
+      for (const c of children) if (!ids.includes(c.id)) ids.push(c.id);
+      frontier = children.map((c) => c.id);
+    }
+    return { account: { id: root.id, code: root.code, name: root.name, type: root.type }, ids };
+  }
+
   /**
-   * General Ledger for one account (or subtree roll-up): opening balance
-   * before `from`, row-per-line with running balance, totals.
+   * General Ledger with keyset pagination (order: entryDate, entryNumber,
+   * journalLineId). Net semantics (integrity gate #1): REVERSED originals AND
+   * their POSTED reversals are BOTH included — they cancel arithmetically.
+   * Totals cover the WHOLE filter range, never just the page.
    */
   async generalLedger(
     companyId: string,
-    opts: { accountCode: string; from?: Date; to?: Date; includeReversed?: boolean },
-  ): Promise<LedgerReport> {
-    const account = await this.prisma.chartOfAccount.findFirst({
-      where: { companyId, code: opts.accountCode },
-    });
-    if (!account) throw new ValidationError('ACCOUNT_NOT_FOUND', { accountCode: opts.accountCode });
+    opts: {
+      accountCode: string;
+      from?: Date;
+      to?: Date;
+      journalCode?: string;
+      partyId?: string;
+      analyticType?: string;
+      analyticId?: string;
+      limit?: number;
+      cursor?: string | null;
+    },
+  ): Promise<LedgerReport & { nextCursor: string | null }> {
+    const { account, ids } = await this.resolveAccountSubtree(companyId, opts.accountCode);
     const normalSide = this.normalSide(account.type);
     const sign = normalSide === 'DEBIT' ? 1 : -1;
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
-    const dateFilter = {
-      ...(opts.from ? { gte: opts.from } : {}),
-      ...(opts.to ? { lte: opts.to } : {}),
-    };
     const entryWhere: Prisma.JournalEntryWhereInput = {
       companyId,
-      status: { in: opts.includeReversed ? ['POSTED', 'REVERSED'] : ['POSTED'] },
-      ...(Object.keys(dateFilter).length ? { entryDate: dateFilter } : {}),
+      status: { in: ['POSTED', 'REVERSED'] }, // net: both sides of reversal pair
+      ...(opts.from || opts.to
+        ? { entryDate: { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) } }
+        : {}),
+      ...(opts.journalCode ? { journalCode: opts.journalCode } : {}),
+    };
+    const lineWhere: Prisma.JournalLineWhereInput = {
+      companyId,
+      accountId: { in: ids },
+      entry: entryWhere,
+      ...(opts.partyId ? { partyId: opts.partyId } : {}),
+      ...(opts.analyticType && opts.analyticId
+        ? { analytics: { some: { dimensionType: opts.analyticType as never, dimensionId: opts.analyticId } } }
+        : {}),
     };
 
-    // Opening balance: sum over lines before `from` (all POSTED history).
-    const openingAgg = await this.prisma.journalLine.aggregate({
-      where: {
-        companyId,
-        accountId: account.id,
-        entry: {
+    // Opening balance = signed sum BEFORE the window start. Without `from`
+    // the window starts at history begin → opening is zero by definition
+    // (all rows appear in the ledger itself).
+    let openingBalance = new Prisma.Decimal(0);
+    if (opts.from) {
+      const openingAgg = await this.prisma.journalLine.aggregate({
+        where: {
           companyId,
-          status: 'POSTED',
-          ...(opts.from ? { entryDate: { lt: opts.from } } : {}),
+          accountId: { in: ids },
+          entry: {
+            companyId,
+            status: { in: ['POSTED', 'REVERSED'] },
+            entryDate: { lt: opts.from },
+            ...(opts.journalCode ? { journalCode: opts.journalCode } : {}),
+          },
         },
-      },
-      _sum: { debit: true, credit: true },
-    });
-    const openingBalance = new Prisma.Decimal(
-      (Number(openingAgg._sum.debit ?? 0) - Number(openingAgg._sum.credit ?? 0)) * sign,
-    );
+        _sum: { debit: true, credit: true },
+      });
+      openingBalance = new Prisma.Decimal(
+        new Prisma.Decimal(openingAgg._sum.debit ?? 0)
+          .minus(new Prisma.Decimal(openingAgg._sum.credit ?? 0))
+          .times(sign)
+          .toNumber(),
+      );
+    }
+
+    let cursorData: { d: string; n: string; l: string } | null = null;
+    if (opts.cursor) {
+      try {
+        cursorData = JSON.parse(Buffer.from(opts.cursor, 'base64').toString('utf-8'));
+      } catch {
+        throw new ValidationError('INVALID_LEDGER_CURSOR');
+      }
+    }
+
+    // Keyset branches each carry the full company/status scoping — an OR
+    // branch without companyId would aggregate other companies' lines into
+    // the running-balance seed (root cause of cross-page drift).
+    const entryScope: Prisma.JournalEntryWhereInput = {
+      companyId,
+      status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] },
+    };
+    const cursorFilter: Prisma.JournalLineWhereInput[] = cursorData
+      ? [
+          { entry: { ...entryScope, entryDate: { gt: new Date(cursorData.d) } } },
+          { entry: { ...entryScope, entryDate: new Date(cursorData.d), entryNumber: { gt: cursorData.n } } },
+          { entry: { ...entryScope, entryDate: new Date(cursorData.d), entryNumber: cursorData.n }, id: { gt: cursorData.l } },
+        ]
+      : [];
 
     const lines = await this.prisma.journalLine.findMany({
-      where: { companyId, accountId: account.id, entry: entryWhere },
-      orderBy: [{ entry: { entryDate: 'asc' } }, { id: 'asc' }],
+      where: {
+        AND: [lineWhere, ...(cursorFilter.length ? [{ OR: cursorFilter }] : [])],
+      },
+      orderBy: [{ entry: { entryDate: 'asc' } }, { entry: { entryNumber: 'asc' } }, { id: 'asc' }],
+      take: limit + 1,
       select: {
         id: true,
         debit: true,
@@ -94,16 +173,42 @@ export class ReportsService {
             journalCode: true,
             documentType: true,
             status: true,
+            reversedByEntryId: true,
           },
         },
       },
     });
 
+    const hasMore = lines.length > limit;
+    const page = hasMore ? lines.slice(0, limit) : lines;
+
     let running = openingBalance;
-    const rows: LedgerRow[] = lines.map((l) => {
-      running = running.plus(
-        new Prisma.Decimal((Number(l.debit) - Number(l.credit)) * sign),
+    if (cursorData) {
+      const beforeCursor = await this.prisma.journalLine.aggregate({
+        where: {
+          AND: [
+            lineWhere,
+            {
+              OR: [
+                { entry: { ...entryScope, entryDate: { lt: new Date(cursorData.d) } } },
+                { entry: { ...entryScope, entryDate: new Date(cursorData.d), entryNumber: { lt: cursorData.n } } },
+                { entry: { ...entryScope, entryDate: new Date(cursorData.d), entryNumber: cursorData.n }, id: { lte: cursorData.l } },
+              ],
+            },
+          ],
+        },
+        _sum: { debit: true, credit: true },
+      });
+      running = new Prisma.Decimal(
+        new Prisma.Decimal(beforeCursor._sum?.debit ?? 0)
+          .minus(new Prisma.Decimal(beforeCursor._sum?.credit ?? 0))
+          .times(sign)
+          .toNumber(),
       );
+    }
+
+    const rows: LedgerRow[] = page.map((l) => {
+      running = running.plus(new Prisma.Decimal(l.debit).minus(l.credit).times(sign));
       return {
         entryId: l.entry.id,
         entryNumber: l.entry.entryNumber,
@@ -115,109 +220,199 @@ export class ReportsService {
         credit: l.credit,
         runningBalance: running,
         reversed: l.entry.status === 'REVERSED',
+        reversalEntryId: l.entry.reversedByEntryId,
       };
     });
 
-    const totals = rows.reduce(
-      (acc, r) => ({
-        debit: acc.debit.plus(r.debit),
-        credit: acc.credit.plus(r.credit),
-        closingBalance: r.runningBalance,
-      }),
-      { debit: new Prisma.Decimal(0), credit: new Prisma.Decimal(0), closingBalance: openingBalance },
-    );
+    const totalsAgg = await this.prisma.journalLine.aggregate({
+      where: lineWhere,
+      _sum: { debit: true, credit: true },
+    });
+    const totals = {
+      debit: new Prisma.Decimal(totalsAgg._sum.debit ?? 0),
+      credit: new Prisma.Decimal(totalsAgg._sum.credit ?? 0),
+      closingBalance: openingBalance.plus(
+        new Prisma.Decimal(totalsAgg._sum.debit ?? 0)
+          .minus(new Prisma.Decimal(totalsAgg._sum.credit ?? 0))
+          .times(sign)
+          .toNumber(),
+      ),
+    };
+
+    const last = page[page.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? Buffer.from(
+            JSON.stringify({ d: last.entry.entryDate.toISOString(), n: last.entry.entryNumber, l: last.id }),
+          ).toString('base64')
+        : null;
 
     return {
       accountCode: account.code,
       accountName: account.name,
+      accountIds: ids,
       normalSide,
       openingBalance,
       rows,
+      nextCursor,
       totals,
     };
   }
 
-  /** Trial balance as-of a date: opening / movement / closing per account. */
-  async trialBalance(companyId: string, asOf: Date, includeReversed = false) {
+  /**
+   * Trial balance (integrity gates #2/#3): real from/to windows with
+   * opening = before FROM, movement = FROM..TO, closing = opening + movement
+   * (signed per normal side — no double counting). Real hierarchical roll-up:
+   * postings live on leaves; parents roll up descendants. Reversal pairs both
+   * included (net zero). level: leaf | summary | all.
+   */
+  async trialBalance(
+    companyId: string,
+    opts: { from?: Date; to?: Date; asOf?: Date; fiscalYearId?: string; periodId?: string; level?: 'leaf' | 'summary' | 'all' },
+  ) {
+    const level = opts.level ?? 'all';
+    let from = opts.from ?? null;
+    let to = opts.to ?? opts.asOf ?? new Date();
+    if (opts.fiscalYearId) {
+      const fy = await this.prisma.fiscalYear.findFirst({ where: { id: opts.fiscalYearId, companyId } });
+      if (!fy) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
+      from = from ?? fy.startDate;
+      if (!opts.periodId) to = opts.to ?? fy.endDate;
+    }
+    if (opts.periodId) {
+      const period = await this.prisma.fiscalPeriod.findFirst({
+        where: { id: opts.periodId, fiscalYear: { companyId } },
+      });
+      if (!period) throw new ValidationError('FISCAL_PERIOD_NOT_FOUND');
+      from = from ?? period.startDate;
+      to = period.endDate;
+    }
+
     const accounts = await this.prisma.chartOfAccount.findMany({
       where: { companyId },
       orderBy: { code: 'asc' },
     });
-    const before = await this.prisma.journalLine.groupBy({
+    const leafIds = new Set(accounts.filter((a) => !accounts.some((c) => c.parentId === a.id)).map((a) => a.id));
+    const childrenOf = new Map<string, string[]>();
+    for (const a of accounts) {
+      if (a.parentId) childrenOf.set(a.parentId, [...(childrenOf.get(a.parentId) ?? []), a.id]);
+    }
+
+    const signed = (d: Prisma.Decimal | null | undefined, c: Prisma.Decimal | null | undefined, type: AccountType) =>
+      new Prisma.Decimal(
+        new Prisma.Decimal(d ?? 0).minus(new Prisma.Decimal(c ?? 0)).times(this.normalSide(type) === 'DEBIT' ? 1 : -1).toNumber(),
+      );
+
+    const status = { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] };
+    const beforeSums = await this.prisma.journalLine.groupBy({
       by: ['accountId'],
       where: {
         companyId,
-        entry: { companyId, status: 'POSTED', entryDate: { lt: asOf } },
+        entry: { companyId, status, ...(from ? { entryDate: { lt: from } } : {}) },
       },
       _sum: { debit: true, credit: true },
     });
-    const within = await this.prisma.journalLine.groupBy({
+    // eslint-disable-next-line no-console
+    const beforeMap = new Map(beforeSums.map((r) => [r.accountId, r]));
+    const periodSums = await this.prisma.journalLine.groupBy({
       by: ['accountId'],
       where: {
         companyId,
-        entry: { companyId, status: 'POSTED', entryDate: { lte: asOf } },
+        entry: {
+          companyId,
+          status,
+          // single combined entryDate object — separate spreads on the same
+          // key would silently overwrite each other (last-wins)
+          ...(from || to
+            ? { entryDate: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }
+            : {}),
+        },
       },
       _sum: { debit: true, credit: true },
     });
-    const beforeMap = new Map(before.map((r) => [r.accountId, r]));
-    const withinMap = new Map(within.map((r) => [r.accountId, r]));
+    const periodMap = new Map(periodSums.map((r) => [r.accountId, r]));
+    // eslint-disable-next-line no-console
+    console.log('DEBUG-TB-FROM from=', from && from.toISOString(), 'to=', to && to.toISOString(), 'beforeSums=', JSON.stringify(beforeSums.map((r) => ({ a: r.accountId.slice(0, 8), d: r._sum.debit?.toString(), c: r._sum.credit?.toString() }))), 'periodSums=', JSON.stringify(periodSums.map((r) => ({ a: r.accountId.slice(0, 8), d: r._sum.debit?.toString(), c: r._sum.credit?.toString() }))));
+    // eslint-disable-next-line no-console
+
+    const leafBalances = new Map<string, { opening: Prisma.Decimal; periodDebit: Prisma.Decimal; periodCredit: Prisma.Decimal; closing: Prisma.Decimal }>();
+    for (const account of accounts) {
+      if (!leafIds.has(account.id)) continue;
+      const b = beforeMap.get(account.id);
+      const p = periodMap.get(account.id);
+      leafBalances.set(account.id, {
+        opening: signed(b?._sum.debit, b?._sum.credit, account.type),
+        periodDebit: new Prisma.Decimal(p?._sum.debit ?? 0),
+        periodCredit: new Prisma.Decimal(p?._sum.credit ?? 0),
+        closing: signed(
+          new Prisma.Decimal(b?._sum.debit ?? 0).plus(new Prisma.Decimal(p?._sum.debit ?? 0)),
+          new Prisma.Decimal(b?._sum.credit ?? 0).plus(new Prisma.Decimal(p?._sum.credit ?? 0)),
+          account.type,
+        ),
+      });
+    }
+
+    const rollup = (id: string, kind: 'opening' | 'periodDebit' | 'periodCredit' | 'closing'): Prisma.Decimal => {
+      const leaf = leafBalances.get(id);
+      let total =
+        kind === 'opening'
+          ? leaf?.opening ?? new Prisma.Decimal(0)
+          : kind === 'closing'
+            ? leaf?.closing ?? new Prisma.Decimal(0)
+            : kind === 'periodDebit'
+              ? leaf?.periodDebit ?? new Prisma.Decimal(0)
+              : leaf?.periodCredit ?? new Prisma.Decimal(0);
+      for (const child of childrenOf.get(id) ?? []) total = total.plus(rollup(child, kind));
+      return total;
+    };
 
     let totalDebit = new Prisma.Decimal(0);
     let totalCredit = new Prisma.Decimal(0);
+    const place = (v: Prisma.Decimal, normalDebit: boolean) => {
+      if (v.isZero()) return { d: new Prisma.Decimal(0), c: new Prisma.Decimal(0) };
+      const abs = v.gte(0) ? v : new Prisma.Decimal(0).minus(v);
+      return normalDebit
+        ? v.gte(0)
+          ? { d: abs, c: new Prisma.Decimal(0) }
+          : { d: new Prisma.Decimal(0), c: abs }
+        : v.gte(0)
+          ? { d: new Prisma.Decimal(0), c: abs }
+          : { d: abs, c: new Prisma.Decimal(0) };
+    };
+
     const rows = accounts
+      .filter((a) => (level === 'leaf' ? leafIds.has(a.id) : level === 'summary' ? childrenOf.has(a.id) : true))
+      .filter((a) => {
+        const o = rollup(a.id, 'opening');
+        const d = rollup(a.id, 'periodDebit');
+        const c = rollup(a.id, 'periodCredit');
+        const cl = rollup(a.id, 'closing');
+        return !o.isZero() || !d.isZero() || !c.isZero() || !cl.isZero();
+      })
       .map((account) => {
-        const sign = new Prisma.Decimal(this.normalSide(account.type) === 'DEBIT' ? 1 : -1);
-        const b = beforeMap.get(account.id);
-        const w = withinMap.get(account.id);
-        const opening = new Prisma.Decimal(
-          (Number(b?._sum.debit ?? 0) - Number(b?._sum.credit ?? 0)) * sign.toNumber(),
-        );
-        // within = ALL posted lines ≤ asOf (no lower bound by default) — so
-        // closing MUST be the signed sum of `within` itself, never opening +
-        // movement (that would double-count everything before asOf).
-        const debit = new Prisma.Decimal(w?._sum.debit ?? 0);
-        const credit = new Prisma.Decimal(w?._sum.credit ?? 0);
-        const closing = new Prisma.Decimal(
-          (Number(debit) - Number(credit)) * sign.toNumber(),
-        );
-        // Placement by NORMAL side: positive signed balance → normal-side
-        // column; negative → opposite column. For REVENUE (credit-normal),
-        // +1000 means a CREDIT balance of 1000 — putting it in closingDebit
-        // would break the balanced invariant.
         const normalDebit = this.normalSide(account.type) === 'DEBIT';
-        const place = (v: Prisma.Decimal): { d: Prisma.Decimal; c: Prisma.Decimal } => {
-          // + → normal-side column; − → the OPPOSITE column (exactly ONE column!)
-          if (v.isZero()) return { d: new Prisma.Decimal(0), c: new Prisma.Decimal(0) };
-          const abs = v.gte(0) ? v : new Prisma.Decimal(0).minus(v);
-          return normalDebit
-            ? v.gte(0)
-              ? { d: abs, c: new Prisma.Decimal(0) }
-              : { d: new Prisma.Decimal(0), c: abs }
-            : v.gte(0)
-              ? { d: new Prisma.Decimal(0), c: abs }
-              : { d: abs, c: new Prisma.Decimal(0) };
-        };
-        const openingPlaced = place(opening);
-        const closingPlaced = place(closing);
-        const row = {
+        const openingPlaced = place(rollup(account.id, 'opening'), normalDebit);
+        const closingPlaced = place(rollup(account.id, 'closing'), normalDebit);
+        totalDebit = totalDebit.plus(closingPlaced.d);
+        totalCredit = totalCredit.plus(closingPlaced.c);
+        return {
           accountCode: account.code,
           accountName: account.name,
           accountType: account.type,
+          level: childrenOf.has(account.id) ? 'parent' : 'leaf',
           openingDebit: openingPlaced.d,
           openingCredit: openingPlaced.c,
-          debit,
-          credit,
+          debit: rollup(account.id, 'periodDebit'),
+          credit: rollup(account.id, 'periodCredit'),
           closingDebit: closingPlaced.d,
           closingCredit: closingPlaced.c,
         };
-        totalDebit = totalDebit.plus(row.closingDebit);
-        totalCredit = totalCredit.plus(row.closingCredit);
-        return row;
-      })
-      .filter((r) => !r.openingDebit.isZero() || !r.openingCredit.isZero() || !r.debit.isZero() || !r.credit.isZero());
+      });
 
     return {
-      asOf,
+      from,
+      to,
+      level,
       rows,
       totals: {
         openingDebit: rows.reduce((s, r) => s.plus(r.openingDebit), new Prisma.Decimal(0)),

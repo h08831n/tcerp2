@@ -5,7 +5,7 @@ import { SequencesService } from '../sequences/sequences.service';
 import { ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 
 export interface JournalLineAnalyticInput {
-  dimensionType: 'CUSTOMER' | 'SUPPLIER' | 'EMPLOYEE' | 'PROJECT' | 'COST_CENTER';
+  dimensionType: 'CUSTOMER' | 'SUPPLIER' | 'SALESPERSON' | 'PRODUCT_VARIANT' | 'EMPLOYEE' | 'PROJECT' | 'COST_CENTER';
   dimensionId: string;
   label?: string;
 }
@@ -13,8 +13,10 @@ export interface JournalLineAnalyticInput {
 export interface JournalLineInput {
   accountCode: string;
   partyId?: string | null;
-  debit: number;
-  credit: number;
+  /** Authoritative amounts: Prisma.Decimal (or decimal string). JS numbers are
+   *  accepted at API edges for convenience but ALL math is Decimal-based. */
+  debit: Prisma.Decimal | string | number;
+  credit: Prisma.Decimal | string | number;
   description?: string;
   /** Analytical dimensions (7A-3): CUSTOMER/SUPPLIER receivable-payable
    *  tracking plus future EMPLOYEE/PROJECT/COST_CENTER. */
@@ -47,31 +49,32 @@ export class JournalService {
     private readonly sequences: SequencesService,
   ) {}
 
-  /** Validates line semantics; returns normalized lines. */
+  /** Validates line semantics with exact Decimal math; no floats. */
   static validateLines(lines: JournalLineInput[]): void {
     if (!Array.isArray(lines) || lines.length === 0) {
       throw new ValidationError('Journal entry requires at least one line', { lines });
     }
+    let totalDebit = new Prisma.Decimal(0);
+    let totalCredit = new Prisma.Decimal(0);
     for (const [index, line] of lines.entries()) {
-      const debit = Number(line.debit ?? 0);
-      const credit = Number(line.credit ?? 0);
-      if (debit < 0 || credit < 0) {
+      const debit = new Prisma.Decimal(line.debit ?? 0);
+      const credit = new Prisma.Decimal(line.credit ?? 0);
+      if (debit.isNegative() || credit.isNegative()) {
         throw new ValidationError('Journal line amounts must be non-negative', { index });
       }
-      if (debit > 0 && credit > 0) {
+      if (debit.gt(0) && credit.gt(0)) {
         throw new ValidationError('A journal line cannot carry both debit and credit', { index });
       }
-      if (debit === 0 && credit === 0) {
+      if (debit.isZero() && credit.isZero()) {
         throw new ValidationError('A journal line must carry a debit or a credit', { index });
       }
+      totalDebit = totalDebit.plus(debit);
+      totalCredit = totalCredit.plus(credit);
     }
-    const totalDebit = lines.reduce((sum, l) => sum + Number(l.debit ?? 0), 0);
-    const totalCredit = lines.reduce((sum, l) => sum + Number(l.credit ?? 0), 0);
-    // Compare rounded to 4 decimals to dodge float noise.
-    if (Math.round(totalDebit * 10000) !== Math.round(totalCredit * 10000)) {
+    if (!totalDebit.equals(totalCredit)) {
       throw new ValidationError('JOURNAL_UNBALANCED', {
-        totalDebit,
-        totalCredit,
+        totalDebit: totalDebit.toString(),
+        totalCredit: totalCredit.toString(),
       });
     }
   }
@@ -123,8 +126,8 @@ export class JournalService {
             accountId: byCode.get(line.accountCode)!,
             partyId: line.partyId ?? null,
             description: line.description,
-            debit: line.debit,
-            credit: line.credit,
+            debit: new Prisma.Decimal(line.debit ?? 0),
+            credit: new Prisma.Decimal(line.credit ?? 0),
             analytics: {
               create: (line.analytics ?? []).map((a) => ({
                 dimensionType: a.dimensionType,
@@ -229,8 +232,8 @@ export class JournalService {
         lines: original.lines.map((line) => ({
           accountCode: codeById.get(line.accountId)!,
           partyId: line.partyId,
-          debit: Number(line.credit),
-          credit: Number(line.debit),
+          debit: new Prisma.Decimal(line.credit ?? 0),
+          credit: new Prisma.Decimal(line.debit ?? 0),
           description: line.description ?? undefined,
         })),
       });

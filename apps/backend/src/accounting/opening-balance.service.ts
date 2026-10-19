@@ -124,15 +124,43 @@ export class OpeningBalanceService {
 
     const date = entryDate ?? new Date();
     const result = await this.prisma.$transaction(async (tx: Tx) => {
-      const lines = staged.map((row) => ({
+      // Build ALL lines FIRST: staged rows + OPENING_EQUITY residual, then post
+      // ONE balanced entry (integrity gate #11 — no post-then-patch).
+      const lines: Array<{
+        accountCode: string;
+        partyId?: string;
+        debit: Prisma.Decimal;
+        credit: Prisma.Decimal;
+        description?: string;
+      }> = staged.map((row) => ({
         accountCode: row.accountCode,
-        partyId: row.partyId,
-        debit: Number(row.debit),
-        credit: Number(row.credit),
-        description: row.partyName
-          ? `افتتاحیه — ${row.partyName}`
-          : row.note ?? 'افتتاحیه',
+        ...(row.partyId ? { partyId: row.partyId } : {}),
+        debit: new Prisma.Decimal(row.debit),
+        credit: new Prisma.Decimal(row.credit),
+        description: row.partyName ? `افتتاحیه — ${row.partyName}` : row.note ?? 'افتتاحیه',
       }));
+      let stagedDebit = new Prisma.Decimal(0);
+      let stagedCredit = new Prisma.Decimal(0);
+      for (const l of lines) {
+        stagedDebit = stagedDebit.plus(l.debit);
+        stagedCredit = stagedCredit.plus(l.credit);
+      }
+      const diff = stagedDebit.minus(stagedCredit);
+      let balancingAmount = new Prisma.Decimal(0);
+      if (!diff.isZero()) {
+        const equity = await tx.chartOfAccount.findFirst({
+          where: { companyId, code: 'OPENING_EQUITY' },
+        });
+        if (!equity) throw new ValidationError('OPENING_EQUITY_ACCOUNT_MISSING');
+        balancingAmount = diff.abs();
+        // debit > credit → CREDIT the difference; credit > debit → DEBIT it
+        lines.push({
+          accountCode: 'OPENING_EQUITY',
+          debit: diff.lt(0) ? balancingAmount : new Prisma.Decimal(0),
+          credit: diff.gt(0) ? balancingAmount : new Prisma.Decimal(0),
+          description: 'مانده افتتاحیه (سرمایه)',
+        });
+      }
       const entry = await this.journal.post(tx, {
         companyId,
         entryDate: date,
@@ -142,28 +170,6 @@ export class OpeningBalanceService {
         createdBy: actor.id,
         lines,
       });
-
-      // Balance residual via OPENING_EQUITY if staged rows were unbalanced.
-      const debitSum = staged.reduce((s, r) => s.plus(r.debit), new Prisma.Decimal(0));
-      const creditSum = staged.reduce((s, r) => s.plus(r.credit), new Prisma.Decimal(0));
-      const diff = debitSum.minus(creditSum);
-      if (!diff.isZero()) {
-        const equity = await tx.chartOfAccount.findFirst({
-          where: { companyId, code: 'OPENING_EQUITY' },
-        });
-        if (!equity) throw new ValidationError('OPENING_EQUITY_ACCOUNT_MISSING');
-        const sign = diff.gt(0); // debit residual → credit equity
-        await tx.journalLine.create({
-          data: {
-            companyId,
-            journalEntryId: entry.id,
-            accountId: equity.id,
-            description: 'مانده افتتاحیه (سرمایه)',
-            debit: sign ? new Prisma.Decimal(0) : diff,
-            credit: sign ? diff : new Prisma.Decimal(0),
-          },
-        });
-      }
 
       await tx.openingBalanceEntry.updateMany({
         where: { id: { in: staged.map((r) => r.id) } },
@@ -175,7 +181,13 @@ export class OpeningBalanceService {
         action: 'GENERATE',
         companyId,
         actor,
-        newValues: { entryNumber: entry.entryNumber, rows: staged.length },
+        newValues: {
+          entryNumber: entry.entryNumber,
+          rows: staged.length,
+          stagedDebit: stagedDebit.toString(),
+          stagedCredit: stagedCredit.toString(),
+          balancingAmount: balancingAmount.toString(),
+        },
       });
       return entry;
     });

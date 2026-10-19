@@ -17,6 +17,8 @@ export interface EmitInput {
   analytics: {
     customerId?: string | null;
     supplierId?: string | null;
+    salespersonUserId?: string | null;
+    productVariantId?: string | null;
   };
   description?: string;
   /** true on INVENTORY_REVERSAL / reversed flows → sides swap. */
@@ -139,7 +141,7 @@ export class AccountingEventService {
     } | null;
     const measures: Partial<Record<PostingMeasure, Prisma.Decimal>> = {};
     for (const [k, v] of Object.entries(payload?.measures ?? {})) {
-      measures[k as PostingMeasure] = new Prisma.Decimal(v as string);
+      measures[k as PostingMeasure] = new Prisma.Decimal(v as string | number);
     }
     await this.emit({
       companyId,
@@ -160,11 +162,17 @@ export class AccountingEventService {
     analytics: EmitInput['analytics'],
   ): JournalLineInput['analytics'] {
     const out: NonNullable<JournalLineInput['analytics']> = [];
-    if (measure === 'RECEIVABLE' && analytics.customerId) {
+    if (analytics.customerId && (measure === 'RECEIVABLE' || measure === 'REVENUE')) {
       out.push({ dimensionType: 'CUSTOMER', dimensionId: analytics.customerId });
     }
-    if (measure === 'PAYABLE' && analytics.supplierId) {
+    if (analytics.supplierId && (measure === 'PAYABLE' || measure === 'INVENTORY')) {
       out.push({ dimensionType: 'SUPPLIER', dimensionId: analytics.supplierId });
+    }
+    if (analytics.salespersonUserId && measure === 'REVENUE') {
+      out.push({ dimensionType: 'SALESPERSON', dimensionId: analytics.salespersonUserId });
+    }
+    if (analytics.productVariantId && (measure === 'REVENUE' || measure === 'COGS' || measure === 'INVENTORY')) {
+      out.push({ dimensionType: 'PRODUCT_VARIANT', dimensionId: analytics.productVariantId });
     }
     return out;
   }

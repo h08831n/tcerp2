@@ -94,7 +94,7 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.reports.trialBalance(companyId, asOf ? new Date(asOf) : new Date());
+    return this.reports.trialBalance(companyId, { asOf: asOf ? new Date(asOf) : new Date() });
   }
 
   @Get('subsidiary-ledger')

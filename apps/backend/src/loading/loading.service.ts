@@ -942,6 +942,13 @@ export class LoadingService {
    * THIS transaction, plus the sales lines behind allocations. Accounting
    * failures NEVER block the operation (event row FAILED, retryable).
    */
+  /**
+   * Phase 7B/7D: SALES_COMPLETED_LOADING (+ INVENTORY_REVERSAL on reverse).
+   * Emits ONE event per (salesDocument, productVariant, supplier) triple so
+   * M:N supplier and variant attribution is preserved for the profit report
+   * (integrity gate #5/#6). All amounts are Decimal snapshots: revenue from
+   * the sales-line price snapshot, COGS from movement cost snapshots.
+   */
   private async emitAccountingEvents(
     tx: Client,
     companyId: string,
@@ -950,102 +957,150 @@ export class LoadingService {
     reversal: boolean,
   ): Promise<void> {
     try {
-      // 1) COGS from the cost snapshots of this loading's movements (exact).
+      const loadingRows = await tx.loading.findUniqueOrThrow({
+        where: { id: loading.id },
+        select: {
+          lines: {
+            select: {
+              id: true,
+              productVariantId: true,
+              actualQuantity: true,
+              allocations: { select: { id: true, salesLineId: true, purchaseLineId: true, allocatedQuantity: true } },
+            },
+          },
+        },
+      });
+      const lineUoms = new Map<string, string>();
+      for (const line of loadingRows.lines) {
+        const ll = await tx.loadingLine.findUniqueOrThrow({ where: { id: line.id }, select: { uomId: true } });
+        if (ll.uomId) lineUoms.set(line.id, ll.uomId);
+      }
+
       const movements = await tx.stockMovement.findMany({
         where: { sourceEntityType: 'LOADING', sourceEntityId: loading.id },
         select: { normalizedQuantity: true, unitCostSnapshot: true },
       });
-      const cogs = movements.reduce(
+      const cogsTotal = movements.reduce(
         (sum, m) => (m.unitCostSnapshot ? sum.plus(m.normalizedQuantity.times(m.unitCostSnapshot)) : sum),
         new Prisma.Decimal(0),
       );
 
-      // 2) Sales side: allocations → sales lines (price snapshot) converted to
-      //    the sales-line UOM by the normalization service.
-      const revenueByDoc = new Map<string, { amount: Prisma.Decimal; customerId: string | null }>();
-      const loadingRows = await tx.loading.findUniqueOrThrow({
-        where: { id: loading.id },
-        select: { lines: { select: { id: true, productVariantId: true, actualQuantity: true, allocations: true } } },
-      });
+      const groups = new Map<
+        string,
+        {
+          salesDocumentId: string;
+          customerId: string | null;
+          salespersonUserId: string | null;
+          productVariantId: string;
+          revenue: Prisma.Decimal;
+          cogs: Prisma.Decimal;
+        }
+      >();
+
       for (const line of loadingRows.lines) {
+        const lineUom = lineUoms.get(line.id)!;
         for (const allocation of line.allocations) {
-          if (!allocation.salesLineId) continue;
-          const salesLine = await tx.salesLine.findUnique({
-            where: { id: allocation.salesLineId },
-            select: { unitPrice: true, uomId: true, salesDocumentId: true, document: { select: { customerPartyId: true } } },
-          });
-          if (!salesLine) continue;
-          const converted = await this.normalization.normalizeQuantity(
-            companyId,
-            line.productVariantId,
-            allocation.allocatedQuantity,
-            (
-              await tx.loadingLine.findUniqueOrThrow({ where: { id: line.id }, select: { uomId: true } })
-            ).uomId ?? salesLine.uomId,
-            salesLine.uomId,
-          );
-          const amount = converted.times(salesLine.unitPrice);
-          const agg = revenueByDoc.get(salesLine.salesDocumentId);
-          revenueByDoc.set(salesLine.salesDocumentId, {
-            amount: (agg?.amount ?? new Prisma.Decimal(0)).plus(amount),
-            customerId: salesLine.document.customerPartyId ?? loading.customerPartyId ?? null,
-          });
+          if (allocation.salesLineId) {
+            const salesLine = await tx.salesLine.findUnique({
+              where: { id: allocation.salesLineId },
+              select: {
+                unitPrice: true,
+                uomId: true,
+                salesDocumentId: true,
+                document: { select: { customerPartyId: true, salespersonUserId: true } },
+              },
+            });
+            if (!salesLine) continue;
+            const converted = await this.normalization.normalizeQuantity(
+              companyId,
+              line.productVariantId,
+              allocation.allocatedQuantity,
+              lineUom,
+              salesLine.uomId,
+            );
+            const amount = converted.times(new Prisma.Decimal(salesLine.unitPrice));
+            const key = salesLine.salesDocumentId + '|' + line.productVariantId;
+            const g = groups.get(key) ?? {
+              salesDocumentId: salesLine.salesDocumentId,
+              customerId: salesLine.document.customerPartyId ?? loading.customerPartyId ?? null,
+              salespersonUserId: salesLine.document.salespersonUserId ?? null,
+              productVariantId: line.productVariantId,
+              revenue: new Prisma.Decimal(0),
+              cogs: new Prisma.Decimal(0),
+            };
+            g.revenue = g.revenue.plus(amount);
+            groups.set(key, g);
+          }
         }
       }
 
-      // 3) Purchase side (direct route): fulfillment ledger rows of this loading.
-      const purchaseByDoc = new Map<string, { amount: Prisma.Decimal; supplierId: string | null }>();
-      if (loading.route === LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER) {
-        const fulfillments = await tx.purchaseLineFulfillment.findMany({
-          where: { type: 'DIRECT_LOADING', sourceId: loading.id, reversedAt: null },
-          select: { amount: true, purchaseLineId: true },
-        });
-        for (const f of fulfillments) {
-          const plRow = await tx.purchaseLine.findUniqueOrThrow({
-            where: { id: f.purchaseLineId },
-            select: { purchaseDocumentId: true, document: { select: { supplierPartyId: true } } },
-          });
-          const agg = purchaseByDoc.get(plRow.purchaseDocumentId);
-          purchaseByDoc.set(plRow.purchaseDocumentId, {
-            amount: (agg?.amount ?? new Prisma.Decimal(0)).plus(f.amount ?? new Prisma.Decimal(0)),
-            supplierId: plRow.document.supplierPartyId ?? agg?.supplierId ?? null,
-          });
+      const revenueTotal = [...groups.values()].reduce((s, g) => s.plus(g.revenue), new Prisma.Decimal(0));
+      if (revenueTotal.gt(0)) {
+        for (const g of groups.values()) {
+          g.cogs = cogsTotal.times(g.revenue.dividedBy(revenueTotal));
         }
       }
 
-      // 4) Emit events (missing/disabled rules → SKIPPED; failures → FAILED).
-      for (const [docId, agg] of revenueByDoc) {
+      for (const g of groups.values()) {
         await this.accountingEvents.emit({
           companyId,
           eventType: AccountingEventType.SALES_COMPLETED_LOADING,
           sourceEntityType: 'sales_document',
-          sourceEntityId: docId,
-          idempotencyKey: `sale:${loading.id}:${docId}${reversal ? ':rev' : ''}`,
-          measures: { RECEIVABLE: agg.amount, REVENUE: agg.amount, COGS: cogs, INVENTORY: cogs },
-          analytics: { customerId: agg.customerId },
+          sourceEntityId: g.salesDocumentId,
+          idempotencyKey: 'sale:' + loading.id + ':' + g.salesDocumentId + ':' + g.productVariantId + (reversal ? ':rev' : ''),
+          measures: {
+            RECEIVABLE: g.revenue,
+            REVENUE: g.revenue,
+            COGS: g.cogs,
+            INVENTORY: g.cogs,
+          },
+          analytics: {
+            customerId: g.customerId,
+            salespersonUserId: g.salespersonUserId,
+            productVariantId: g.productVariantId,
+          },
           description: reversal ? 'برگشت ثبت درآمد فروش (بارگیری معکوس)' : 'شناسایی درآمد فروش و بهای تمام‌شده (بارگیری)',
           reversal,
           entryDate: loading.loadingDate ?? undefined,
         });
       }
-      for (const [docId, agg] of purchaseByDoc) {
-        await this.accountingEvents.emit({
-          companyId,
-          eventType: AccountingEventType.PURCHASE_FULFILLED,
-          sourceEntityType: 'purchase_document',
-          sourceEntityId: docId,
-          idempotencyKey: `purchase-direct:${loading.id}:${docId}${reversal ? ':rev' : ''}`,
-          measures: { INVENTORY: agg.amount, PAYABLE: agg.amount },
-          analytics: { supplierId: agg.supplierId },
-          description: reversal ? 'برگشت ثبت خرید مستقیم' : 'ثبت خرید مستقیم (تحویل به مشتری)',
-          reversal,
-          entryDate: loading.loadingDate ?? undefined,
+
+      if (loading.route === LoadingRoute.DIRECT_SUPPLIER_TO_CUSTOMER) {
+        const byPurchaseDoc = new Map<string, { amount: Prisma.Decimal; supplierId: string | null }>();
+        const fulfillments = await tx.purchaseLineFulfillment.findMany({
+          where: { type: 'DIRECT_LOADING', sourceId: loading.id, reversedAt: null },
+          select: { amount: true, purchaseLineId: true },
         });
+        for (const f of fulfillments) {
+          const pl = await tx.purchaseLine.findUniqueOrThrow({
+            where: { id: f.purchaseLineId },
+            select: { purchaseDocumentId: true, document: { select: { supplierPartyId: true } } },
+          });
+          const agg = byPurchaseDoc.get(pl.purchaseDocumentId);
+          byPurchaseDoc.set(pl.purchaseDocumentId, {
+            amount: (agg?.amount ?? new Prisma.Decimal(0)).plus(f.amount ?? new Prisma.Decimal(0)),
+            supplierId: pl.document.supplierPartyId ?? agg?.supplierId ?? null,
+          });
+        }
+        for (const [docId, agg] of byPurchaseDoc) {
+          await this.accountingEvents.emit({
+            companyId,
+            eventType: AccountingEventType.PURCHASE_FULFILLED,
+            sourceEntityType: 'purchase_document',
+            sourceEntityId: docId,
+            idempotencyKey: 'purchase-direct:' + loading.id + ':' + docId + (reversal ? ':rev' : ''),
+            measures: { INVENTORY: agg.amount, PAYABLE: agg.amount },
+            analytics: { supplierId: agg.supplierId },
+            description: reversal ? 'برگشت ثبت خرید مستقیم' : 'ثبت خرید مستقیم (تحویل به مشتری)',
+            reversal,
+            entryDate: loading.loadingDate ?? undefined,
+          });
+        }
       }
       void actor;
     } catch (error) {
       this.accountingLogger.warn(
-        `accounting emit failed for loading ${loading.id}: ${error instanceof Error ? error.message : String(error)}`,
+        'accounting emit failed for loading ' + loading.id + ': ' + (error instanceof Error ? error.message : String(error)),
       );
     }
   }

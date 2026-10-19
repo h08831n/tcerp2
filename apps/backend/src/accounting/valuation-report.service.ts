@@ -13,24 +13,64 @@ export class ValuationReportService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** INTERNAL location ids for the company. */
-  private async internalLocationIds(companyId: string): Promise<string[]> {
-    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM stock_locations WHERE company_id = ${companyId}::uuid AND type = 'INTERNAL' AND active`;
-    return rows.map((r) => r.id);
-  }
-
+  /** LEGS model (integrity gates #7/#8/#9): each movement contributes a +leg
+   *  at its destination and a MINUS leg at its source. Company value = SUM of
+   *  INTERNAL legs; INTERNAL-to-INTERNAL transfers net to zero at company
+   *  level while shifting per-warehouse values. asOf limits movementDate;
+   *  grand totals computed in SQL over the WHOLE filter (never page rows). */
   async valuation(
     companyId: string,
-    opts: { warehouseId?: string; categoryId?: string; variantId?: string; search?: string; page?: number; pageSize?: number },
+    opts: {
+      warehouseId?: string;
+      categoryId?: string;
+      variantId?: string;
+      search?: string;
+      asOf?: Date;
+      page?: number;
+      pageSize?: number;
+    },
   ) {
-    const locationIds = await this.internalLocationIds(companyId);
-    if (locationIds.length === 0) {
-      return { rows: [], totals: { totalValue: new Prisma.Decimal(0) }, page: 1, pageSize: 0, total: 0 };
-    }
-    const ids = Prisma.join(locationIds.map((id) => Prisma.sql`${id}::uuid`), ',');
+    const asOf = opts.asOf ?? new Date();
     const page = Math.max(1, opts.page ?? 1);
     const pageSize = Math.min(Math.max(opts.pageSize ?? 25, 1), 200);
+    const offset = (page - 1) * pageSize;
     const search = opts.search?.trim();
+
+    const base = Prisma.sql`
+      SELECT m.product_variant_id AS variant_id,
+             pv.sku AS sku,
+             pv.name_fa AS variant_name_fa,
+             pt.name_fa AS template_name_fa,
+             pc.name_fa AS category_name_fa,
+             b.name_fa AS brand_name_fa,
+             COALESCE(dl.warehouse_id, sl.warehouse_id) AS warehouse_id,
+             w.name_fa AS warehouse_name_fa,
+             uom.symbol AS uom_symbol,
+             CASE WHEN dl.type = 'INTERNAL'
+                  THEN m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0)
+                  ELSE 0 END
+               + CASE WHEN sl.type = 'INTERNAL'
+                  THEN -(m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0))
+                  ELSE 0 END
+               AS leg_value,
+             CASE WHEN dl.type = 'INTERNAL' THEN m.normalized_quantity ELSE 0 END
+               + CASE WHEN sl.type = 'INTERNAL' THEN -m.normalized_quantity ELSE 0 END
+               AS leg_quantity
+      FROM stock_movements m
+      JOIN product_variants pv ON pv.id = m.product_variant_id
+      JOIN product_templates pt ON pt.id = pv.template_id
+      LEFT JOIN product_categories pc ON pc.id = pt.category_id
+      LEFT JOIN brands b ON b.id = pt.brand_id
+      LEFT JOIN uoms uom ON uom.id = pv.inventory_uom_id
+      JOIN stock_locations dl ON dl.id = m.destination_location_id
+      JOIN stock_locations sl ON sl.id = m.source_location_id
+      LEFT JOIN warehouses w ON w.id = COALESCE(dl.warehouse_id, sl.warehouse_id)
+      WHERE m.company_id = ${companyId}::uuid
+        AND m.movement_date <= ${asOf}::timestamptz
+        ${opts.warehouseId ? Prisma.sql`AND (dl.warehouse_id = ${opts.warehouseId}::uuid OR sl.warehouse_id = ${opts.warehouseId}::uuid)` : Prisma.empty}
+        ${opts.categoryId ? Prisma.sql`AND pt.category_id = ${opts.categoryId}::uuid` : Prisma.empty}
+        ${opts.variantId ? Prisma.sql`AND m.product_variant_id = ${opts.variantId}::uuid` : Prisma.empty}
+        ${search ? Prisma.sql`AND (pv.name_fa ILIKE ${'%' + search + '%'} OR pv.sku ILIKE ${'%' + search + '%'} OR pt.name_fa ILIKE ${'%' + search + '%'})` : Prisma.empty}`;
 
     const rows = await this.prisma.$queryRaw<
       Array<{
@@ -50,50 +90,26 @@ export class ValuationReportService {
     >`
       SELECT variant_id, sku, variant_name_fa, template_name_fa, category_name_fa, brand_name_fa,
              warehouse_name_fa, uom_symbol,
-             SUM(quantity) AS quantity,
-             CASE WHEN SUM(quantity) = 0 THEN NULL
-                  ELSE SUM(total_value) / SUM(quantity) END AS unit_cost,
-             SUM(total_value) AS total_value,
+             SUM(leg_quantity) AS quantity,
+             CASE WHEN SUM(leg_quantity) = 0 THEN NULL
+                  ELSE SUM(leg_value) / SUM(leg_quantity) END AS unit_cost,
+             SUM(leg_value) AS total_value,
              COUNT(*) OVER() AS total
-      FROM (
-        SELECT m.product_variant_id AS variant_id,
-               pv.sku AS sku, pv.name_fa AS variant_name_fa,
-               pt.name_fa AS template_name_fa,
-               pc.name_fa AS category_name_fa, b.name_fa AS brand_name_fa,
-               w.name_fa AS warehouse_name_fa, uom.symbol AS uom_symbol,
-               CASE WHEN m."destination_location_id" IN (${ids})
-                    THEN m.normalized_quantity ELSE -m.normalized_quantity END AS quantity,
-               CASE WHEN m."destination_location_id" IN (${ids})
-                    THEN m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0)
-                    ELSE -(m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0)) END AS total_value
-        FROM stock_movements m
-        JOIN product_variants pv ON pv.id = m.product_variant_id
-        JOIN product_templates pt ON pt.id = pv.template_id
-        LEFT JOIN product_categories pc ON pc.id = pt.category_id
-        LEFT JOIN brands b ON b.id = pt.brand_id
-        LEFT JOIN uoms uom ON uom.id = pv.inventory_uom_id
-        LEFT JOIN stock_locations dl ON dl.id = m.destination_location_id
-        LEFT JOIN stock_locations sl ON sl.id = m.source_location_id
-        LEFT JOIN warehouses w ON w.id = dl.warehouse_id
-        WHERE m.company_id = ${companyId}::uuid
-          AND (dl.type = 'INTERNAL' OR sl.type = 'INTERNAL')
-          ${opts.warehouseId ? Prisma.sql`AND (dl.warehouse_id = ${opts.warehouseId}::uuid OR sl.warehouse_id = ${opts.warehouseId}::uuid)` : Prisma.empty}
-          ${opts.categoryId ? Prisma.sql`AND pt.category_id = ${opts.categoryId}::uuid` : Prisma.empty}
-          ${opts.variantId ? Prisma.sql`AND m.product_variant_id = ${opts.variantId}::uuid` : Prisma.empty}
-          ${search ? Prisma.sql`AND (pv.name_fa ILIKE ${'%' + search + '%'} OR pv.sku ILIKE ${'%' + search + '%'} OR pt.name_fa ILIKE ${'%' + search + '%'})` : Prisma.empty}
-      ) per_movement
+      FROM ( ${base} ) legs
       GROUP BY variant_id, sku, variant_name_fa, template_name_fa, category_name_fa, brand_name_fa, warehouse_name_fa, uom_symbol
       ORDER BY total_value DESC
-      LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`;
+      LIMIT ${pageSize} OFFSET ${offset}`;
+
+    const grand = await this.prisma.$queryRaw<Array<{ quantity: Prisma.Decimal | null; value: Prisma.Decimal | null }>>`
+      SELECT SUM(leg_quantity) AS quantity, SUM(leg_value) AS value
+      FROM ( ${base} ) legs`;
 
     const total = rows.length > 0 ? Number(rows[0].total) : 0;
+    const grandValue = new Prisma.Decimal(grand[0]?.value ?? 0);
     return {
+      asOf,
       rows: rows.map((r) => ({
-        variant: {
-          id: r.variant_id,
-          sku: r.sku,
-          nameFa: r.variant_name_fa,
-        },
+        variant: { id: r.variant_id, sku: r.sku, nameFa: r.variant_name_fa },
         templateNameFa: r.template_name_fa,
         categoryNameFa: r.category_name_fa,
         brandNameFa: r.brand_name_fa,
@@ -105,7 +121,9 @@ export class ValuationReportService {
         negative: r.quantity.lt(0),
       })),
       totals: {
-        totalValue: rows.reduce((s, r) => s.plus(r.total_value), new Prisma.Decimal(0)),
+        grandTotalValue: grandValue,
+        pageTotalValue: rows.reduce((s, r) => s.plus(r.total_value), new Prisma.Decimal(0)),
+        grandQuantity: new Prisma.Decimal(grand[0]?.quantity ?? 0),
       },
       page,
       pageSize,

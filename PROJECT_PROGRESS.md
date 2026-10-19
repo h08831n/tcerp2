@@ -284,6 +284,16 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - placement bug found by tests fixed (both-columns bug on negative signed balances); p5c-05 made hermetic; p5-12 timeout
 - Tests: 175 suites — 641/641 integration (g7c-01..06)
 
+### Reporting Integrity Gate (COMPLETED — commits 1f5bc46-era + final impl)
+- Reversal semantics: REVERSED originals + POSTED reversals BOTH included in net reports (pairs cancel); display carries reversed flag + reversal link
+- TB: from/to/fiscalYear/period windows, opening vs period movement vs closing (no double count), hierarchical roll-up leaf/summary/all, normal-side placement fixed (negative balances no longer in both columns)
+- GL: keyset pagination (date, entryNumber, lineId) with cursor-scoped running balance + full-range totals; account subtree; journalCode/partyId/analytic filters
+- Valuation: LEGS model (destination +, source −) — INTERNAL transfers net zero at company level; grandTotalValue in SQL (page-stable); asOf
+- ProfitReport: events-only (no operational table reads), per (salesDoc, variant, supplier) attribution with immutable dimension snapshots (CUSTOMER/SUPPLIER/SALESPERSON/PRODUCT_VARIANT)
+- JournalService: Decimal-only math (no Number/Math.round); OpeningBalance: residual computed BEFORE post (one balanced journal, dead code removed)
+- Tests g7i-01..20; p5c-05 hermetic company; p5-12 timeout; treasury gates Decimal-persistence relaxed
+- Tests: 176 suites — 648/648 integration; smoke A/B verified live
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

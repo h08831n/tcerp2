@@ -36,9 +36,9 @@ export class SubsidiaryLedgerService {
              MAX(je.entry_date) AS last_activity,
              COUNT(*) OVER() AS total
       FROM parties p
-      JOIN party_roles pr ON pr.party_id = p.id AND pr.role = ${opts.role}
+      JOIN party_roles pr ON pr.party_id = p.id AND pr.role = ${opts.role}::"PartyRoleType"
       JOIN journal_lines l ON l.party_id = p.id
-      JOIN journal_entries je ON je.id = l.journal_entry_id AND je.status = 'POSTED'
+      JOIN journal_entries je ON je.id = l.journal_entry_id AND je.status IN ('POSTED', 'REVERSED')
       JOIN chart_of_accounts a ON a.id = l.account_id AND a.code = ${opts.accountCode}
       WHERE p.company_id = ${companyId}::uuid AND p.archived_at IS NULL
         AND je.entry_date <= ${asOf}
@@ -90,7 +90,7 @@ export class SubsidiaryLedgerService {
         partyId,
         entry: {
           companyId,
-          status: 'POSTED',
+          status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] },
           ...(opts.from || opts.to
             ? {
                 entryDate: {
@@ -152,7 +152,7 @@ export class SubsidiaryLedgerService {
       where: {
         companyId,
         partyId: { in: [responsiblePartyId, ...memberIds] },
-        entry: { companyId, status: 'POSTED' },
+        entry: { companyId, status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] } },
         account: { code: accountCode },
       },
       _sum: { debit: true, credit: true },

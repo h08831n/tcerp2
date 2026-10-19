@@ -2509,6 +2509,8 @@ model FiscalPeriod {
 enum AnalyticDimensionType {
   CUSTOMER
   SUPPLIER
+  SALESPERSON
+  PRODUCT_VARIANT
   EMPLOYEE
   PROJECT
   COST_CENTER

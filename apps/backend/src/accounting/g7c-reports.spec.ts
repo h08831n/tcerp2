@@ -132,7 +132,7 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
   });
 
   itif('g7c-02 trial balance balanced', async () => {
-    const tb = await reports.trialBalance(COMPANY, new Date());
+    const tb = await reports.trialBalance(COMPANY, { asOf: new Date() });
     // eslint-disable-next-line no-console
     console.log('DEBUG-TB ' + JSON.stringify(tb.rows.map((r) => ({ c: r.accountCode, cd: r.closingDebit.toNumber(), cc: r.closingCredit.toNumber() }))));
     expect(tb.balanced).toBe(true);
@@ -159,7 +159,7 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
 
   itif('g7c-04 profit matches journal legs (revenue vs COGS)', async () => {
     const report = await profit.operationalProfit(COMPANY, {});
-    const fixtureRow = report.rows.find((r) => r.documentNumber !== '' && r.revenue.toNumber() === 1000);
+    const fixtureRow = report.rows.find((r) => r.revenue.toNumber() === 1000);
     if (fixtureRow) {
       expect(fixtureRow.cogs.toNumber()).toBe(600);
       expect(fixtureRow.grossProfit.toNumber()).toBe(400);
