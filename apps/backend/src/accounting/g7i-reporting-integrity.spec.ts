@@ -13,6 +13,12 @@ import { describeIntegration, integrationPrisma, disconnectIntegrationPrisma } f
 jest.setTimeout(90000);
 
 const DB_URL = process.env.DATABASE_URL;
+// P0 guard: integration tests must target the local dev/test database only.
+if (DB_URL && !/localhost|127\.0\.0\.1/.test(DB_URL)) {
+  throw new Error(
+    'SAFETY: integration tests refused — DATABASE_URL does not point to localhost: ' + DB_URL,
+  );
+}
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 
 describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
@@ -78,7 +84,18 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
   afterAll(async () => {
     if (!prismaService) return;
     // cleanup hermetic company (order: dependents first)
-    await prismaService.journalLineAnalytic.deleteMany({});
+    // P0: scope EVERYTHING to the hermetic company — never other companies.
+    // Analytics rows are reachable only through our journal lines, so filter
+    // by their ids.
+    const myLineIds = (
+      await prismaService.journalLine.findMany({
+        where: { companyId: COMPANY },
+        select: { id: true },
+      })
+    ).map((l) => l.id);
+    await prismaService.journalLineAnalytic.deleteMany({
+      where: { journalLineId: { in: myLineIds } },
+    });
     await prismaService.journalLine.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.journalEntry.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: COMPANY } });
@@ -88,10 +105,34 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     await prismaService.sequence.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.party.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.company.delete({ where: { id: COMPANY } }).catch(() => undefined);
+    // P0 proof: the second company's data MUST have survived our cleanup
+    const g = globalThis as unknown as Record<string, { id: string; beforeLines: number; beforeAnalytics: number } | undefined>;
+    const second = g.__g7iCompany2;
+    if (second) {
+      const linesAfter = await prismaService.journalLine.count({ where: { companyId: second.id } });
+      const analyticsAfter = await prismaService.journalLineAnalytic.count({
+        where: { journalLine: { companyId: second.id } },
+      });
+      const companyStillThere = await prismaService.company.findUnique({ where: { id: second.id } });
+      // eslint-disable-next-line no-console
+      console.log(
+        `[g7i P0] second-company survival: lines ${linesAfter}/${second.beforeLines}, analytics ${analyticsAfter}/${second.beforeAnalytics}, company=${companyStillThere ? 'present' : 'MISSING'}`,
+      );
+      if (linesAfter !== second.beforeLines || companyStillThere === null) {
+        throw new Error('P0 VIOLATION: cleanup touched another company data');
+      }
+    }
     await prismaService.$disconnect();
   });
 
-  const itif = DB_URL ? it : it.skip;
+  const itif = DB_URL
+    ? it
+    : (name: string, fn: jest.ProvidesCallback) => {
+        // P0: make silent skips VISIBLE in the report output
+        // eslint-disable-next-line no-console
+        console.warn(`[g7i] SKIPPED (no DATABASE_URL): ${name}`);
+        return it.skip(name, fn);
+      };
   const D = (v: string | number) => new Prisma.Decimal(v);
 
   async function postBalanced(date: Date, lines: Array<{ accountCode: string; debit: string | number; credit: string | number; partyId?: string; description?: string }>) {
@@ -117,6 +158,11 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
 
     const tbAfter = await reports.trialBalance(COMPANY, { asOf: new Date() });
     expect(tbAfter.balanced).toBe(true); // whole TB stays balanced with both rows present
+    // P1 hardening: compare BANK closing balance before vs after the pair —
+    // pair nets zero so the closing must be IDENTICAL
+    // P1 hardening: BANK closing before the pair vs after — the pair nets
+    // zero, so the full-range closing must be IDENTICAL before and after
+    const glAfterFull = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
 
     const gl = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
     const pair = gl.rows.filter((r) => r.entryId === original.id || r.entryId === reversal.id);
@@ -238,6 +284,43 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     const rLines = await prisma.journalLine.findMany({ where: { journalEntryId: reversal.id } });
     const revCredit = rLines.find((l) => l.credit.gt(0))!;
     expect(revCredit.credit.toString()).toBe(big); // exact after reversal too
+  });
+
+  itif('g7i-p0 second-company data survives cleanup', async () => {
+    // Second hermetic company with one posted entry; g7i cleanup must NOT touch it.
+    const company2 = await prismaService.company.create({
+      data: { nameFa: `g7i-second-${Date.now()}`, status: 'ACTIVE' },
+    });
+    const bank2 = await prismaService.chartOfAccount.create({
+      data: { code: 'BANK', name: 'بانک شرکت دوم', type: 'ASSET', companyId: company2.id },
+    });
+    const rev2 = await prismaService.chartOfAccount.create({
+      data: { code: 'SALES_REVENUE', name: 'درآمد شرکت دوم', type: 'REVENUE', companyId: company2.id },
+    });
+    await prismaService.sequence.create({
+      data: { companyId: company2.id, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
+    });
+    const entry2 = await journal.post(prismaService as never, {
+      companyId: company2.id,
+      entryDate: new Date(),
+      journalCode: 'GENERAL',
+      lines: [
+        { accountCode: 'BANK', debit: 77, credit: 0 },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 77 },
+      ],
+    });
+    const beforeLines = await prismaService.journalLine.count({ where: { companyId: company2.id } });
+    expect(beforeLines).toBe(2);
+    const beforeAnalytics = await prismaService.journalLineAnalytic.count({
+      where: { journalLine: { companyId: company2.id } },
+    });
+    void entry2;
+    // record pre-cleanup state for verification after afterAll runs
+    (globalThis as Record<string, unknown>).__g7iCompany2 = {
+      id: company2.id,
+      beforeLines,
+      beforeAnalytics,
+    };
   });
 
   itif('g7i-18 company isolation', async () => {

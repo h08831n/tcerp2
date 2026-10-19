@@ -43,19 +43,11 @@ export class ValuationReportService {
              pt.name_fa AS template_name_fa,
              pc.name_fa AS category_name_fa,
              b.name_fa AS brand_name_fa,
-             COALESCE(dl.warehouse_id, sl.warehouse_id) AS warehouse_id,
+             dl.warehouse_id AS warehouse_id,
              w.name_fa AS warehouse_name_fa,
              uom.symbol AS uom_symbol,
-             CASE WHEN dl.type = 'INTERNAL'
-                  THEN m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0)
-                  ELSE 0 END
-               + CASE WHEN sl.type = 'INTERNAL'
-                  THEN -(m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0))
-                  ELSE 0 END
-               AS leg_value,
-             CASE WHEN dl.type = 'INTERNAL' THEN m.normalized_quantity ELSE 0 END
-               + CASE WHEN sl.type = 'INTERNAL' THEN -m.normalized_quantity ELSE 0 END
-               AS leg_quantity
+             m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0) AS leg_value,
+             m.normalized_quantity AS leg_quantity
       FROM stock_movements m
       JOIN product_variants pv ON pv.id = m.product_variant_id
       JOIN product_templates pt ON pt.id = pv.template_id
@@ -63,14 +55,35 @@ export class ValuationReportService {
       LEFT JOIN brands b ON b.id = pt.brand_id
       LEFT JOIN uoms uom ON uom.id = pv.inventory_uom_id
       JOIN stock_locations dl ON dl.id = m.destination_location_id
-      JOIN stock_locations sl ON sl.id = m.source_location_id
-      LEFT JOIN warehouses w ON w.id = COALESCE(dl.warehouse_id, sl.warehouse_id)
+      JOIN warehouses w ON w.id = dl.warehouse_id
       WHERE m.company_id = ${companyId}::uuid
+        AND dl.type = 'INTERNAL'
         AND m.movement_date <= ${asOf}::timestamptz
-        ${opts.warehouseId ? Prisma.sql`AND (dl.warehouse_id = ${opts.warehouseId}::uuid OR sl.warehouse_id = ${opts.warehouseId}::uuid)` : Prisma.empty}
+        ${opts.warehouseId ? Prisma.sql`AND dl.warehouse_id = ${opts.warehouseId}::uuid` : Prisma.empty}
         ${opts.categoryId ? Prisma.sql`AND pt.category_id = ${opts.categoryId}::uuid` : Prisma.empty}
         ${opts.variantId ? Prisma.sql`AND m.product_variant_id = ${opts.variantId}::uuid` : Prisma.empty}
-        ${search ? Prisma.sql`AND (pv.name_fa ILIKE ${'%' + search + '%'} OR pv.sku ILIKE ${'%' + search + '%'} OR pt.name_fa ILIKE ${'%' + search + '%'})` : Prisma.empty}`;
+        ${search ? Prisma.sql`AND (pv.name_fa ILIKE ${'%' + search + '%'} OR pv.sku ILIKE ${'%' + search + '%'} OR pt.name_fa ILIKE ${'%' + search + '%'})` : Prisma.empty}
+      UNION ALL
+      SELECT m.product_variant_id,
+             pv.sku, pv.name_fa, pt.name_fa, pc.name_fa, b.name_fa,
+             sl.warehouse_id, w.name_fa, uom.symbol,
+             -(m.normalized_quantity * COALESCE(m.unit_cost_snapshot, 0)),
+             -m.normalized_quantity
+      FROM stock_movements m
+      JOIN product_variants pv ON pv.id = m.product_variant_id
+      JOIN product_templates pt ON pt.id = pv.template_id
+      LEFT JOIN product_categories pc ON pc.id = pt.category_id
+      LEFT JOIN brands b ON b.id = pt.brand_id
+      LEFT JOIN uoms uom ON uom.id = pv.inventory_uom_id
+      JOIN stock_locations sl ON sl.id = m.source_location_id
+      JOIN warehouses w ON w.id = sl.warehouse_id
+      WHERE m.company_id = ${companyId}::uuid
+        AND sl.type = 'INTERNAL'
+        AND m.movement_date <= ${asOf}::timestamptz
+        ${opts.warehouseId ? Prisma.sql`AND sl.warehouse_id = ${opts.warehouseId}::uuid` : Prisma.empty}
+        ${opts.categoryId ? Prisma.sql`AND pt.category_id = ${opts.categoryId}::uuid` : Prisma.empty}
+        ${opts.variantId ? Prisma.sql`AND m.product_variant_id = ${opts.variantId}::uuid` : Prisma.empty}
+        ${search ? Prisma.sql`AND (pv.name_fa ILIKE ${'%' + search + '%'} OR pv.sku ILIKE ${'%' + search + '%'} OR pt.name_fa ILIKE ${'%' + search + '%'})` : Prisma.empty}`
 
     const rows = await this.prisma.$queryRaw<
       Array<{

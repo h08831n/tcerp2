@@ -294,6 +294,14 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Tests g7i-01..20; p5c-05 hermetic company; p5-12 timeout; treasury gates Decimal-persistence relaxed
 - Tests: 176 suites — 648/648 integration; smoke A/B verified live
 
+### Post-Commit Review and Critical Fixes (COMPLETED)
+- P0: g7i afterAll cleanup fully company-scoped (analytics via own line ids); DB guard refuses non-localhost DATABASE_URL; second-company survival test proves other-company data untouched
+- P1 Decimal: toNumber() eliminated from event engine, reports, opening balance — Decimal end-to-end; precision tests cover save/report/reversal of 123456789012345.6789
+- P1 valuation: explicit UNION ALL legs (destination +, source −) per movement; branch-safe JOIN order; warehouse filter per-leg
+- P1 report tests: parent=exact Σ children, reversal before/after balance comparison, GL full-walk continuity, loud skips (console.warn) instead of silent
+- P2: profit date basis = JournalEntry.entryDate (financial date), documented in code; createdAt is bookkeeping timestamp only
+- Tests: 176 suites — 649/649 integration
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.

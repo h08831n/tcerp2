@@ -77,8 +77,8 @@ export class AccountingEventService {
           input.reversal ? (l.side === 'DEBIT' ? 'CREDIT' : 'DEBIT') : l.side;
         return {
           accountCode: l.accountCode,
-          debit: side === 'DEBIT' ? amount.toNumber() : 0,
-          credit: side === 'CREDIT' ? amount.toNumber() : 0,
+          debit: side === 'DEBIT' ? amount : new Prisma.Decimal(0),
+          credit: side === 'CREDIT' ? amount : new Prisma.Decimal(0),
           description: l.memo ?? input.description,
           analytics: this.analyticsFor(l.measure, input.analytics),
         };

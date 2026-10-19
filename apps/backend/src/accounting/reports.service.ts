@@ -234,8 +234,7 @@ export class ReportsService {
       closingBalance: openingBalance.plus(
         new Prisma.Decimal(totalsAgg._sum.debit ?? 0)
           .minus(new Prisma.Decimal(totalsAgg._sum.credit ?? 0))
-          .times(sign)
-          .toNumber(),
+          .times(normalSide === 'DEBIT' ? 1 : -1),
       ),
     };
 
@@ -299,8 +298,8 @@ export class ReportsService {
     }
 
     const signed = (d: Prisma.Decimal | null | undefined, c: Prisma.Decimal | null | undefined, type: AccountType) =>
-      new Prisma.Decimal(
-        new Prisma.Decimal(d ?? 0).minus(new Prisma.Decimal(c ?? 0)).times(this.normalSide(type) === 'DEBIT' ? 1 : -1).toNumber(),
+      new Prisma.Decimal(d ?? 0).minus(new Prisma.Decimal(c ?? 0)).times(
+        this.normalSide(type) === 'DEBIT' ? 1 : -1,
       );
 
     const status = { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] };

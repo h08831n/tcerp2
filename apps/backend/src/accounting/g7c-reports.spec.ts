@@ -114,7 +114,14 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
     await prisma?.$disconnect();
   });
 
-  const itif = DB_URL ? it : it.skip;
+  const itif = DB_URL
+    ? it
+    : (name: string, fn: jest.ProvidesCallback) => {
+        // P1: make silent skips VISIBLE
+        // eslint-disable-next-line no-console
+        console.warn(`[g7c] SKIPPED (no DATABASE_URL): ${name}`);
+        return it.skip(name, fn);
+      };
 
   itif('g7c-01 ledger totals match journal lines', async () => {
     const report = await reports.generalLedger(COMPANY, { accountCode: 'RECEIVABLE' });

@@ -19,14 +19,17 @@ export class ProfitReportService {
     companyId: string,
     opts: { from?: Date; to?: Date; customerId?: string; salespersonUserId?: string; productVariantId?: string; supplierId?: string },
   ) {
-    const events = await this.prisma.accountingEvent.findMany({
+    // Date basis (P2, ratified): FINANCIAL date = JournalEntry.entryDate
+    // (the operational loading date captured at event time), NOT the event
+    // bookkeeping timestamp createdAt. The journal entry is the source of
+    // truth; the event row is only its dimensional index.
+    // AccountingEvent has no journalEntry relation (journalEntryId only).
+    // Fetch events, then resolve entry dates via a separate journalEntry query.
+    const eventRows = await this.prisma.accountingEvent.findMany({
       where: {
         companyId,
         eventType: { in: ['SALES_COMPLETED_LOADING', 'INVENTORY_REVERSAL'] as const },
         status: 'POSTED',
-        ...(opts.from || opts.to
-          ? { createdAt: { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) } }
-          : {}),
       },
       orderBy: { createdAt: 'asc' as const },
       select: {
@@ -39,6 +42,22 @@ export class ProfitReportService {
         createdAt: true,
       },
     });
+    const journalEntries = await this.prisma.journalEntry.findMany({
+      where: {
+        companyId,
+        status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] },
+        id: { in: eventRows.map((e) => e.journalEntryId).filter((id): id is string => !!id) },
+        ...(opts.from || opts.to
+          ? { entryDate: { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) } }
+          : {}),
+      },
+      select: { id: true, entryDate: true },
+    });
+    const entryDateById = new Map(journalEntries.map((j) => [j.id, j.entryDate]));
+    const events = eventRows.filter(
+      (e): e is typeof e & { journalEntryId: string } =>
+        typeof e.journalEntryId === 'string' && entryDateById.has(e.journalEntryId),
+    );
 
     const sign = (e: (typeof events)[number]) => (e.eventType === 'INVENTORY_REVERSAL' ? -1 : 1);
     const rows = [];
@@ -72,7 +91,7 @@ export class ProfitReportService {
         journalEntryId: e.journalEntryId,
         sourceEntityType: e.sourceEntityType,
         sourceDocumentId: e.sourceEntityId, // navigation link only
-        entryDate: e.createdAt,
+        entryDate: entryDateById.get(e.journalEntryId)!,
         eventType: e.eventType,
         customerId,
         customerName,
