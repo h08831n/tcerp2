@@ -297,14 +297,16 @@ export class ReportsService {
       );
 
     const status = { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] };
-    const beforeSums = await this.prisma.journalLine.groupBy({
-      by: ['accountId'],
-      where: {
-        companyId,
-        entry: { companyId, status, ...(from ? { entryDate: { lt: from } } : {}) },
-      },
-      _sum: { debit: true, credit: true },
-    });
+    // Opening window exists only when `from` is given — without it the whole
+    // history is the movement window and beforeSums must stay EMPTY (else
+    // closing double-counts).
+    const beforeSums = from
+      ? await this.prisma.journalLine.groupBy({
+          by: ['accountId'],
+          where: { companyId, entry: { companyId, status, entryDate: { lt: from } } },
+          _sum: { debit: true, credit: true },
+        })
+      : [];
     // eslint-disable-next-line no-console
     const beforeMap = new Map(beforeSums.map((r) => [r.accountId, r]));
     const periodSums = await this.prisma.journalLine.groupBy({

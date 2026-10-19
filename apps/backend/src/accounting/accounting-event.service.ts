@@ -50,7 +50,15 @@ export class AccountingEventService {
         eventType: input.eventType,
         sourceEntityType: input.sourceEntityType,
         sourceEntityId: input.sourceEntityId,
-        payload: { measures: input.measures, analytics: input.analytics, reversal: input.reversal ?? false } as Prisma.InputJsonValue,
+        // Prisma Decimal values are not JSON-serializable — stringify each
+        // measure so the event log stores exact decimal strings
+        payload: {
+          measures: Object.fromEntries(
+            Object.entries(input.measures).map(([k, v]) => [k, v.toString()]),
+          ),
+          analytics: input.analytics,
+          reversal: input.reversal ?? false,
+        } as Prisma.InputJsonValue,
         status: 'FAILED',
         idempotencyKey: input.idempotencyKey,
       },

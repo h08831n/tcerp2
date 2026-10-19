@@ -106,6 +106,20 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     await prismaService.sequence.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.party.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.company.delete({ where: { id: COMPANY } }).catch(() => undefined);
+    // P0: after survival assertions passed, clean the second company TOO —
+    // scoped to its own id, never global.
+    const g = globalThis as unknown as Record<string, { id: string; beforeLines: number; beforeAnalytics: number } | undefined>;
+    const second = g.__g7iCompany2;
+    if (second && second.id) {
+      await prismaService.journalLineAnalytic.deleteMany({
+        where: { journalLine: { companyId: second.id } },
+      });
+      await prismaService.journalLine.deleteMany({ where: { companyId: second.id } });
+      await prismaService.journalEntry.deleteMany({ where: { companyId: second.id } });
+      await prismaService.chartOfAccount.deleteMany({ where: { companyId: second.id } });
+      await prismaService.sequence.deleteMany({ where: { companyId: second.id } });
+      await prismaService.company.delete({ where: { id: second.id } }).catch(() => undefined);
+    }
     await prismaService.$disconnect();
   });
 

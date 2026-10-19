@@ -2,10 +2,12 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ValuationReportService } from './valuation-report.service';
 import { NormalizationService } from '../inventory/normalization.service';
+import { assertSafeIntegrationDatabase } from './db-guard';
 
 jest.setTimeout(60000);
 
 const DB_URL = process.env.DATABASE_URL;
+assertSafeIntegrationDatabase(DB_URL);
 const D = (v: string | number) => new Prisma.Decimal(v);
 
 describe('g7c-v — Inventory valuation LEGS integrity (hermetic live DB)', () => {
@@ -24,7 +26,11 @@ describe('g7c-v — Inventory valuation LEGS integrity (hermetic live DB)', () =
   const movementIds: string[] = [];
 
   beforeAll(async () => {
-    if (!DB_URL) return;
+    if (!DB_URL) {
+      // eslint-disable-next-line no-console
+      console.warn('[g7c-v] SKIPPED (no DATABASE_URL): entire suite');
+      return;
+    }
     const { PrismaService: S } = await import('../prisma/prisma.service');
     prismaService = new S();
     prisma = prismaService as unknown as PrismaClient;
@@ -233,29 +239,39 @@ describe('g7c-v — Inventory valuation LEGS integrity (hermetic live DB)', () =
     expect(kgQty.toNumber()).toBe(1870); // 100 × 18.7
   });
 
-  itif('g7c-v-06 asOf excludes later movements', async () => {
-    const past = new Date(Date.now() - 7 * 86400000);
-    await movement({
-      variantId: variantKg,
-      sourceLocationId: supplierLoc,
-      destinationLocationId: locA,
-      quantity: '5000',
-      uomId: (await prismaService.uom.findFirstOrThrow({ where: { companyId: COMPANY, symbol: 'kg' } })).id,
-      unitCost: '10',
-      movementDate: new Date(Date.now() + 7 * 86400000), // FUTURE — excluded from asOf past
-      idempotencyKey: 'v06-future',
-    });
-    const futureRow = await prismaService.stockMovement.findFirstOrThrow({ where: { idempotencyKey: 'v06-future' } });
-    movementIds.push(futureRow.id);
-    const asOfPast = await valuation.valuation(COMPANY, { variantId: variantKg, asOf: past });
-    const qtyPast = asOfPast.totals.grandQuantity.toNumber();
-    // future movement excluded → whatever the value, it must be less than full total
-    const asOfNow = await valuation.valuation(COMPANY, { variantId: variantKg, asOf: new Date(Date.now() + 86400000) });
-    expect(asOfNow.totals.grandQuantity.gt(asOfPast.totals.grandQuantity)).toBe(true);
-    // cleanup this movement
-    await prismaService.stockMovement.deleteMany({ where: { idempotencyKey: 'v06-future' } });
-    const idx = movementIds.indexOf(futureRow.id);
-    if (idx >= 0) movementIds.splice(idx, 1);
+  itif('g7c-v-06 asOf boundary: explicit reference date, movement on the boundary, post-boundary movement', async () => {
+    // Explicit timeline (all dates pinned to UTC midnight):
+    //   REF  = 2026-06-15  → reference/report date
+    //   T1   = 2026-06-10  → movement BEFORE the reference date (in)
+    //   T2   = 2026-06-15  → movement ON the boundary (must count: <= asOf)
+    //   T3   = 2026-06-20  → movement AFTER the reference date (must be excluded)
+    const refDate = new Date('2026-06-15T00:00:00.000Z');
+    const d1 = new Date('2026-06-10T00:00:00.000Z');
+    const d2 = new Date('2026-06-15T00:00:00.000Z');
+    const d3 = new Date('2026-06-20T00:00:00.000Z');
+    const kgUom = await prismaService.uom.findFirstOrThrow({ where: { companyId: COMPANY, symbol: 'kg' } });
+
+    await movement({ variantId: variantKg, sourceLocationId: supplierLoc, destinationLocationId: locA, quantity: '10000', uomId: kgUom.id, unitCost: '10', movementDate: d1, idempotencyKey: 'v06-before' });
+    movementIds.push((await prismaService.stockMovement.findFirstOrThrow({ where: { idempotencyKey: 'v06-before' } })).id);
+    await movement({ variantId: variantKg, sourceLocationId: supplierLoc, destinationLocationId: locA, quantity: '5000', uomId: kgUom.id, unitCost: '12', movementDate: d2, idempotencyKey: 'v06-boundary' });
+    movementIds.push((await prismaService.stockMovement.findFirstOrThrow({ where: { idempotencyKey: 'v06-boundary' } })).id);
+    await movement({ variantId: variantKg, sourceLocationId: supplierLoc, destinationLocationId: locA, quantity: '7777', uomId: kgUom.id, unitCost: '99', movementDate: d3, idempotencyKey: 'v06-after' });
+    movementIds.push((await prismaService.stockMovement.findFirstOrThrow({ where: { idempotencyKey: 'v06-after' } })).id);
+
+    // asOf = REF: T1 + T2 (on-boundary) count, T3 excluded
+    const asOfRef = await valuation.valuation(COMPANY, { variantId: variantKg, asOf: refDate });
+    expect(asOfRef.totals.grandQuantity.toNumber()).toBe(15000); // 10000 + 5000
+    expect(asOfRef.totals.grandTotalValue.toNumber()).toBe(160000); // 100000 + 60000
+
+    // asOf before T1: nothing
+    const asOfEarly = await valuation.valuation(COMPANY, { variantId: variantKg, asOf: new Date('2026-06-01T00:00:00.000Z') });
+    expect(asOfEarly.totals.grandQuantity.toNumber()).toBe(0);
+    expect(asOfEarly.totals.grandTotalValue.toNumber()).toBe(0);
+
+    // asOf after T3: everything
+    const asOfLate = await valuation.valuation(COMPANY, { variantId: variantKg, asOf: new Date('2026-06-30T00:00:00.000Z') });
+    expect(asOfLate.totals.grandQuantity.toNumber()).toBe(22777); // 10000 + 5000 + 7777
+    expect(asOfLate.totals.grandTotalValue.toNumber()).toBe(929923); // 100000 + 60000 + 769923
   });
 
   itif('g7c-v-07 grandTotalValue identical across pages', async () => {

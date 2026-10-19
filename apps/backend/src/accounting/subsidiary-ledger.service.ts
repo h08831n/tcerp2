@@ -58,9 +58,9 @@ export class SubsidiaryLedgerService {
     const opMap = new Map(opBalances.map((b) => [b.partyId, b.balance]));
 
     const items = rows.map((r) => {
-      const accountingBalance = new Prisma.Decimal(
-        (Number(r.debit ?? 0) - Number(r.credit ?? 0)) * sign,
-      );
+      const accountingBalance = new Prisma.Decimal(r.debit ?? 0)
+        .minus(new Prisma.Decimal(r.credit ?? 0))
+        .times(sign);
       const operational = opMap.get(r.party_id) ?? null;
       return {
         partyId: r.party_id,
@@ -116,7 +116,9 @@ export class SubsidiaryLedgerService {
     const sign = opts.accountCode === 'RECEIVABLE' ? 1 : -1;
     let running = new Prisma.Decimal(0);
     const rows = lines.map((l) => {
-      running = running.plus(new Prisma.Decimal((Number(l.debit) - Number(l.credit)) * sign));
+      running = running.plus(
+        new Prisma.Decimal(l.debit).minus(new Prisma.Decimal(l.credit)).times(sign),
+      );
       return {
         entryId: l.entry.id,
         entryNumber: l.entry.entryNumber,
@@ -160,9 +162,9 @@ export class SubsidiaryLedgerService {
     const balances = new Map(
       agg.map((r) => [
         r.partyId,
-        new Prisma.Decimal(
-          (Number(r._sum.debit ?? 0) - Number(r._sum.credit ?? 0)) * (accountCode === 'RECEIVABLE' ? 1 : -1),
-        ),
+        new Prisma.Decimal(r._sum.debit ?? 0)
+          .minus(new Prisma.Decimal(r._sum.credit ?? 0))
+          .times(accountCode === 'RECEIVABLE' ? 1 : -1),
       ]),
     );
 
