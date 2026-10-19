@@ -8,7 +8,8 @@ import { ValuationReportService } from '../accounting/valuation-report.service';
 import { OpeningBalanceService } from '../accounting/opening-balance.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { NormalizationService } from '../inventory/normalization.service';
-import { assertSafeIntegrationDatabase } from './db-guard';
+import { assertSafeIntegrationDatabase } from '../testing/db-guard';
+import { TEST_INTEGRATION } from '../testing/integration';
 import {
   describeIntegration,
   integrationPrisma,
@@ -19,7 +20,8 @@ jest.setTimeout(90000);
 
 const DB_URL = process.env.DATABASE_URL;
 
-assertSafeIntegrationDatabase(DB_URL);
+// guard only in real integration runs — unit runs must not touch the DB
+if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 let SURVIVOR_ID = ''; // registered by g7i-19, read by the post-cleanup survival describe
 
@@ -123,7 +125,7 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     await prismaService.$disconnect();
   });
 
-  const itif = DB_URL
+  const itif = TEST_INTEGRATION && DB_URL
     ? it
     : (name: string, fn: jest.ProvidesCallback) => {
         // P1: make silent skips VISIBLE
@@ -377,7 +379,9 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
 
 // ── P0 survival verification AFTER the suite's afterAll cleanup ran ──
 
-describe('g7i-p0 second-company survival (post-cleanup)', () => {
+// integration-only: the survivor id is registered by the main suite's
+// g7i-19, which does not run without a database
+describeIntegration('g7i-p0 second-company survival (post-cleanup)', () => {
   const prisma = integrationPrisma();
 
   it('second company data survived g7i cleanup', async () => {

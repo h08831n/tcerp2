@@ -30,10 +30,21 @@ describeIntegration('g6-25 inventory-grid-no-n1', () => {
       variantIds.push(variant.variantId);
     }
     const loading = loadingService(prisma);
+    // SUPPLIER_TO_WAREHOUSE: the spec must create its OWN warehouse-scoped
+    // movements — on a clean dedicated test database no other data exists,
+    // so the default DIRECT_SUPPLIER_TO_CUSTOMER route (no warehouse legs)
+    // would leave the per-warehouse assertion with zero rows.
+    const mainWarehouse = await prisma.warehouse.upsert({
+      where: { companyId_code: { companyId: INTEGRATION_COMPANY_ID, code: 'MAIN' } },
+      create: { companyId: INTEGRATION_COMPANY_ID, code: 'MAIN', nameFa: 'انبار مرکزی', isDefault: true },
+      update: {},
+    });
     const created = await loading.create(
       INTEGRATION_COMPANY_ID,
       {
         loadingDate: new Date(),
+        route: 'SUPPLIER_TO_WAREHOUSE',
+        warehouseId: mainWarehouse.id,
         lines: variantIds.map((productVariantId) => ({ productVariantId, actualQuantity: 5 })),
       },
       actor,

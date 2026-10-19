@@ -4,11 +4,14 @@ import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
 import { JournalService } from './journal.service';
 import { FiscalYearService } from './fiscal-year.service';
-import { INTEGRATION_COMPANY_ID } from '../testing/integration';
+import { INTEGRATION_COMPANY_ID, TEST_INTEGRATION } from '../testing/integration';
+import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 
 jest.setTimeout(60000);
 
 const DB_URL = process.env.DATABASE_URL;
+// guard only in real integration runs — unit runs must not touch the DB
+if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 const COMPANY = INTEGRATION_COMPANY_ID;
 
@@ -16,22 +19,60 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
   let prisma: PrismaService;
   let journal: JournalService;
   let fiscal: FiscalYearService;
+  // DB Safety Gate: this suite posts into the SHARED seeded company, so
+  // cleanup is scoped by snapshot diff — only records created during THIS
+  // run (after the beforeAll snapshot) are removed, never pre-existing data.
+  let preEntryIds: string[] = [];
+  let preFiscalYearIds: string[] = [];
+  let prePartyIds: string[] = [];
 
   beforeAll(async () => {
-    if (!DB_URL) return;
+    if (!TEST_INTEGRATION || !DB_URL) return;
     const { PrismaService: S } = await import('../prisma/prisma.service');
     prisma = new S();
     await prisma.$connect();
+    preEntryIds = (
+      await prisma.journalEntry.findMany({ where: { companyId: COMPANY }, select: { id: true } })
+    ).map((e) => e.id);
+    preFiscalYearIds = (
+      await prisma.fiscalYear.findMany({ where: { companyId: COMPANY }, select: { id: true } })
+    ).map((y) => y.id);
+    prePartyIds = (
+      await prisma.party.findMany({ where: { companyId: COMPANY }, select: { id: true } })
+    ).map((p) => p.id);
     const audit = new AuditService(prisma as never);
     journal = new JournalService(prisma as never, new SequencesService(prisma as never, audit));
     fiscal = new FiscalYearService(prisma as never, audit);
   });
 
   afterAll(async () => {
-    await prisma?.$disconnect();
+    if (!prisma) {
+      return;
+    }
+    const myEntryIds = (
+      await prisma.journalEntry.findMany({
+        where: { companyId: COMPANY, id: { notIn: preEntryIds } },
+        select: { id: true },
+      })
+    ).map((e) => e.id);
+    const myLineIds = (
+      await prisma.journalLine.findMany({ where: { journalEntryId: { in: myEntryIds } }, select: { id: true } })
+    ).map((l) => l.id);
+    await prisma.journalLineAnalytic.deleteMany({ where: { journalLineId: { in: myLineIds } } });
+    await prisma.journalLine.deleteMany({ where: { journalEntryId: { in: myEntryIds } } });
+    await prisma.journalEntry.deleteMany({ where: { id: { in: myEntryIds } } });
+    for (const y of await prisma.fiscalYear.findMany({
+      where: { companyId: COMPANY, id: { notIn: preFiscalYearIds } },
+      select: { id: true },
+    })) {
+      await prisma.fiscalPeriod.deleteMany({ where: { fiscalYearId: y.id } });
+      await prisma.fiscalYear.delete({ where: { id: y.id } });
+    }
+    await prisma.party.deleteMany({ where: { companyId: COMPANY, id: { notIn: prePartyIds } } });
+    await prisma.$disconnect();
   });
 
-  const itif = DB_URL ? it : it.skip;
+  const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
   const today = new Date().toISOString().slice(0, 10);
 
   itif('g7-01 balanced journal posts', async () => {

@@ -7,14 +7,16 @@ import { SubsidiaryLedgerService } from './subsidiary-ledger.service';
 import { ValuationReportService } from './valuation-report.service';
 import { ProfitReportService } from './profit-report.service';
 import { SequencesService } from '../sequences/sequences.service';
-import { assertSafeIntegrationDatabase } from './db-guard';
+import { assertSafeIntegrationDatabase } from '../testing/db-guard';
+import { TEST_INTEGRATION } from '../testing/integration';
 
 jest.setTimeout(90000);
 
 const DB_URL = process.env.DATABASE_URL;
 
-// P0: refuse to connect to anything but the local test database
-assertSafeIntegrationDatabase(DB_URL);
+// P0: refuse to connect to anything but a dedicated test database —
+// checked only in real integration runs; unit runs never touch the DB
+if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 // High-value + fractional precision amount (beyond float64 safe integer range)
@@ -75,7 +77,7 @@ describe('g7c-p — Decimal precision across financial reports (hermetic live DB
     customerId = customer.id;
   });
 
-  const itif = DB_URL
+  const itif = TEST_INTEGRATION && DB_URL
     ? it
     : (name: string, fn: jest.ProvidesCallback) => {
         // make silent skips VISIBLE

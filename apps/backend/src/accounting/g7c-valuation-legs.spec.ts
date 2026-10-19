@@ -2,12 +2,14 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ValuationReportService } from './valuation-report.service';
 import { NormalizationService } from '../inventory/normalization.service';
-import { assertSafeIntegrationDatabase } from './db-guard';
+import { assertSafeIntegrationDatabase } from '../testing/db-guard';
+import { TEST_INTEGRATION } from '../testing/integration';
 
 jest.setTimeout(60000);
 
 const DB_URL = process.env.DATABASE_URL;
-assertSafeIntegrationDatabase(DB_URL);
+// guard only in real integration runs — unit runs must not touch the DB
+if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 const D = (v: string | number) => new Prisma.Decimal(v);
 
 describe('g7c-v — Inventory valuation LEGS integrity (hermetic live DB)', () => {
@@ -164,7 +166,7 @@ describe('g7c-v — Inventory valuation LEGS integrity (hermetic live DB)', () =
     return row;
   }
 
-  const itif = DB_URL ? it : it.skip;
+  const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
 
   itif('g7c-v-01 supplier→INTERNAL increases warehouse A stock', async () => {
     await movement({

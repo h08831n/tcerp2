@@ -9,11 +9,15 @@ import { OpeningBalanceService } from './opening-balance.service';
 import { JournalService } from './journal.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { describeIntegration, integrationPrisma, disconnectIntegrationPrisma } from '../testing/integration';
+import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 import { createVariant } from '../testing/p4-fixtures';
+import { TEST_INTEGRATION } from '../testing/integration';
 
 jest.setTimeout(60000);
 
 const DB_URL = process.env.DATABASE_URL;
+// guard only in real integration runs — unit runs must not touch the DB
+if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 let COMPANY = '';
 
@@ -54,6 +58,13 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
     await prisma.sequence.create({
       data: { companyId: COMPANY, documentType: 'JOURNAL_ENTRY', name: 'سند روزنامه', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
     });
+    // UOM for createVariant (company-scoped fixture)
+    const uomCat = await prisma.uomCategory.create({
+      data: { companyId: COMPANY, code: 'WEIGHT', nameFa: 'وزن' },
+    });
+    await prisma.uom.create({
+      data: { companyId: COMPANY, categoryId: uomCat.id, nameFa: 'کیلوگرم', symbol: 'kg', conversionRatio: new Prisma.Decimal(1), isBaseUnit: true },
+    });
     // INTERNAL stock location for valuation movements
     await prisma.$executeRaw`
       INSERT INTO stock_locations (id, company_id, type, code, name_fa, active)
@@ -76,7 +87,7 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
         roles: { create: [{ role: 'CUSTOMER' }] },
       },
     });
-    const fixture = await createVariant(prisma, `g7c-${Date.now()}`);
+    const fixture = await createVariant(prisma, `g7c-${Date.now()}`, { companyId: COMPANY });
     variantId = fixture.variantId;
 
     const receivable = await prisma.chartOfAccount.findFirstOrThrow({ where: { companyId: COMPANY, code: 'RECEIVABLE' } });
@@ -109,12 +120,50 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
   });
 
   afterAll(async () => {
-    await prisma?.journalEntry.deleteMany({ where: { id: { in: entryIds } } });
-    await prisma?.journalLineAnalytic.deleteMany({ where: { journalLineId: { not: undefined } } });
-    await prisma?.$disconnect();
+    if (!prisma || !COMPANY) {
+      if (prisma) await prisma.$disconnect();
+      return;
+    }
+    // DB Safety Gate: scoped cleanup of EVERY record this suite creates —
+    // all filtered by the hermetic company id, never global. Failures are
+    // collected and re-thrown (a swallowed company-delete failure would
+    // leave test data behind).
+    const steps: Array<[string, () => Promise<unknown>]> = [
+      ['openingBalanceEntry', () => prisma.openingBalanceEntry.deleteMany({ where: { companyId: COMPANY } })],
+      ['journalLineAnalytic', () =>
+        prisma.journalLineAnalytic.deleteMany({ where: { journalLine: { companyId: COMPANY } } })],
+      ['journalLine', () => prisma.journalLine.deleteMany({ where: { companyId: COMPANY } })],
+      ['journalEntry', () => prisma.journalEntry.deleteMany({ where: { companyId: COMPANY } })],
+      ['stockLocation', () => prisma.stockLocation.deleteMany({ where: { companyId: COMPANY } })],
+      ['party', () => prisma.party.deleteMany({ where: { companyId: COMPANY } })],
+      ['productVariant', () => prisma.productVariant.deleteMany({ where: { companyId: COMPANY } })],
+      ['productTemplate', () => prisma.productTemplate.deleteMany({ where: { companyId: COMPANY } })],
+      ['productCategory', () => prisma.productCategory.deleteMany({ where: { companyId: COMPANY } })],
+      ['uom', () => prisma.uom.deleteMany({ where: { companyId: COMPANY } })],
+      ['uomCategory', () => prisma.uomCategory.deleteMany({ where: { companyId: COMPANY } })],
+      ['chartOfAccount', () => prisma.chartOfAccount.deleteMany({ where: { companyId: COMPANY } })],
+      ['sequence', () => prisma.sequence.deleteMany({ where: { companyId: COMPANY } })],
+    ];
+    const failures: string[] = [];
+    for (const [name, run] of steps) {
+      try {
+        await run();
+      } catch (e) {
+        failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    try {
+      await prisma.company.delete({ where: { id: COMPANY } });
+    } catch (e) {
+      failures.push(`company: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await prisma.$disconnect();
+    if (failures.length > 0) {
+      throw new Error(`g7c cleanup INCOMPLETE — test data left behind: ${failures.join(' | ')}`);
+    }
   });
 
-  const itif = DB_URL
+  const itif = TEST_INTEGRATION && DB_URL
     ? it
     : (name: string, fn: jest.ProvidesCallback) => {
         // P1: make silent skips VISIBLE

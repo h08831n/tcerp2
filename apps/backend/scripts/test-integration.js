@@ -8,6 +8,16 @@
  */
 process.env.TEST_INTEGRATION = '1';
 
+// Dedicated test database by default (DB Safety Gate): if the caller did not
+// provide DATABASE_URL, point at `tcerp_test` — NEVER at the development
+// database `tcerp` (the db-guard refuses it without an explicit
+// TCERP_INTEGRATION_ALLOW_DEV_DB=1 opt-in anyway). Prisma's dotenv loader
+// does not override an env var that is already set, so an explicitly exported
+// DATABASE_URL still wins.
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'postgresql://tcerp:tcerp@localhost:5433/tcerp_test?schema=public';
+}
+
 const { spawn } = require('child_process');
 const path = require('path');
 
