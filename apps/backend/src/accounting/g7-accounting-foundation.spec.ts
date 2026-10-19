@@ -98,13 +98,13 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         { accountCode: 'SALES_REVENUE', debit: 0, credit: 500000, description: 'revenue' },
       ],
     });
+    myEntryIds.push(entry.id); // registered before any assertion
     expect(entry.status).toBe('POSTED');
     expect(entry.entryNumber).toMatch(/^JE-\d{4}-\d{5}$/);
     const lines = entry.lines as { debit: Prisma.Decimal; credit: Prisma.Decimal }[];
     const debit = lines.reduce((s, l) => s + Number(l.debit), 0);
     const credit = lines.reduce((s, l) => s + Number(l.credit), 0);
     expect(debit).toBe(credit);
-    myEntryIds.push(entry.id);
     await prisma.journalEntry.delete({ where: { id: entry.id } });
   });
 
@@ -126,46 +126,55 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
     const years = await prisma.fiscalYear.findMany({ where: { companyId: COMPANY, status: 'OPEN' } });
     let year = years.find((y) => y.startDate <= new Date(today) && y.endDate >= new Date(today));
     if (!year) {
-      year = (await fiscal.create(COMPANY, {
+      const created = (await fiscal.create(COMPANY, {
         code: 'G7TEST',
         nameFa: 'سال تست g7',
         startDate: today,
         endDate: new Date(Date.now() + 300 * 86400000).toISOString().slice(0, 10),
-      }, ACTOR)) as never;
+      }, ACTOR)) as unknown as { id: string; code: string };
+      year = created as never;
+      // registered IMMEDIATELY after creation — cleanup must work even if
+      // every later assertion/operation in this test fails
+      myFiscalYearIds.push(created.id);
     }
     // close the period containing today
     const period = await prisma.fiscalPeriod.findFirst({
       where: { fiscalYearId: year.id, startDate: { lte: new Date(today) }, endDate: { gte: new Date(today) } },
     });
     expect(period).toBeTruthy();
-    await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'CLOSED', ACTOR);
-    await expect(
-      journal.post(prisma as never, {
+    // remember the PRE-EXISTING status — never assume OPEN
+    const originalStatus = period!.status;
+    try {
+      await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'CLOSED', ACTOR);
+      await expect(
+        journal.post(prisma as never, {
+          companyId: COMPANY,
+          entryDate: new Date(),
+          lines: [
+            { accountCode: 'BANK', debit: 10, credit: 0 },
+            { accountCode: 'SALES_REVENUE', debit: 0, credit: 10 },
+          ],
+        }),
+      ).rejects.toThrow('PERIOD_CLOSED');
+      // reopen → posts fine
+      await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'OPEN', ACTOR);
+      const entry = await journal.post(prisma as never, {
         companyId: COMPANY,
         entryDate: new Date(),
         lines: [
           { accountCode: 'BANK', debit: 10, credit: 0 },
           { accountCode: 'SALES_REVENUE', debit: 0, credit: 10 },
         ],
-      }),
-    ).rejects.toThrow('PERIOD_CLOSED');
-    // reopen → posts fine
-    await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'OPEN', ACTOR);
-    const entry = await journal.post(prisma as never, {
-      companyId: COMPANY,
-      entryDate: new Date(),
-      lines: [
-        { accountCode: 'BANK', debit: 10, credit: 0 },
-        { accountCode: 'SALES_REVENUE', debit: 0, credit: 10 },
-      ],
-    });
-    myEntryIds.push(entry.id);
-    await prisma.journalEntry.delete({ where: { id: entry.id } });
-    // cleanup test year if we created it (also tracked for afterAll)
-    if (year.code === 'G7TEST') {
-      myFiscalYearIds.push(year.id);
-      await prisma.fiscalPeriod.deleteMany({ where: { fiscalYearId: year.id } });
-      await prisma.fiscalYear.delete({ where: { id: year.id } });
+      });
+      myEntryIds.push(entry.id);
+      await prisma.journalEntry.delete({ where: { id: entry.id } });
+    } finally {
+      // every exit path restores the original status — the shared test
+      // database must never retain a modified fiscal-period status
+      const current = await prisma.fiscalPeriod.findUniqueOrThrow({ where: { id: period!.id } });
+      if (current.status !== originalStatus) {
+        await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, originalStatus, ACTOR);
+      }
     }
   });
 
@@ -178,13 +187,13 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         { accountCode: 'SALES_REVENUE', debit: 0, credit: 75 },
       ],
     });
+    myEntryIds.push(entry.id); // registered before any assertion
     await expect(
       journal.post(prisma as never, { companyId: COMPANY, entryDate: new Date(), lines: [] }),
     ).rejects.toThrow();
     // posted rows are corrected only via reverse; direct mutation is not exposed
     const raw = await prisma.journalEntry.findUniqueOrThrow({ where: { id: entry.id } });
     expect(raw.status).toBe('POSTED');
-    myEntryIds.push(entry.id);
     await prisma.journalEntry.delete({ where: { id: entry.id } });
   });
 
@@ -197,8 +206,9 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         { accountCode: 'SALES_REVENUE', debit: 0, credit: 300 },
       ],
     });
+    myEntryIds.push(original.id); // registered before reverse (which may fail)
     const { reversal } = await journal.reverse(original.id, ACTOR);
-    myEntryIds.push(original.id, reversal.id);
+    myEntryIds.push(reversal.id); // registered before any assertion
     expect(reversal.status).toBe('POSTED');
     const rLines = reversal.lines as { accountId: string; debit: Prisma.Decimal; credit: Prisma.Decimal }[];
     // mirrored: debits became credits — original BANK debit 300 → reversal BANK credit 300
@@ -239,6 +249,7 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         { accountCode: 'SALES_REVENUE', debit: 0, credit: 1200 },
       ],
     });
+    myEntryIds.push(entry.id); // explicitly tracked — inline delete is only best-effort
     const analytics = await prisma.journalLineAnalytic.findMany({
       where: { journalLineId: (entry.lines as { id: string }[])[0].id },
     });
