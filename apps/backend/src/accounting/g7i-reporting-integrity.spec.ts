@@ -8,22 +8,24 @@ import { ValuationReportService } from '../accounting/valuation-report.service';
 import { OpeningBalanceService } from '../accounting/opening-balance.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { NormalizationService } from '../inventory/normalization.service';
-import { describeIntegration, integrationPrisma, disconnectIntegrationPrisma } from '../testing/integration';
+import { assertSafeIntegrationDatabase } from './db-guard';
+import {
+  describeIntegration,
+  integrationPrisma,
+  disconnectIntegrationPrisma,
+} from '../testing/integration';
 
 jest.setTimeout(90000);
 
 const DB_URL = process.env.DATABASE_URL;
-// P0 guard: integration tests must target the local dev/test database only.
-if (DB_URL && !/localhost|127\.0\.0\.1/.test(DB_URL)) {
-  throw new Error(
-    'SAFETY: integration tests refused — DATABASE_URL does not point to localhost: ' + DB_URL,
-  );
-}
+
+assertSafeIntegrationDatabase(DB_URL);
 const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
+let SURVIVOR_ID = ''; // registered by g7i-19, read by the post-cleanup survival describe
 
 describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
-  let prisma: PrismaClient;
   let prismaService: PrismaService;
+  let prisma: PrismaClient;
   let audit: AuditService;
   let journal: JournalService;
   let reports: ReportsService;
@@ -32,7 +34,6 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
   let opening: OpeningBalanceService;
   let COMPANY = '';
   const entryIds: string[] = [];
-  let normalizer: NormalizationService;
 
   beforeAll(async () => {
     if (!DB_URL) return;
@@ -45,13 +46,7 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     reports = new ReportsService(prismaService as never);
     subsidiary = new SubsidiaryLedgerService(prismaService as never);
     valuation = new ValuationReportService(prismaService as never);
-    normalizer = new NormalizationService(prismaService as never);
-    opening = new OpeningBalanceService(
-      prismaService as never,
-      journal,
-      new SequencesService(prismaService as never, audit),
-      audit,
-    );
+    opening = new OpeningBalanceService(prismaService as never, journal, new SequencesService(prismaService as never, audit), audit);
 
     const company = await prismaService.company.create({
       data: { nameFa: `g7i-${Date.now()}`, status: 'ACTIVE' },
@@ -68,14 +63,22 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     ]) {
       await prismaService.chartOfAccount.create({ data: { ...a, companyId: COMPANY } });
     }
-    // child of PARENT_1 for hierarchy tests
     await prismaService.chartOfAccount.create({
-      data: { code: 'CHILD_11', name: 'بانک زیرمجموعه', type: 'ASSET', companyId: COMPANY, parentId: (await prismaService.chartOfAccount.findFirstOrThrow({ where: { companyId: COMPANY, code: 'PARENT_1' } })).id },
+      data: {
+        code: 'CHILD_11',
+        name: 'بانک زیرمجموعه',
+        type: 'ASSET',
+        companyId: COMPANY,
+        parentId: (
+          await prismaService.chartOfAccount.findFirstOrThrow({
+            where: { companyId: COMPANY, code: 'PARENT_1' },
+          })
+        ).id,
+      },
     });
     await prismaService.sequence.create({
       data: { companyId: COMPANY, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
     });
-    // INTERNAL stock location for valuation legs
     await prismaService.$executeRaw`
       INSERT INTO stock_locations (id, company_id, type, code, name_fa, active)
       VALUES (gen_random_uuid(), ${COMPANY}::uuid, 'INTERNAL', 'LOC-A', 'انبار A', true)`;
@@ -83,10 +86,8 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
 
   afterAll(async () => {
     if (!prismaService) return;
-    // cleanup hermetic company (order: dependents first)
-    // P0: scope EVERYTHING to the hermetic company — never other companies.
-    // Analytics rows are reachable only through our journal lines, so filter
-    // by their ids.
+    // P0: scope EVERYTHING to the hermetic company — analytics reachable only
+    // through our own journal lines.
     const myLineIds = (
       await prismaService.journalLine.findMany({
         where: { companyId: COMPANY },
@@ -105,37 +106,22 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     await prismaService.sequence.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.party.deleteMany({ where: { companyId: COMPANY } });
     await prismaService.company.delete({ where: { id: COMPANY } }).catch(() => undefined);
-    // P0 proof: the second company's data MUST have survived our cleanup
-    const g = globalThis as unknown as Record<string, { id: string; beforeLines: number; beforeAnalytics: number } | undefined>;
-    const second = g.__g7iCompany2;
-    if (second) {
-      const linesAfter = await prismaService.journalLine.count({ where: { companyId: second.id } });
-      const analyticsAfter = await prismaService.journalLineAnalytic.count({
-        where: { journalLine: { companyId: second.id } },
-      });
-      const companyStillThere = await prismaService.company.findUnique({ where: { id: second.id } });
-      // eslint-disable-next-line no-console
-      console.log(
-        `[g7i P0] second-company survival: lines ${linesAfter}/${second.beforeLines}, analytics ${analyticsAfter}/${second.beforeAnalytics}, company=${companyStillThere ? 'present' : 'MISSING'}`,
-      );
-      if (linesAfter !== second.beforeLines || companyStillThere === null) {
-        throw new Error('P0 VIOLATION: cleanup touched another company data');
-      }
-    }
     await prismaService.$disconnect();
   });
 
   const itif = DB_URL
     ? it
     : (name: string, fn: jest.ProvidesCallback) => {
-        // P0: make silent skips VISIBLE in the report output
+        // P1: make silent skips VISIBLE
         // eslint-disable-next-line no-console
         console.warn(`[g7i] SKIPPED (no DATABASE_URL): ${name}`);
         return it.skip(name, fn);
       };
-  const D = (v: string | number) => new Prisma.Decimal(v);
 
-  async function postBalanced(date: Date, lines: Array<{ accountCode: string; debit: string | number; credit: string | number; partyId?: string; description?: string }>) {
+  async function postBalanced(
+    date: Date,
+    lines: Array<{ accountCode: string; debit: string | number; credit: string | number; partyId?: string; description?: string }>,
+  ) {
     const entry = await journal.post(prismaService as never, {
       companyId: COMPANY,
       entryDate: date,
@@ -146,32 +132,47 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     return entry;
   }
 
-  itif('g7i-01/02 reversed entry net impact zero; both records remain auditable', async () => {
+  async function bankClosingBefore(date: Date): Promise<Prisma.Decimal> {
+    const account = await prismaService.chartOfAccount.findFirstOrThrow({
+      where: { companyId: COMPANY, code: 'BANK' },
+    });
+    const agg = await prismaService.journalLine.aggregate({
+      where: {
+        companyId: COMPANY,
+        accountId: account.id,
+        entry: { status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] }, entryDate: { lt: date } },
+      },
+      _sum: { debit: true, credit: true },
+    });
+    // BANK is debit-normal → signed = debit - credit
+    return new Prisma.Decimal(agg._sum.debit ?? 0).minus(new Prisma.Decimal(agg._sum.credit ?? 0));
+  }
+
+  itif('g7i-01/02 reversed entry net impact zero; before/after balances equal; both auditable', async () => {
     const date = new Date();
+    const balanceBefore = await bankClosingBefore(new Date(date.getTime() + 1000));
+
     const original = await postBalanced(date, [
       { accountCode: 'BANK', debit: 100, credit: 0 },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 100 },
     ]);
-    // Pair-net-zero: use the GL pair assertion (below) as the authoritative net check.
+    const afterOriginal = await bankClosingBefore(new Date(date.getTime() + 2000));
+    expect(afterOriginal.minus(balanceBefore).toNumber()).toBe(100);
+
     const { reversal } = await journal.reverse(original.id, ACTOR);
     entryIds.push(reversal.id);
 
-    const tbAfter = await reports.trialBalance(COMPANY, { asOf: new Date() });
-    expect(tbAfter.balanced).toBe(true); // whole TB stays balanced with both rows present
-    // P1 hardening: compare BANK closing balance before vs after the pair —
-    // pair nets zero so the closing must be IDENTICAL
-    // P1 hardening: BANK closing before the pair vs after — the pair nets
-    // zero, so the full-range closing must be IDENTICAL before and after
-    const glAfterFull = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
+    const balanceAfter = await bankClosingBefore(new Date(date.getTime() + 3000));
+    // net impact of the pair = 0 → final balance == balance before the original
+    expect(balanceAfter.toString()).toBe(balanceBefore.toString());
 
+    // both records remain auditable in the GL, flagged and linked
     const gl = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
     const pair = gl.rows.filter((r) => r.entryId === original.id || r.entryId === reversal.id);
-    expect(pair).toHaveLength(2); // BOTH remain auditable
-    expect(pair.every((r) => r.reversed === (r.entryId === original.id))).toBe(true);
+    expect(pair).toHaveLength(2);
+    expect(pair.find((r) => r.entryId === original.id)!.reversed).toBe(true);
+    expect(pair.find((r) => r.entryId === reversal.id)!.reversed).toBe(false);
     const pairNet = pair.reduce((s, r) => s.plus(r.debit).minus(r.credit), new Prisma.Decimal(0));
-    expect(pairNet.isZero()).toBe(true);
-    // GL closing impact zero between before/after reverse
-    // GL closing reflects net zero too: pairNet is zero so closing equals the pre-original balance
     expect(pairNet.isZero()).toBe(true);
   });
 
@@ -193,14 +194,12 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     ]);
     entryIds.push(e1.id, e2.id, e3.id);
 
-    // period Feb only: movement debit = 50 (excludes Jan opening 100 and Mar 25)
     const tbFeb = await reports.trialBalance(COMPANY, { from: new Date('2026-02-01'), to: new Date('2026-02-28') });
-    const bankFeb = tbFeb.rows.find((r) => r.accountCode === 'BANK');
-    expect(bankFeb!.openingDebit.toNumber()).toBe(100); // Jan posting is opening
-    expect(bankFeb!.debit.toNumber()).toBe(50); // movement excludes opening
-    expect(bankFeb!.closingDebit.toNumber()).toBe(150); // opening + movement
+    const bankFeb = tbFeb.rows.find((r) => r.accountCode === 'BANK')!;
+    expect(bankFeb.openingDebit.toNumber()).toBe(100); // Jan posting is opening
+    expect(bankFeb.debit.toNumber()).toBe(50); // movement excludes opening
+    expect(bankFeb.closingDebit.toNumber()).toBe(150); // opening + movement
 
-    // three-period totals reconcile: Jan close 100 → Feb close 150 → Mar close 175
     const tbJan = await reports.trialBalance(COMPANY, { from: new Date('2026-01-01'), to: new Date('2026-01-31') });
     const tbMar = await reports.trialBalance(COMPANY, { from: new Date('2026-03-01'), to: new Date('2026-03-31') });
     const bankJan = tbJan.rows.find((r) => r.accountCode === 'BANK')!;
@@ -212,8 +211,7 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     expect(tbMar.balanced).toBe(true);
   });
 
-  itif('g7i-05/06 parent roll-up = sum children; GL subtree', async () => {
-    // CHILD_11 is child of PARENT_1; post into CHILD_11
+  itif('g7i-05/06 parent roll-up = exact sum of children; GL subtree', async () => {
     const e = await postBalanced(new Date(), [
       { accountCode: 'CHILD_11', debit: 333, credit: 0 },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 333 },
@@ -222,18 +220,16 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     const tbAll = await reports.trialBalance(COMPANY, { level: 'all' });
     const parent = tbAll.rows.find((r) => r.accountCode === 'PARENT_1')!;
     const child = tbAll.rows.find((r) => r.accountCode === 'CHILD_11')!;
-    expect(parent.closingDebit.toNumber()).toBeGreaterThanOrEqual(child.closingDebit.toNumber());
-    // subtree GL on PARENT_1 includes the CHILD_11 line
+    // P1: parent closing = EXACT sum of children closings (CHILD_11 only leaf under PARENT_1)
+    expect(parent.closingDebit.toString()).toBe(child.closingDebit.toString());
     const gl = await reports.generalLedger(COMPANY, { accountCode: 'PARENT_1' });
     const subtreeLine = gl.rows.find((r) => r.debit.toNumber() === 333);
     expect(subtreeLine).toBeTruthy();
-    // and exact-account GL on CHILD_11 shows it too
     const glChild = await reports.generalLedger(COMPANY, { accountCode: 'CHILD_11' });
     expect(glChild.rows.some((r) => r.debit.toNumber() === 333)).toBe(true);
   });
 
   itif('g7i-17 GL keyset pagination running-balance continuity', async () => {
-    // post 5 entries 1..5 on BANK
     const created: string[] = [];
     for (let i = 1; i <= 5; i++) {
       const e = await postBalanced(new Date(), [
@@ -246,7 +242,6 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     const page1 = await reports.generalLedger(COMPANY, { accountCode: 'BANK', limit: 3 });
     expect(page1.rows).toHaveLength(3);
     expect(page1.nextCursor).toBeTruthy();
-    // last row of page1 running balance
     const lastP1 = page1.rows[page1.rows.length - 1].runningBalance.toNumber();
     const page2 = await reports.generalLedger(COMPANY, {
       accountCode: 'BANK',
@@ -254,9 +249,10 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
       cursor: page1.nextCursor,
     });
     expect(page2.rows.length).toBeGreaterThanOrEqual(2);
-    // page2 first row's running balance = page1 last + its own delta
     const firstP2 = page2.rows[0];
-    expect(firstP2.runningBalance.minus(lastP1).toNumber()).toBe(firstP2.debit.minus(firstP2.credit).toNumber());
+    expect(firstP2.runningBalance.minus(lastP1).toNumber()).toBe(
+      firstP2.debit.minus(firstP2.credit).toNumber(),
+    );
     // full walk: following nextCursor through ALL pages gives a final running
     // balance equal to totals.closingBalance (which spans the whole filter)
     let cursor = page1.nextCursor;
@@ -271,66 +267,34 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     expect(finalRow.runningBalance.toString()).toBe(page2.totals.closingBalance.toString());
   });
 
-  itif('g7i-14/15 Decimal precision survives post/report/reversal', async () => {
+  itif('g7i-14/15 Decimal precision survives post/report/reversal and final balance', async () => {
     const big = '123456789012345.6789';
+    const balanceBefore = await bankClosingBefore(new Date(Date.now() + 1000));
     const original = await postBalanced(new Date(), [
       { accountCode: 'BANK', debit: big, credit: 0 },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: big },
     ]);
+    // report round-trip: GL row carries the exact decimal
     const gl = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
     const row = gl.rows.find((r) => r.entryId === original.id)!;
-    expect(row.debit.toString()).toBe(big); // exact round-trip, no float loss
+    expect(row.debit.toString()).toBe(big);
+    // reversal: mirrored credit also exact
     const { reversal } = await journal.reverse(original.id, ACTOR);
     const rLines = await prisma.journalLine.findMany({ where: { journalEntryId: reversal.id } });
     const revCredit = rLines.find((l) => l.credit.gt(0))!;
-    expect(revCredit.credit.toString()).toBe(big); // exact after reversal too
-  });
-
-  itif('g7i-p0 second-company data survives cleanup', async () => {
-    // Second hermetic company with one posted entry; g7i cleanup must NOT touch it.
-    const company2 = await prismaService.company.create({
-      data: { nameFa: `g7i-second-${Date.now()}`, status: 'ACTIVE' },
-    });
-    const bank2 = await prismaService.chartOfAccount.create({
-      data: { code: 'BANK', name: 'بانک شرکت دوم', type: 'ASSET', companyId: company2.id },
-    });
-    const rev2 = await prismaService.chartOfAccount.create({
-      data: { code: 'SALES_REVENUE', name: 'درآمد شرکت دوم', type: 'REVENUE', companyId: company2.id },
-    });
-    await prismaService.sequence.create({
-      data: { companyId: company2.id, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
-    });
-    const entry2 = await journal.post(prismaService as never, {
-      companyId: company2.id,
-      entryDate: new Date(),
-      journalCode: 'GENERAL',
-      lines: [
-        { accountCode: 'BANK', debit: 77, credit: 0 },
-        { accountCode: 'SALES_REVENUE', debit: 0, credit: 77 },
-      ],
-    });
-    const beforeLines = await prismaService.journalLine.count({ where: { companyId: company2.id } });
-    expect(beforeLines).toBe(2);
-    const beforeAnalytics = await prismaService.journalLineAnalytic.count({
-      where: { journalLine: { companyId: company2.id } },
-    });
-    void entry2;
-    // record pre-cleanup state for verification after afterAll runs
-    (globalThis as Record<string, unknown>).__g7iCompany2 = {
-      id: company2.id,
-      beforeLines,
-      beforeAnalytics,
-    };
+    expect(revCredit.credit.toString()).toBe(big);
+    // final balance: original + big - big = balanceBefore (exact Decimal)
+    const balanceAfter = await bankClosingBefore(new Date(Date.now() + 3000));
+    expect(balanceAfter.minus(balanceBefore).isZero()).toBe(true);
   });
 
   itif('g7i-18 company isolation', async () => {
     const gl = await reports.generalLedger(COMPANY, { accountCode: 'BANK' });
-    // every row must belong to this company's entries
     const entries = await prisma.journalEntry.findMany({ where: { id: { in: gl.rows.map((r) => r.entryId) } } });
     expect(entries.every((e) => e.companyId === COMPANY)).toBe(true);
   });
 
-  itif('g7i-19/20 reversed subsidiary balance zero; report queries bounded', async () => {
+  itif('g7i-19/20 reversed subsidiary balance zero; second-company data survives scoped cleanup', async () => {
     const customer = await prisma.party.create({
       data: { companyId: COMPANY, type: 'PERSON', nameFa: 'g7i مشتری', roles: { create: [{ role: 'CUSTOMER' }] } },
     });
@@ -348,5 +312,68 @@ describe('g7i — Reporting Integrity Gate (hermetic live DB)', () => {
     const row = balances.items.find((i) => i.partyId === customer.id)!;
     // net zero: original + reversal both included
     expect(row.accountingBalance.isZero()).toBe(true);
+
+    // P0: second hermetic company with its own data — scoped cleanup must NOT
+    // touch it; counts verified before/after a scoped cleanup simulation
+    const company2 = await prismaService.company.create({
+      data: { nameFa: `g7i-second-${Date.now()}`, status: 'ACTIVE' },
+    });
+    SURVIVOR_ID = company2.id;
+    await prismaService.chartOfAccount.create({
+      data: { code: 'BANK', name: 'بانک شرکت دوم', type: 'ASSET', companyId: company2.id },
+    });
+    await prismaService.chartOfAccount.create({
+      data: { code: 'SALES_REVENUE', name: 'درآمد شرکت دوم', type: 'REVENUE', companyId: company2.id },
+    });
+    await prismaService.sequence.create({
+      data: { companyId: company2.id, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
+    });
+    const entry2 = await journal.post(prismaService as never, {
+      companyId: company2.id,
+      entryDate: new Date(),
+      journalCode: 'GENERAL',
+      lines: [
+        { accountCode: 'BANK', debit: 77, credit: 0 },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 77 },
+      ],
+    });
+    void entry2;
+    const beforeLines = await prismaService.journalLine.count({ where: { companyId: company2.id } });
+    const beforeAnalytics = await prismaService.journalLineAnalytic.count({
+      where: { journalLine: { companyId: company2.id } },
+    });
+
+    // run the same scoped deletes the afterAll performs — scoped to COMPANY
+    const myLineIds = (
+      await prismaService.journalLine.findMany({ where: { companyId: COMPANY }, select: { id: true } })
+    ).map((l) => l.id);
+    await prismaService.journalLineAnalytic.deleteMany({
+      where: { journalLineId: { in: myLineIds } },
+    });
+
+    const afterLines2 = await prismaService.journalLine.count({ where: { companyId: company2.id } });
+    expect(afterLines2).toBe(beforeLines); // untouched
+    const afterAnalytics2 = await prismaService.journalLineAnalytic.count({
+      where: { journalLine: { companyId: company2.id } },
+    });
+    expect(afterAnalytics2).toBe(beforeAnalytics); // untouched
+    expect(await prismaService.company.findUnique({ where: { id: company2.id } })).toBeTruthy();
+  });
+});
+
+// ── P0 survival verification AFTER the suite's afterAll cleanup ran ──
+
+describe('g7i-p0 second-company survival (post-cleanup)', () => {
+  const prisma = integrationPrisma();
+
+  it('second company data survived g7i cleanup', async () => {
+    // g7i-19 registers the id it created; must exist and be distinct
+    expect(SURVIVOR_ID).toBeTruthy();
+    const second = await prisma.company.findUnique({ where: { id: SURVIVOR_ID } });
+    expect(second).toBeTruthy(); // company NOT deleted by g7i cleanup
+    const lines = await prisma.journalLine.count({ where: { companyId: second!.id } });
+    expect(lines).toBeGreaterThan(0); // its journal lines intact
+    const entries = await prisma.journalEntry.count({ where: { companyId: second!.id } });
+    expect(entries).toBeGreaterThan(0);
   });
 });

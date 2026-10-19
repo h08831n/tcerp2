@@ -83,7 +83,7 @@ export class ReportsService {
   ): Promise<LedgerReport & { nextCursor: string | null }> {
     const { account, ids } = await this.resolveAccountSubtree(companyId, opts.accountCode);
     const normalSide = this.normalSide(account.type);
-    const sign = normalSide === 'DEBIT' ? 1 : -1;
+    const sign = new Prisma.Decimal(normalSide === 'DEBIT' ? 1 : -1);
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
     const entryWhere: Prisma.JournalEntryWhereInput = {
@@ -122,12 +122,9 @@ export class ReportsService {
         },
         _sum: { debit: true, credit: true },
       });
-      openingBalance = new Prisma.Decimal(
-        new Prisma.Decimal(openingAgg._sum.debit ?? 0)
-          .minus(new Prisma.Decimal(openingAgg._sum.credit ?? 0))
-          .times(sign)
-          .toNumber(),
-      );
+      openingBalance = new Prisma.Decimal(openingAgg._sum.debit ?? 0)
+        .minus(new Prisma.Decimal(openingAgg._sum.credit ?? 0))
+        .times(sign);
     }
 
     let cursorData: { d: string; n: string; l: string } | null = null;
@@ -199,12 +196,9 @@ export class ReportsService {
         },
         _sum: { debit: true, credit: true },
       });
-      running = new Prisma.Decimal(
-        new Prisma.Decimal(beforeCursor._sum?.debit ?? 0)
-          .minus(new Prisma.Decimal(beforeCursor._sum?.credit ?? 0))
-          .times(sign)
-          .toNumber(),
-      );
+      running = new Prisma.Decimal(beforeCursor._sum?.debit ?? 0)
+        .minus(new Prisma.Decimal(beforeCursor._sum?.credit ?? 0))
+        .times(sign);
     }
 
     const rows: LedgerRow[] = page.map((l) => {
@@ -330,8 +324,6 @@ export class ReportsService {
       _sum: { debit: true, credit: true },
     });
     const periodMap = new Map(periodSums.map((r) => [r.accountId, r]));
-    // eslint-disable-next-line no-console
-    console.log('DEBUG-TB-FROM from=', from && from.toISOString(), 'to=', to && to.toISOString(), 'beforeSums=', JSON.stringify(beforeSums.map((r) => ({ a: r.accountId.slice(0, 8), d: r._sum.debit?.toString(), c: r._sum.credit?.toString() }))), 'periodSums=', JSON.stringify(periodSums.map((r) => ({ a: r.accountId.slice(0, 8), d: r._sum.debit?.toString(), c: r._sum.credit?.toString() }))));
     // eslint-disable-next-line no-console
 
     const leafBalances = new Map<string, { opening: Prisma.Decimal; periodDebit: Prisma.Decimal; periodCredit: Prisma.Decimal; closing: Prisma.Decimal }>();

@@ -136,11 +136,30 @@ export class NormalizationService {
       if (source.categoryId === dest.categoryId) {
         return roundQuantity(applyConversion(source, dest, decimal).value);
       }
-      throw new ValidationError('ALLOCATION_UOM_INCOMPATIBLE', {
-        sourceUomId,
-        targetUomId,
-        hint: 'cross-category requires product weight conversion on the variant',
-      });
+      // Cross-category with an explicit target: route through the variant's
+      // product-weight pair (pieces × weightPerUnit → weight UOM → target),
+      // mirroring the no-target path below (integrity gate #3).
+      const weightPerUnit = variant.weightPerUnit;
+      const weightUomId = variant.weightUomId;
+      if (!weightPerUnit || !weightUomId) {
+        throw new ValidationError('ALLOCATION_UOM_INCOMPATIBLE', {
+          sourceUomId,
+          targetUomId,
+          hint: 'cross-category requires product weight conversion on the variant',
+        });
+      }
+      const weightUom = await this.prisma.uom.findUnique({ where: { id: weightUomId }, select: UOM_COLUMNS });
+      if (!weightUom || weightUom.categoryId !== dest.categoryId) {
+        throw new ValidationError('ALLOCATION_UOM_INCOMPATIBLE', {
+          sourceUomId,
+          targetUomId,
+          hint: 'variant weight UOM category does not match target category',
+        });
+      }
+      // pieces → weight UOM (via weightPerUnit) → target
+      const totalWeight = decimal.times(weightPerUnit); // in weight UOM
+      if (weightUom.id === dest.id) return roundQuantity(totalWeight);
+      return roundQuantity(applyConversion(weightUom, dest, totalWeight).value);
     }
     if (source.id === target.id) return roundQuantity(decimal);
 
