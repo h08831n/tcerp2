@@ -59,7 +59,15 @@ export class ProfitReportService {
         typeof e.journalEntryId === 'string' && entryDateById.has(e.journalEntryId),
     );
 
-    const sign = (e: (typeof events)[number]) => (e.eventType === 'INVENTORY_REVERSAL' ? -1 : 1);
+    // Reversal events negate: both the INVENTORY_REVERSAL type AND
+    // SALES_COMPLETED_LOADING events emitted by loading reversals with
+    // payload.reversal = true (side-swapped journal). Without the payload
+    // check a loading reversal would double-count revenue/cogs.
+    const sign = (e: (typeof events)[number]) =>
+      e.eventType === 'INVENTORY_REVERSAL' ||
+      (e.payload as { reversal?: boolean } | null)?.reversal === true
+        ? -1
+        : 1;
     const rows = [];
     for (const e of events) {
       const payload = e.payload as {

@@ -140,8 +140,6 @@ describe('g7c — Phase 7C reporting (live DB)', () => {
 
   itif('g7c-02 trial balance balanced', async () => {
     const tb = await reports.trialBalance(COMPANY, { asOf: new Date() });
-    // eslint-disable-next-line no-console
-    console.log('DEBUG-TB ' + JSON.stringify(tb.rows.map((r) => ({ c: r.accountCode, cd: r.closingDebit.toNumber(), cc: r.closingCredit.toNumber() }))));
     expect(tb.balanced).toBe(true);
     expect(tb.totals.closingDebit.equals(tb.totals.closingCredit)).toBe(true);
   });
