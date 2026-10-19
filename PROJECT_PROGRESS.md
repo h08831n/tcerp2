@@ -302,6 +302,22 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - P2: profit date basis = JournalEntry.entryDate (financial date), documented in code; createdAt is bookkeeping timestamp only
 - Tests: 176 suites — 649/649 integration
 
+### DB Safety Gate (COMPLETED — commits 6db34f5, c575b32)
+- Dedicated `tcerp_test` database (migrate + seed) is the DEFAULT target of `npm run test:integration`; the development database `tcerp` requires an explicit `TCERP_INTEGRATION_ALLOW_DEV_DB=1` opt-in (db-guard throws otherwise)
+- Guard moved to `src/testing/db-guard.ts`; centrally invoked in `integrationPrisma()`; fail-closed on missing DATABASE_URL during integration runs; error messages never contain credentials
+- Scoped cleanups: g7c-reports full hermetic-company cleanup; g7a explicit-ID capture; g6-25 self-contained warehouse fixture (was silently relying on dev-DB leftovers)
+- Tests: 179 suites — 667/667 integration (then 670 with guard regression tests)
+
+### Cleanup Hardening (COMPLETED — commit cae751d)
+- g7a: every created id registered immediately after creation (before failing assertions); g7-03 fiscal-period status restored to its ORIGINAL value on every exit path via try/finally; fiscal-year registration right after create
+
+### Phase 7D — Accounting UI and Fiscal Lifecycle (COMPLETED — commit <sha>)
+- Backend: journal-entry drill-down endpoint (`GET /accounting/reports/journal-entries/:id`, accounting.report, company-scoped, reversal linkage); GL controller now exposes the service's full filter surface (journalCode/partyId/analyticType/analyticId/limit/cursor — stale-controller discrepancy fixed); `FiscalYearService.reopenYear` (narrow: year-only reopen, periods stay CLOSED until individually reopened, audited, conflict on OPEN year); pre-existing `fiscal.create` transaction bug fixed (final getById read the base client inside the create transaction — could not see the uncommitted year; masked until now because the dev DB always had pre-existing years)
+- Permissions: `accountant` is the only non-admin role with `accounting.report` / `accounting.fiscal.manage` / `accounting.posting.manage`; operational roles (salesperson, buyer, purchase_manager, financial_manager) have none of them — codified by g7d-05
+- Frontend (RTL Persian, Next.js app router): `/accounting` hub (permission-aware tiles); General Ledger (keyset pagination, Jalali dates, drill-down modal); Trial Balance (balanced status banner, fiscal-year filter); Subsidiary Ledger (balances → per-party ledger drill-down); Operational Profit (event-based, totals); Inventory Valuation (page-stable grand totals); Opening Balances (stage + generate); Fiscal Years (list, close/reopen year, close/reopen period — all with explicit confirmation dialogs). `faMoneyExact` formats backend decimal STRINGS with Persian digits and thousand separators — monetary values never round-trip through JS floats
+- Year-end closing journals / retained-earnings transfer: NOT implemented — the requirements do not define their accounting semantics (documented gap, not invented)
+- Tests: 5 new g7d cases (drill-down + reversal linkage, company isolation, close/reopen-year posting lifecycle, audit trail, seeded role permissions); 184 suites — 675/675 integration
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.
@@ -429,8 +445,8 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   `tax_definitions` `used_at` note in `apps/backend/README.md`).
 
 ## Next steps
-1. Phase 5 — Daily Pricing + Publishing: per-variant daily price with full history
-   (`DailyPrice` already references the real `ProductVariant` rows landed in 3B), bulk
-   update engine, publish batches to Website/Telegram/WhatsApp/Eitaa/Bale/Rubika with
-   per-channel job isolation; bind a concrete `TodayPriceProvider` to the
-   `TODAY_PRICE_PROVIDER` token; add cross-uom daily-lowest comparison.
+1. Phase 7D is COMPLETE and awaiting review (accounting UI + fiscal lifecycle). Phase 8
+   (Treasury/Tax/Moadian per REQUIREMENTS §111) has NOT been started and must wait for
+   review approval.
+2. Year-end closing journals / retained-earnings transfer remain a DOCUMENTED GAP — the
+   requirements do not define their accounting semantics; do not invent them.

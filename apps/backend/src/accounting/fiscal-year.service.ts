@@ -56,7 +56,7 @@ export class FiscalYearService {
         actor,
         newValues: { code: year.code, start: input.startDate, end: input.endDate },
       });
-      return this.getById(companyId, year.id);
+      return this.getById(companyId, year.id, tx);
     });
   }
 
@@ -90,8 +90,10 @@ export class FiscalYearService {
     });
   }
 
-  async getById(companyId: string, id: string) {
-    const year = await this.prisma.fiscalYear.findFirst({
+  /** tx param: callers inside a create transaction MUST pass it — the base
+   *  client runs on a separate connection and cannot see uncommitted rows. */
+  async getById(companyId: string, id: string, tx?: Tx) {
+    const year = await (tx ?? this.prisma).fiscalYear.findFirst({
       where: { id, companyId },
       include: { periods: { orderBy: { code: 'asc' } } },
     });
@@ -118,6 +120,35 @@ export class FiscalYearService {
         actor,
         oldValues: { status: year.status },
         newValues: { status: 'CLOSED' },
+      });
+      return updated;
+    });
+  }
+
+  /** Reopen a CLOSED fiscal year (Phase 7D): guarded, audited, and
+   *  intentionally NARROW — it flips the year back to OPEN but does NOT
+   *  auto-reopen any period. Periods stay CLOSED until each is reopened
+   *  explicitly (setPeriodStatus), so an accidental reopen cannot silently
+   *  make closed months postable again. Year-end closing journals /
+   *  retained-earnings transfers are out of scope (semantics unspecified
+   *  in the requirements — documented gap, not invented here). */
+  async reopenYear(companyId: string, id: string, actor: { id: string; username: string }) {
+    return this.prisma.$transaction(async (tx) => {
+      const year = await tx.fiscalYear.findFirst({ where: { id, companyId } });
+      if (!year) throw new NotFoundError('Fiscal year not found', { id });
+      if (year.status === 'OPEN') throw new ConflictError('FISCAL_YEAR_ALREADY_OPEN');
+      const updated = await tx.fiscalYear.update({
+        where: { id },
+        data: { status: FiscalYearStatus.OPEN },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'fiscal_year',
+        entityId: id,
+        action: 'REOPEN',
+        companyId,
+        actor,
+        oldValues: { status: year.status },
+        newValues: { status: 'OPEN' },
       });
       return updated;
     });

@@ -78,6 +78,19 @@ export class FiscalYearController {
     return this.fiscalYearService.closeYear(companyId, id, actor);
   }
 
+  /** Reopen a closed fiscal year (Phase 7D): explicit action, audited;
+   *  periods stay CLOSED until each is reopened individually. */
+  @Post(':id/reopen')
+  @RequirePermissions('accounting.fiscal.manage')
+  async reopenYear(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.fiscalYearService.reopenYear(companyId, id, actor);
+  }
+
   @Post(':id/periods/:periodId/status')
   @RequirePermissions('accounting.fiscal.manage')
   async setPeriodStatus(

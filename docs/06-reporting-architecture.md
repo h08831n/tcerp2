@@ -117,6 +117,27 @@ the operational truth; accounting is the financial truth; the event engine
 | Customer/Supplier ledger | `GET /api/accounting/reports/subsidiary-ledger` (+ `?responsiblePartyId=` grouped view) |
 | Operational profit | `GET /api/accounting/reports/operational-profit` (per document / customer / period) |
 | Inventory valuation | `GET /api/accounting/reports/inventory-valuation` (+ per-variant history) |
+| Journal entry drill-down (Phase 7D) | `GET /api/accounting/reports/journal-entries/:id` — entry + lines + reversal linkage, company-scoped |
+| Opening balances | `GET /api/accounting/opening-balance` (+ stage / generate) |
+
+## Phase 7D — UI and fiscal lifecycle
+
+- The Next.js frontend serves all of the above under `/accounting` (RTL Persian, Jalali
+  dates): general-ledger (keyset pagination), trial-balance (explicit balanced banner),
+  subsidiary-ledger (balances → per-party rows), operational-profit, inventory-valuation
+  (page-stable grand totals), opening-balances and fiscal-years.
+- Monetary display uses `faMoneyExact` on the backend decimal STRING (Persian digits +
+  thousand separators); authoritative values never round-trip through JS floats.
+- Fiscal lifecycle (permission `accounting.fiscal.manage`, audited): close/reopen YEAR —
+  closing closes all its periods; REOPENING A YEAR DOES NOT auto-reopen periods (each
+  period must be reopened explicitly via `POST /fiscal-years/:id/periods/:periodId/status`);
+  posting into CLOSED years/periods is rejected by the journal fiscal guard.
+- UI close/reopen actions always pass an explicit confirmation dialog.
+- NOT IMPLEMENTED (documented gap): year-end closing journals, retained-earnings
+  transfers, automatic carry-forward — the requirements do not define their accounting
+  semantics; do not invent them.
+- Role model: `accountant` is the only non-admin role holding `accounting.report`,
+  `accounting.fiscal.manage` and `accounting.posting.manage` (seed + g7d-05 test).
 
 ## Performance
 

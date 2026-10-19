@@ -190,6 +190,24 @@ export function faMoney(value: number | null | undefined): string {
 }
 
 /**
+ * Phase 7D — EXACT decimal money display (accounting reports): formats the
+ * backend decimal STRING directly — thousand separators on the integer part
+ * and Persian digits — WITHOUT ever converting through a JavaScript float.
+ * Authoritative monetary values must keep full precision end to end.
+ */
+export function faMoneyExact(value: string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const trimmed = value.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return faDigits(trimmed);
+  const negative = trimmed.startsWith("-");
+  const digits = negative ? trimmed.slice(1) : trimmed;
+  const [intPart, fracPart] = digits.split(".");
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const formatted = fracPart ? `${grouped}.${fracPart}` : grouped;
+  return `${negative ? "−" : ""}${faDigits(formatted)}`;
+}
+
+/**
  * Backend decimal columns (Prisma Decimal) arrive serialized as STRINGS.
  * This normalizes any money/quantity wire value to a JS number for display.
  */

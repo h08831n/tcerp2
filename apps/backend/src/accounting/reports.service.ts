@@ -418,4 +418,53 @@ export class ReportsService {
       balanced: totalDebit.equals(totalCredit),
     };
   }
+
+  /** Journal-entry drill-down (Phase 7D): one posted entry with its lines,
+   *  reversal linkage and reversal-of link — read-only, company-scoped. */
+  async journalEntry(companyId: string, id: string) {
+    const entry = await this.prisma.journalEntry.findFirst({
+      where: { id, companyId },
+      include: { lines: { include: { account: { select: { code: true, name: true } } } } },
+    });
+    if (!entry) throw new ValidationError('JOURNAL_ENTRY_NOT_FOUND', { id });
+    // JournalLine carries partyId without a relation — resolve names in batch
+    const partyIds = [...new Set(entry.lines.map((l) => l.partyId).filter((p): p is string => !!p))];
+    const parties = partyIds.length
+      ? await this.prisma.party.findMany({ where: { id: { in: partyIds } }, select: { id: true, nameFa: true } })
+      : [];
+    const partyNameById = new Map(parties.map((p) => [p.id, p.nameFa]));
+    // a reversal entry is linked FROM the original via reversedByEntryId
+    const reversalOf = await this.prisma.journalEntry.findFirst({
+      where: { reversedByEntryId: entry.id, companyId },
+      select: { id: true, entryNumber: true },
+    });
+    const reversedBy = entry.reversedByEntryId
+      ? await this.prisma.journalEntry.findFirst({
+          where: { id: entry.reversedByEntryId, companyId },
+          select: { id: true, entryNumber: true },
+        })
+      : null;
+    return {
+      id: entry.id,
+      entryNumber: entry.entryNumber,
+      entryDate: entry.entryDate,
+      journalCode: entry.journalCode,
+      documentType: entry.documentType,
+      description: entry.description,
+      status: entry.status,
+      reversedByEntryId: entry.reversedByEntryId,
+      reversalOf: reversalOf ? { id: reversalOf.id, entryNumber: reversalOf.entryNumber } : null,
+      reversedBy: reversedBy ? { id: reversedBy.id, entryNumber: reversedBy.entryNumber } : null,
+      lines: entry.lines.map((l) => ({
+        id: l.id,
+        accountCode: l.account.code,
+        accountName: l.account.name,
+        partyId: l.partyId,
+        partyNameFa: l.partyId ? partyNameById.get(l.partyId) ?? null : null,
+        description: l.description,
+        debit: l.debit,
+        credit: l.credit,
+      })),
+    };
+  }
 }

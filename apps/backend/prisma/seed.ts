@@ -262,8 +262,12 @@ const ROLE_DEFS: {
     code: 'accountant',
     nameFa: 'حسابدار',
     nameEn: 'Accountant',
+    // Phase 7D: the accountant is the ONLY non-admin role with accounting
+    // powers — financial reports, fiscal calendar, posting rules. Never grant
+    // accounting.* to operational roles by default.
     permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit',
-      'sales.view', 'purchase.view'],
+      'sales.view', 'purchase.view',
+      'accounting.report', 'accounting.fiscal.manage', 'accounting.posting.manage'],
   },
   {
     code: 'financial_manager',

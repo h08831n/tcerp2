@@ -75,6 +75,12 @@ export class ReportsController {
     @Query('accountCode') accountCode: string,
     @Query('from') from: string | undefined,
     @Query('to') to: string | undefined,
+    @Query('journalCode') journalCode: string | undefined,
+    @Query('partyId') partyId: string | undefined,
+    @Query('analyticType') analyticType: string | undefined,
+    @Query('analyticId') analyticId: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('cursor') cursor: string | undefined,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
@@ -83,7 +89,26 @@ export class ReportsController {
       accountCode,
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
+      journalCode: journalCode || undefined,
+      partyId: partyId || undefined,
+      analyticType: analyticType || undefined,
+      analyticId: analyticId || undefined,
+      limit: limit ? Number(limit) : undefined,
+      cursor: cursor ?? null,
     });
+  }
+
+  /** Journal-entry drill-down for report rows (Phase 7D): read-only,
+   *  company-scoped, exposes the entry with its lines and reversal linkage. */
+  @Get('journal-entries/:id')
+  @RequirePermissions('accounting.report')
+  async journalEntry(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.reports.journalEntry(companyId, id);
   }
 
   @Get('trial-balance')
