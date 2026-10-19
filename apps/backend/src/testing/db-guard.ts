@@ -3,6 +3,10 @@
 // running against anything but a dedicated test database.
 //
 // Policy:
+//  - FAIL CLOSED: during a real integration run (TEST_INTEGRATION=1) a
+//    missing DATABASE_URL is an error, never a silent pass — otherwise the
+//    Prisma client could fall back to loading `.env` (which points at the
+//    development database) without any target validation.
 //  - `tcerp_test` / `tcerp_shadow` are the designated test databases — always
 //    allowed.
 //  - `tcerp` is the DEVELOPMENT database. Running destructive integration
@@ -10,13 +14,23 @@
 //    `TCERP_INTEGRATION_ALLOW_DEV_DB=1` in the environment. Without it the
 //    guard throws — the dev database is never silently treated as a test
 //    database.
+//  - Error messages NEVER contain the URL or any credentials.
 export function assertSafeIntegrationDatabase(url: string | undefined): void {
-  if (!url) return; // no DB → suites skip loudly below
+  if (!url) {
+    if (process.env.TEST_INTEGRATION === '1') {
+      throw new Error(
+        'SAFETY: TEST_INTEGRATION=1 but DATABASE_URL is not set — refusing to guess the database ' +
+          'target (a Prisma client would fall back to .env). Export DATABASE_URL pointing at a ' +
+          'dedicated test database, or use `npm run test:integration` which defaults to tcerp_test.',
+      );
+    }
+    return; // unit mode / no DB → suites skip loudly below
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(`SAFETY: DATABASE_URL is not a valid URL: ${url}`);
+    throw new Error('SAFETY: DATABASE_URL is not a valid URL');
   }
   if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
     throw new Error(`SAFETY: unexpected protocol ${parsed.protocol}`);

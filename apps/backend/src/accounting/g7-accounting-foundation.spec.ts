@@ -20,56 +20,68 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
   let journal: JournalService;
   let fiscal: FiscalYearService;
   // DB Safety Gate: this suite posts into the SHARED seeded company, so
-  // cleanup is scoped by snapshot diff — only records created during THIS
-  // run (after the beforeAll snapshot) are removed, never pre-existing data.
-  let preEntryIds: string[] = [];
-  let preFiscalYearIds: string[] = [];
-  let prePartyIds: string[] = [];
+  // cleanup is scoped by EXPLICIT ids captured from each test — never by
+  // snapshot diff (an absent-from-snapshot delete could hit another suite's
+  // records if suites ever ran concurrently) and never globally.
+  const myEntryIds: string[] = [];
+  const myFiscalYearIds: string[] = [];
+  const myPartyIds: string[] = [];
 
   beforeAll(async () => {
     if (!TEST_INTEGRATION || !DB_URL) return;
     const { PrismaService: S } = await import('../prisma/prisma.service');
     prisma = new S();
     await prisma.$connect();
-    preEntryIds = (
-      await prisma.journalEntry.findMany({ where: { companyId: COMPANY }, select: { id: true } })
-    ).map((e) => e.id);
-    preFiscalYearIds = (
-      await prisma.fiscalYear.findMany({ where: { companyId: COMPANY }, select: { id: true } })
-    ).map((y) => y.id);
-    prePartyIds = (
-      await prisma.party.findMany({ where: { companyId: COMPANY }, select: { id: true } })
-    ).map((p) => p.id);
     const audit = new AuditService(prisma as never);
     journal = new JournalService(prisma as never, new SequencesService(prisma as never, audit));
     fiscal = new FiscalYearService(prisma as never, audit);
   });
 
   afterAll(async () => {
-    if (!prisma) {
-      return;
+    if (!prisma) return;
+    const failures: string[] = [];
+    try {
+      // dependency-safe order; every delete is filtered by ids THIS suite
+      // captured from its own posts/creates
+      const steps: Array<[string, () => Promise<unknown>]> = [
+        ['journalLineAnalytic', async () => {
+          const myLineIds = (
+            await prisma.journalLine.findMany({ where: { journalEntryId: { in: myEntryIds } }, select: { id: true } })
+          ).map((l) => l.id);
+          await prisma.journalLineAnalytic.deleteMany({ where: { journalLineId: { in: myLineIds } } });
+        }],
+        ['journalLine', () =>
+          prisma.journalLine.deleteMany({ where: { journalEntryId: { in: myEntryIds } } })],
+        ['journalEntry', () => prisma.journalEntry.deleteMany({ where: { id: { in: myEntryIds } } })],
+        ['fiscalYear', async () => {
+          for (const id of myFiscalYearIds) {
+            await prisma.fiscalPeriod.deleteMany({ where: { fiscalYearId: id } });
+            await prisma.fiscalYear.deleteMany({ where: { id } });
+          }
+        }],
+        ['party', async () => {
+          for (const id of myPartyIds) {
+            await prisma.party.deleteMany({ where: { id, companyId: COMPANY } });
+          }
+        }],
+      ];
+      for (const [name, run] of steps) {
+        try {
+          await run();
+        } catch (e) {
+          failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    } finally {
+      // disconnect runs even when a cleanup step failed — failures are
+      // reported, never swallowed
+      await prisma
+        .$disconnect()
+        .catch((e) => failures.push(`disconnect: ${e instanceof Error ? e.message : String(e)}`));
     }
-    const myEntryIds = (
-      await prisma.journalEntry.findMany({
-        where: { companyId: COMPANY, id: { notIn: preEntryIds } },
-        select: { id: true },
-      })
-    ).map((e) => e.id);
-    const myLineIds = (
-      await prisma.journalLine.findMany({ where: { journalEntryId: { in: myEntryIds } }, select: { id: true } })
-    ).map((l) => l.id);
-    await prisma.journalLineAnalytic.deleteMany({ where: { journalLineId: { in: myLineIds } } });
-    await prisma.journalLine.deleteMany({ where: { journalEntryId: { in: myEntryIds } } });
-    await prisma.journalEntry.deleteMany({ where: { id: { in: myEntryIds } } });
-    for (const y of await prisma.fiscalYear.findMany({
-      where: { companyId: COMPANY, id: { notIn: preFiscalYearIds } },
-      select: { id: true },
-    })) {
-      await prisma.fiscalPeriod.deleteMany({ where: { fiscalYearId: y.id } });
-      await prisma.fiscalYear.delete({ where: { id: y.id } });
+    if (failures.length > 0) {
+      throw new Error(`g7 cleanup INCOMPLETE — test data left behind: ${failures.join(' | ')}`);
     }
-    await prisma.party.deleteMany({ where: { companyId: COMPANY, id: { notIn: prePartyIds } } });
-    await prisma.$disconnect();
   });
 
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
@@ -92,6 +104,7 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
     const debit = lines.reduce((s, l) => s + Number(l.debit), 0);
     const credit = lines.reduce((s, l) => s + Number(l.credit), 0);
     expect(debit).toBe(credit);
+    myEntryIds.push(entry.id);
     await prisma.journalEntry.delete({ where: { id: entry.id } });
   });
 
@@ -146,9 +159,11 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         { accountCode: 'SALES_REVENUE', debit: 0, credit: 10 },
       ],
     });
+    myEntryIds.push(entry.id);
     await prisma.journalEntry.delete({ where: { id: entry.id } });
-    // cleanup test year if we created it
+    // cleanup test year if we created it (also tracked for afterAll)
     if (year.code === 'G7TEST') {
+      myFiscalYearIds.push(year.id);
       await prisma.fiscalPeriod.deleteMany({ where: { fiscalYearId: year.id } });
       await prisma.fiscalYear.delete({ where: { id: year.id } });
     }
@@ -169,6 +184,7 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
     // posted rows are corrected only via reverse; direct mutation is not exposed
     const raw = await prisma.journalEntry.findUniqueOrThrow({ where: { id: entry.id } });
     expect(raw.status).toBe('POSTED');
+    myEntryIds.push(entry.id);
     await prisma.journalEntry.delete({ where: { id: entry.id } });
   });
 
@@ -182,6 +198,7 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
       ],
     });
     const { reversal } = await journal.reverse(original.id, ACTOR);
+    myEntryIds.push(original.id, reversal.id);
     expect(reversal.status).toBe('POSTED');
     const rLines = reversal.lines as { accountId: string; debit: Prisma.Decimal; credit: Prisma.Decimal }[];
     // mirrored: debits became credits — original BANK debit 300 → reversal BANK credit 300
@@ -204,6 +221,7 @@ describe('g7 — Phase 7A accounting foundation (live DB)', () => {
         roles: { create: [{ role: 'CUSTOMER' }] },
       },
     });
+    myPartyIds.push(customer.id);
     const entry = await journal.post(prisma as never, {
       companyId: COMPANY,
       entryDate: new Date(),
