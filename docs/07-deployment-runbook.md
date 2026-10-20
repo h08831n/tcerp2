@@ -85,20 +85,33 @@ cd apps/backend && DATABASE_URL=... npx prisma migrate deploy
 ALTER TABLE "journal_entries" ADD COLUMN "source_event_id" UUID;
 CREATE UNIQUE INDEX "journal_entries_source_event_id_key" ON "journal_entries"("source_event_id");
 ```
-تراکنش را موتور Prisma اضافه می‌کند (ادعای زیر با کنترل تجربی اثبات شد).
 
-**۲. اثبات سه‌وجهی مکانیزم rollback (همه روی `tcerp_shadow`، Prisma 5.22.0):**
-- **کنترل منفی — autocommit بدون Prisma:** اجرای مستقیم
-  `ALTER TABLE … ADD COLUMN baseline_col` با psql (هر statement autocommit)
-  و سپس `SELECT 1/0` → شکست، ولی **ستون PERSISTS**. یعنی PostgreSQL به‌تنهایی
-  DDL را بدون تراکنش صریح rollback نمی‌کند.
-- **آزمایش شکست با Prisma:** فایل با ساختار دقیقاً یکسان (zzz-prefixed تا با
-  migration واقعی تلاقی نکند): `ALTER … ADD COLUMN zzz_source_event_id` +
-  `CREATE UNIQUE INDEX …zzz…` + `SELECT 1/0` → `P3018`، رکورد
-  `_prisma_migrations` با `finished_at = NULL`، و **هر دو ستون و ایندکس
-  ABSENT**. چون کنترل منفی نشان داد autocommit آن‌ها را باقی می‌گذاشت،
-  rollback فقط از **تراکنش واحدی که موتور Prisma به‌دور از هر فایل
-  migration می‌کشد** می‌تواند باشد.
+**۱-الف. سازوکار دقیق (از منبع موتور، tag `5.22.0`):**
+موتور Prisma **BEGIN/COMMIT صریح نمی‌فرستد** (راستی‌بخشی به نکته مستندات).
+اتمیک بودن از پروتکل PostgreSQL می‌آید:
+- `schema-engine/connectors/sql-schema-connector/src/flavour/postgres/connection.rs`
+  (tag 5.22.0، متد `apply_migration_script`): **کل script فایل در یک فراخوانی
+  `client.simple_query(script)`** ارسال می‌شود؛ هیچ دستکاری تراکنشی در کد
+  وجود ندارد — خطا صرفاً به `ApplyMigrationError` تبدیل می‌شود.
+- مستندات PostgreSQL 16 (§54.2.2.1، protocol-flow): «statements در یک
+  multi-statement Query message در یک **implicit transaction block** اجرا
+  می‌شوند مگر تراکنش صریحی وجود داشته باشد … implicit block در پایان Query
+  message به‌طور خودکار بسته می‌شود — commit در نبود خطا، rollback در صورت
+  خطا» و «اجرا از اولین خطا متوقف می‌شود».
+
+**۲. اثبات تجربی مکانیزم (همه روی `tcerp_shadow`، Prisma 5.22.0):**
+- **کنترل منفی — autocommit بدون بچ واحد:** اجرای مستقیم
+  `ALTER TABLE … ADD COLUMN baseline_col` با psql (هر statement جدا و
+  autocommit) و سپس `SELECT 1/0` → شکست، ولی **ستون PERSISTS**. یعنی بدون
+  بچ واحد، PostgreSQL DDL را rollback نمی‌کند.
+- **شکست در انتهای فایل (ساختار دقیقاً یکسان با فایل واقعی، شناسه‌های
+  zzz-prefixed):** `ALTER … ADD COLUMN` + `CREATE UNIQUE INDEX` +
+  `SELECT 1/0` → `P3018`، `finished_at = NULL`، **ستون و ایندکس هر دو
+  ABSENT**.
+- **شکست میانی بین دو دستور مستقل:** `ADD COLUMN zzz_mid_col` + `SELECT 1/0`
+  + `CREATE UNIQUE INDEX …zzz…` → `P3018` و **ستون ABSENT و ایندکس ABSENT**
+  (هر کدام با کوئری جداگانه بررسی شد) — دقیقاً مطابق پروتکل: اجرا از اولین
+  خطا متوقف، کل بچ rollback.
 - **کنترل مثبت:** همان migration واقعی بدون شکست در تاریخچه deploy → ستون و
   ایندکس EXIST (مسیر موفق عادی).
 - **درس روش‌شناختی (ثبت‌شده):** نخستین تلاش آزمایش با نام‌های بدون پیشوند
@@ -114,8 +127,15 @@ CREATE UNIQUE INDEX "journal_entries_source_event_id_key" ON "journal_entries"("
 آزمایش دوباره P3018 گرفت چون SQL عمداً خراب بود — رفتار صحیح؛ با SQL سالم،
 تلاش مجدد موفق می‌شود).
 
-**این شواهد فقط برای Prisma 5.22.0 + PostgreSQL 16 این پروژه معتبر است؛ قبل
-از ارتقای Prisma/Postgres، آزمایش بالا را روی دیتابیس آزمایشی تکرار کنید.**
+**پیامد عملی برای این فایل: نیازی به BEGIN/COMMIT نیست** — یکتایی بچ
+simple-query اتمیک بودن را در همین نسخه تضمین می‌کند. فایل migration
+**عمداً بدون BEGIN/COMMIT حفظ می‌شود**: (۱) روی `tcerp_test` و CI قبلاً با
+همین محتوا و checksum اعمال شده و تغییر فایلِ اعمال‌شده = mismatch و drift؛
+(۲) اگر روزی اجرای صریح تراکنش لازم شد، migration جدیدی با `BEGIN; … COMMIT;`
+اضافه شود نه دستکاری فایل قدیمی. **این شواهد فقط برای Prisma 5.22.0 +
+PostgreSQL 16 این پروژه معتبر است؛ رفتار پروتکل یا موتور در نسخه‌های بعدی
+ممکن است تغییر کند — پیش از ارتقا، آزمایش بالا را روی دیتابیس آزمایشی
+تکرار کنید.**
 
 **درخت تصمیم پس از شکست — قبل از هر `resolve` یا اصلاح دستی، دو بررسی
 اجباری (واقعیت را تعیین می‌کنند، نه فرض):**
