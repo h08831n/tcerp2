@@ -537,6 +537,129 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     expect(last.endDate.toISOString().slice(0, 10)).toBe(end);
   });
 
+  itif('g7d-15 tx-status-update failure rolls back the journal; retry posts exactly one', async () => {
+    // Deterministic failure injection INSIDE the atomic transaction: the proxy
+    // transaction client rejects accountingEvent.update(POSTED) AFTER
+    // journal.post has succeeded — the exact persistence boundary from the
+    // review finding. No timing, no comments: the failure is injected into the
+    // actual tx client emit() uses.
+    const injectTxUpdateFailure = (tx: Prisma.TransactionClient): Prisma.TransactionClient =>
+      new Proxy(tx, {
+        get(target, prop) {
+          if (prop !== 'accountingEvent') return Reflect.get(target, prop, target);
+          const real = Reflect.get(target, prop, target) as unknown as Record<string, unknown>;
+          return new Proxy(real, {
+            get(t2, p2) {
+              if (p2 === 'update') {
+                return (args: { data: { status?: string } }) => {
+                  if (args?.data?.status === 'POSTED') {
+                    return Promise.reject(new Error('INJECTED: event status persistence failed'));
+                  }
+                  return (t2[p2] as (...a: unknown[]) => unknown)(args);
+                };
+              }
+              return Reflect.get(t2, p2, t2);
+            },
+          });
+        },
+      });
+    const realTransaction =
+      prismaService.$transaction.bind(prismaService) as unknown as (
+        fn: (tx: Prisma.TransactionClient) => Promise<unknown>,
+        opts?: { timeout?: number; maxWait?: number },
+      ) => Promise<unknown>;
+    const txSpy = jest
+      .spyOn(prismaService, '$transaction')
+      .mockImplementationOnce((((arg: unknown, opts?: { timeout?: number; maxWait?: number }) =>
+        realTransaction((tx: Prisma.TransactionClient) =>
+          (arg as (t: Prisma.TransactionClient) => Promise<unknown>)(injectTxUpdateFailure(tx)),
+          opts,
+        )) as unknown) as typeof prismaService.$transaction);
+
+    // the event whose status persistence will fail mid-transaction
+    const srcEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'OPERATIONAL',
+      documentType: 'PURCHASE_FULFILLED',
+      lines: [
+        { accountCode: 'INVENTORY', debit: 90, credit: 0 },
+        { accountCode: 'PURCHASE_EXPENSE', debit: 0, credit: 90 },
+      ],
+    });
+    myEntryIds.push(srcEntry.id);
+    const ev = await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: srcEntry.id,
+        payload: {
+          measures: { INVENTORY: '90', PAYABLE: '90' },
+          analytics: {},
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'FAILED',
+        error: 'simulated',
+        idempotencyKey: `g7d-15:${Date.now()}`,
+      },
+    });
+    await prismaService.postingRule.create({
+      data: {
+        companyId: COMPANY,
+        code: 'G7D-TXFAIL',
+        nameFa: 'قاعده تزریق g7d',
+        eventType: 'PURCHASE_FULFILLED',
+        lines: {
+          create: [
+            { side: 'DEBIT', accountCode: 'INVENTORY', measure: 'INVENTORY', order: 1 },
+            { side: 'CREDIT', accountCode: 'PAYABLE', measure: 'PAYABLE', order: 2 },
+          ],
+        },
+      },
+    });
+
+    // emit → journal.post succeeds inside the tx, then the injected failure
+    // hits the status update → the WHOLE transaction rolls back
+    await events.emit({
+      companyId: COMPANY,
+      eventType: 'PURCHASE_FULFILLED',
+      sourceEntityType: 'purchase_document',
+      sourceEntityId: srcEntry.id,
+      idempotencyKey: ev.idempotencyKey,
+      measures: { INVENTORY: new Prisma.Decimal(90), PAYABLE: new Prisma.Decimal(90) },
+      analytics: {},
+      reversal: false,
+    });
+    txSpy.mockRestore();
+
+    // rollback proven: NO journal carries this event's key, the event is
+    // FAILED with NO journal link — never POSTED with an invalid link
+    const postFailureJournals = await prismaService.journalEntry.findMany({
+      where: { companyId: COMPANY, sourceEventId: ev.id },
+    });
+    expect(postFailureJournals).toHaveLength(0);
+    const afterFailure = await prismaService.accountingEvent.findUniqueOrThrow({ where: { id: ev.id } });
+    expect(afterFailure.status).toBe('FAILED');
+    expect(afterFailure.journalEntryId).toBeNull();
+
+    // retry (fresh instance == restart semantics) posts EXACTLY one journal
+    const freshInstance = new AccountingEventService(prismaService as never, journal);
+    const res = await freshInstance.retry(COMPANY, ev.id);
+    expect(res.status).toBe('POSTED');
+    const linked = await prismaService.journalEntry.findMany({
+      where: { companyId: COMPANY, sourceEventId: ev.id },
+      include: { lines: true },
+    });
+    expect(linked).toHaveLength(1);
+    expect(linked[0].lines.find((l) => l.debit.toString() === '90')).toBeTruthy();
+    expect(linked[0].lines.find((l) => l.credit.toString() === '90')).toBeTruthy();
+    const finalEvent = await prismaService.accountingEvent.findUniqueOrThrow({ where: { id: ev.id } });
+    expect(finalEvent.status).toBe('POSTED');
+    expect(finalEvent.journalEntryId).toBe(linked[0].id);
+    myEntryIds.push(finalEvent.journalEntryId!);
+  });
+
   itif('g7d-12 journal-committed-but-event-FAILED is recovered without a duplicate', async () => {
     // The reviewed failure mode, materialized as durable DB state: the journal
     // WAS created (source_event_id set) but the event status persistence left
