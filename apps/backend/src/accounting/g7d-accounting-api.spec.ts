@@ -178,22 +178,25 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     await fiscal.closeYear(COMPANY, year.id, ACTOR);
     await expect(post()).rejects.toThrow('FISCAL_YEAR_CLOSED');
 
-    // reopen year → year OPEN again, but periods remain CLOSED (narrow reopen)
+    // reopen year → year OPEN again, but its periods remain CLOSED (narrow reopen)
     const reopened = await fiscal.reopenYear(COMPANY, year.id, ACTOR);
     expect(reopened.status).toBe('OPEN');
-    await expect(post()).rejects.toThrow(); // period still closed (or no period guard) —
-    // note: with monthly periods present the containing period was CLOSED by closeYear
 
-    // reopen the containing period explicitly → posting works again
+    // the applicable period MUST exist (generateMonthlyPeriods covers today)
     const period = await prismaService.fiscalPeriod.findFirst({
       where: { fiscalYearId: year.id, startDate: { lte: new Date(today) }, endDate: { gte: new Date(today) } },
     });
-    if (period) {
-      await fiscal.setPeriodStatus(COMPANY, year.id, period.id, 'OPEN', ACTOR);
-      const after = await post();
-      myEntryIds.push(after.id);
-      await prismaService.journalEntry.delete({ where: { id: after.id } });
-    }
+    expect(period).toBeTruthy();
+    // and it must still be CLOSED — posting is rejected for THAT reason
+    expect((await prismaService.fiscalPeriod.findUniqueOrThrow({ where: { id: period!.id } })).status).toBe('CLOSED');
+    await expect(post()).rejects.toThrow('PERIOD_CLOSED');
+
+    // explicitly reopen the period → posting succeeds again (proven, not assumed)
+    await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'OPEN', ACTOR);
+    const after = await post();
+    expect(after.status).toBe('POSTED');
+    myEntryIds.push(after.id);
+    await prismaService.journalEntry.delete({ where: { id: after.id } });
 
     // reopen on an already-open year is rejected (no accidental transitions)
     await expect(fiscal.reopenYear(COMPANY, year.id, ACTOR)).rejects.toThrow('FISCAL_YEAR_ALREADY_OPEN');
