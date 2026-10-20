@@ -194,8 +194,8 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     // explicitly reopen the period → posting succeeds again (proven, not assumed)
     await fiscal.setPeriodStatus(COMPANY, year.id, period!.id, 'OPEN', ACTOR);
     const after = await post();
+    myEntryIds.push(after.id); // registered before any assertion (cleanup safety)
     expect(after.status).toBe('POSTED');
-    myEntryIds.push(after.id);
     await prismaService.journalEntry.delete({ where: { id: after.id } });
 
     // reopen on an already-open year is rejected (no accidental transitions)
@@ -244,5 +244,31 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
       expect(codes).not.toContain('accounting.fiscal.manage');
       expect(codes).not.toContain('accounting.posting.manage');
     }
+  });
+
+  itif('g7d-06 cleanup regression: an entry orphaned by a mid-test assertion failure leaves no data behind', async () => {
+    // Simulate the failure path: post + register the id, then swallow a
+    // FAILED assertion (exactly what a broken mid-test expect would do) and
+    // deliberately skip the inline delete. The suite's afterAll must remove
+    // the orphan: entries are deleted company-scoped and the hermetic company
+    // is deleted last — any leftover row would FK-block that delete and the
+    // afterAll throws `g7d cleanup INCOMPLETE`, failing the whole suite.
+    const orphan = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'GENERAL',
+      lines: [
+        { accountCode: 'BANK', debit: 7, credit: 0 },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 7 },
+      ],
+    });
+    myEntryIds.push(orphan.id); // registered before the simulated failure
+    try {
+      expect(orphan.status).toBe('NOT_A_REAL_STATUS'); // deliberately fails
+    } catch {
+      // swallowed: the test continues past its "broken" assertion — cleanup
+      // must not depend on anything below this line having run
+    }
+    // no inline delete on purpose — afterAll owns this row now
   });
 });
