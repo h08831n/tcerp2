@@ -543,6 +543,9 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     // journal.post has succeeded — the exact persistence boundary from the
     // review finding. No timing, no comments: the failure is injected into the
     // actual tx client emit() uses.
+    // counts how many times the injected failure actually fired — the test
+    // must FAIL if the target path (tx update of POSTED) was never reached
+    let injectedStatusUpdates = 0;
     const injectTxUpdateFailure = (tx: Prisma.TransactionClient): Prisma.TransactionClient =>
       new Proxy(tx, {
         get(target, prop) {
@@ -553,6 +556,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
               if (p2 === 'update') {
                 return (args: { data: { status?: string } }) => {
                   if (args?.data?.status === 'POSTED') {
+                    injectedStatusUpdates += 1;
                     return Promise.reject(new Error('INJECTED: event status persistence failed'));
                   }
                   return (t2[p2] as (...a: unknown[]) => unknown)(args);
@@ -621,17 +625,23 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
 
     // emit → journal.post succeeds inside the tx, then the injected failure
     // hits the status update → the WHOLE transaction rolls back
-    await events.emit({
-      companyId: COMPANY,
-      eventType: 'PURCHASE_FULFILLED',
-      sourceEntityType: 'purchase_document',
-      sourceEntityId: srcEntry.id,
-      idempotencyKey: ev.idempotencyKey,
-      measures: { INVENTORY: new Prisma.Decimal(90), PAYABLE: new Prisma.Decimal(90) },
-      analytics: {},
-      reversal: false,
-    });
-    txSpy.mockRestore();
+    try {
+      await events.emit({
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: srcEntry.id,
+        idempotencyKey: ev.idempotencyKey,
+        measures: { INVENTORY: new Prisma.Decimal(90), PAYABLE: new Prisma.Decimal(90) },
+        analytics: {},
+        reversal: false,
+      });
+    } finally {
+      txSpy.mockRestore(); // runs even when emit/its assertions throw
+    }
+    // the injection MUST have fired exactly once — otherwise this test passed
+    // without ever reaching the audited persistence boundary
+    expect(injectedStatusUpdates).toBe(1);
 
     // rollback proven: NO journal carries this event's key, the event is
     // FAILED with NO journal link — never POSTED with an invalid link
