@@ -66,7 +66,7 @@ export default function OperationalProfitPage() {
       render: (r) => EVENT_TYPE_LABELS[r.eventType] ?? r.eventType,
     },
     { key: "customer", header: "مشتری", render: (r) => r.customerName ?? "—" },
-    { key: "variant", header: "کالا", render: (r) => (r.productVariantId ? r.productVariantId.slice(0, 8) : "—") },
+    { key: "variant", header: "کالا", render: (r) => r.variantNameFa ?? "—" },
     { key: "revenue", header: "درآمد", render: (r) => faMoneyExact(r.revenue) },
     { key: "cogs", header: "بهای تمام‌شده", render: (r) => faMoneyExact(r.cogs) },
     { key: "grossProfit", header: "سود ناخالص", render: (r) => faMoneyExact(r.grossProfit) },

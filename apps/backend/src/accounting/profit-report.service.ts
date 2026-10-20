@@ -88,11 +88,21 @@ export class ProfitReportService {
       if (opts.supplierId && supplierId !== opts.supplierId) continue;
 
       // navigation-only: party/variant names resolved for display; financial
-      // values never come from these reads
+      // values never come from these reads. Analytics dimension ids may carry
+      // non-UUID labels (legacy imports) — only resolve rows that are UUIDs.
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       let customerName: string | null = null;
-      if (customerId) {
+      if (customerId && UUID_RE.test(customerId)) {
         const party = await this.prisma.party.findUnique({ where: { id: customerId }, select: { nameFa: true } });
         customerName = party?.nameFa ?? null;
+      }
+      let variantNameFa: string | null = null;
+      if (variantId && UUID_RE.test(variantId)) {
+        const variant = await this.prisma.productVariant.findUnique({
+          where: { id: variantId },
+          select: { nameFa: true },
+        });
+        variantNameFa = variant?.nameFa ?? null;
       }
       rows.push({
         eventId: e.id,
@@ -105,6 +115,7 @@ export class ProfitReportService {
         customerName,
         salespersonUserId,
         productVariantId: variantId,
+        variantNameFa,
         supplierId,
         revenue,
         cogs,

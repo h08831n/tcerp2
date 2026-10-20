@@ -2,11 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { faDigits, jalali } from "@/lib/format";
+import { JalaliDateInput } from "@/components/ui/jalali-date-input";
+import { enDigits, faDigits, jalali } from "@/lib/format";
 import {
   accountingErrorMessage,
   closeFiscalYear,
+  createFiscalYear,
   fetchFiscalYears,
   reopenFiscalYear,
   setFiscalPeriodStatus,
@@ -34,6 +37,41 @@ export default function FiscalYearsPage() {
   const [confirm, setConfirm] = useState<Confirm>(null);
   const [busy, setBusy] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  const [newNameFa, setNewNameFa] = useState("");
+  const [newStart, setNewStart] = useState<string | null>(null);
+  const [newEnd, setNewEnd] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const createYear = async () => {
+    setError(null);
+    setNotice(null);
+    if (!newCode.trim() || !newNameFa.trim() || !newStart || !newEnd) {
+      setError("کد، نام و هر دو تاریخ الزامی است.");
+      return;
+    }
+    setCreating(true);
+    try {
+      await createFiscalYear({
+        code: newCode.trim(),
+        nameFa: newNameFa.trim(),
+        startDate: newStart,
+        endDate: newEnd,
+      });
+      setCreateOpen(false);
+      setNewCode("");
+      setNewNameFa("");
+      setNewStart(null);
+      setNewEnd(null);
+      setNotice("سال مالی جدید با دوره‌های ماهانه ساخته شد.");
+      await load();
+    } catch (e) {
+      setError(accountingErrorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -111,6 +149,10 @@ export default function FiscalYearsPage() {
         ثبت سند در دوره بسته یا سال بسته توسط سرور مسدود می‌شود. بستن سال، همه دوره‌های آن را می‌بندد؛ بازگشایی سال
         دوره‌ها را باز نمی‌کند و هر دوره باید صریحاً بازگشایی شود.
       </p>
+
+      <div className="flex justify-end">
+        <Button onClick={() => setCreateOpen(true)}>سال مالی جدید</Button>
+      </div>
 
       {loading ? (
         <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
@@ -229,6 +271,46 @@ export default function FiscalYearsPage() {
           );
         })
       )}
+
+      <Modal
+        open={createOpen}
+        title="سال مالی جدید"
+        onClose={() => setCreateOpen(false)}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setCreateOpen(false)} disabled={creating}>
+              انصراف
+            </Button>
+            <Button onClick={() => void createYear()} disabled={creating}>
+              ایجاد سال
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs text-slate-500">کد (مثلاً ۱۴۰۶)</label>
+            <Input value={newCode} onChange={(e) => setNewCode(enDigits(e.target.value))} />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-slate-500">نام</label>
+            <Input value={newNameFa} onChange={(e) => setNewNameFa(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <span className="mb-1 block text-xs text-slate-500">از تاریخ</span>
+              <JalaliDateInput value={newStart} onChange={setNewStart} />
+            </div>
+            <div>
+              <span className="mb-1 block text-xs text-slate-500">تا تاریخ</span>
+              <JalaliDateInput value={newEnd} onChange={setNewEnd} />
+            </div>
+          </div>
+          <p className="text-xs leading-5 text-slate-500">
+            دوره‌های ماهانه به‌صورت خودکار از تاریخ شروع ساخته می‌شوند.
+          </p>
+        </div>
+      </Modal>
 
       <Modal
         open={!!confirm}

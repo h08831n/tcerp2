@@ -11,10 +11,13 @@ import {
   type ValuationReport,
   type ValuationRow,
 } from "@/lib/accounting";
+import { fetchWarehouses, type WarehouseDto } from "@/lib/inventory";
 
 /** ارزش‌گذاری موجودی — LEGS model with exact-decimal grand total. */
 export default function InventoryValuationPage() {
   const [search, setSearch] = useState("");
+  const [warehouses, setWarehouses] = useState<WarehouseDto[]>([]);
+  const [warehouseId, setWarehouseId] = useState("");
   const [rows, setRows] = useState<ValuationRow[]>([]);
   const [grand, setGrand] = useState<ValuationReport["totals"] | null>(null);
   const [total, setTotal] = useState(0);
@@ -27,7 +30,12 @@ export default function InventoryValuationPage() {
     setLoading(true);
     setError(null);
     try {
-      const report = await fetchInventoryValuation({ search: search || undefined, page, pageSize });
+      const report = await fetchInventoryValuation({
+        search: search || undefined,
+        warehouseId: warehouseId || undefined,
+        page,
+        pageSize,
+      });
       setRows(report.rows);
       setGrand(report.totals);
       setTotal(report.total);
@@ -36,7 +44,13 @@ export default function InventoryValuationPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, page]);
+  }, [search, warehouseId, page]);
+
+  useEffect(() => {
+    fetchWarehouses()
+      .then((ws) => setWarehouses(Array.isArray(ws) ? ws : []))
+      .catch(() => setWarehouses([])); // filter chrome only
+  }, []);
 
   useEffect(() => {
     void load();
@@ -72,6 +86,24 @@ export default function InventoryValuationPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <label className="mb-1 block text-xs text-slate-500">انبار</label>
+          <select
+            value={warehouseId}
+            onChange={(e) => {
+              setPage(1);
+              setWarehouseId(e.target.value);
+            }}
+            className="h-9 rounded-md border border-slate-300 bg-white px-2 text-sm"
+          >
+            <option value="">همه انبارها</option>
+            {warehouses.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.nameFa}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="flex-1">
           <label className="mb-1 block text-xs text-slate-500">جستجو</label>
           <Input

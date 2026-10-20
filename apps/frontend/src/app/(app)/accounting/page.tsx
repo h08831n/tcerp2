@@ -53,6 +53,12 @@ const TILES: Tile[] = [
     description: "سال‌ها و دوره‌های مالی، بستن و بازگشایی",
     permission: "accounting.fiscal.manage",
   },
+  {
+    href: "/accounting/events",
+    title: "رویدادها و قواعد ثبت",
+    description: "رویدادهای عملیاتی، خطاها و تلاش مجدد ثبت",
+    permission: "accounting.posting.manage",
+  },
 ];
 
 export default function AccountingHubPage() {

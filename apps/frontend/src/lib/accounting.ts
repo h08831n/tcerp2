@@ -171,6 +171,7 @@ export interface ProfitRow {
   customerName: string | null;
   salespersonUserId: string | null;
   productVariantId: string | null;
+  variantNameFa: string | null;
   supplierId: string | null;
   revenue: string;
   cogs: string;
@@ -350,6 +351,18 @@ export function fetchFiscalYears(): Promise<FiscalYear[]> {
   return apiJson<FiscalYear[]>(`/fiscal-years`);
 }
 
+export interface CreateFiscalYearInput {
+  code: string;
+  nameFa: string;
+  startDate: string; // ISO date
+  endDate: string; // ISO date
+  generateMonthlyPeriods?: boolean;
+}
+
+export function createFiscalYear(input: CreateFiscalYearInput): Promise<FiscalYear> {
+  return apiJson(`/fiscal-years`, { method: "POST", body: JSON.stringify(input) });
+}
+
 export function closeFiscalYear(id: string): Promise<FiscalYear> {
   return apiJson(`/fiscal-years/${id}/close`, { method: "POST" });
 }
@@ -367,6 +380,87 @@ export function setFiscalPeriodStatus(
     method: "POST",
     body: JSON.stringify({ status }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Accounting events & posting rules (Phase 7B endpoints, posting.manage UI)
+// ---------------------------------------------------------------------------
+
+export type AccountingEventType =
+  | "SALES_COMPLETED_LOADING"
+  | "PURCHASE_FULFILLED"
+  | "GOODS_RECEIPT_CONFIRMED"
+  | "INVENTORY_REVERSAL"
+  | "PAYMENT_RECEIVED"
+  | "PAYMENT_MADE";
+
+export const EVENT_TYPE_LABELS: Record<string, string> = {
+  SALES_COMPLETED_LOADING: "شناسایی فروش (بارگیری)",
+  PURCHASE_FULFILLED: "ثبت خرید",
+  GOODS_RECEIPT_CONFIRMED: "رسید کالا",
+  INVENTORY_REVERSAL: "برگشت موجودی",
+  PAYMENT_RECEIVED: "دریافت",
+  PAYMENT_MADE: "پرداخت",
+};
+
+export const EVENT_STATUS_LABELS: Record<string, string> = {
+  POSTED: "ثبت‌شده",
+  FAILED: "ناموفق",
+  SKIPPED: "ردشده",
+};
+
+export interface AccountingEventRow {
+  id: string;
+  eventType: string;
+  status: "POSTED" | "FAILED" | "SKIPPED";
+  sourceEntityType: string;
+  sourceEntityId: string;
+  journalEntryId: string | null;
+  error: string | null;
+  idempotencyKey: string;
+  createdAt: string;
+}
+
+export interface EventsQuery {
+  status?: "POSTED" | "FAILED" | "SKIPPED";
+  eventType?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export function fetchAccountingEvents(query: EventsQuery = {}): Promise<Paginated<AccountingEventRow>> {
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.eventType) params.set("eventType", query.eventType);
+  params.set("page", String(query.page ?? 1));
+  params.set("pageSize", String(query.pageSize ?? 20));
+  return apiJson<Paginated<AccountingEventRow>>(`/accounting/events?${params.toString()}`);
+}
+
+export function retryAccountingEvent(id: string): Promise<{ status: string; error: string | null }> {
+  return apiJson(`/accounting/events/${id}/post`, { method: "POST" });
+}
+
+export interface PostingRuleLine {
+  id: string;
+  side: "DEBIT" | "CREDIT";
+  accountCode: string;
+  measure: string;
+  memo: string | null;
+  order: number;
+}
+
+export interface PostingRule {
+  id: string;
+  code: string;
+  nameFa: string;
+  eventType: string;
+  enabled: boolean;
+  lines: PostingRuleLine[];
+}
+
+export function fetchPostingRules(): Promise<PostingRule[]> {
+  return apiJson<PostingRule[]>(`/accounting/rules`);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +487,8 @@ const FA_ERROR_MESSAGES: Record<string, string> = {
   INVALID_FISCAL_RANGE: "بازه سال مالی نامعتبر است.",
   OPENING_BALANCE_UNBALANCED: "جمع بدهکار و بستانکار افتتاحیه برابر نیست.",
   OPENING_ALREADY_GENERATED: "سند افتتاحیه قبلاً صادر شده است.",
+  ACCOUNTING_EVENT_NOT_FOUND: "رویداد حسابداری یافت نشد.",
+  NO_POSTING_RULE: "قاعده ثبت برای این رویداد تعریف نشده است.",
 };
 
 /** Persian error message for accounting API failures. */

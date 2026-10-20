@@ -1,9 +1,11 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { JournalService } from './journal.service';
 import { ReportsService } from './reports.service';
 import { SubsidiaryLedgerService } from './subsidiary-ledger.service';
+import { AccountingEventService } from './accounting-event.service';
+import { ProfitReportService } from './profit-report.service';
 import { FiscalYearService } from './fiscal-year.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { TEST_INTEGRATION, integrationPrisma, disconnectIntegrationPrisma } from '../testing/integration';
@@ -24,6 +26,8 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
   let journal: JournalService;
   let reports: ReportsService;
   let subsidiary: SubsidiaryLedgerService;
+  let events: AccountingEventService;
+  let profit: ProfitReportService;
   let fiscal: FiscalYearService;
   let COMPANY = '';
   const myEntryIds: string[] = [];
@@ -39,6 +43,8 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     journal = new JournalService(prismaService as never, new SequencesService(prismaService as never, audit));
     reports = new ReportsService(prismaService as never);
     subsidiary = new SubsidiaryLedgerService(prismaService as never);
+    events = new AccountingEventService(prismaService as never, journal);
+    profit = new ProfitReportService(prismaService as never);
     fiscal = new FiscalYearService(prismaService as never, audit);
 
     const company = await prismaService.company.create({
@@ -50,6 +56,8 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
       { code: 'SALES_REVENUE', name: 'درآمد', type: 'REVENUE' as const },
       { code: 'RECEIVABLE', name: 'دریافتنی', type: 'ASSET' as const },
       { code: 'PAYABLE', name: 'پرداختنی', type: 'LIABILITY' as const },
+      { code: 'INVENTORY', name: 'موجودی', type: 'ASSET' as const },
+      { code: 'PURCHASE_EXPENSE', name: 'بهای تمام‌شده', type: 'EXPENSE' as const },
     ]) {
       await prismaService.chartOfAccount.create({ data: { ...a, companyId: COMPANY } });
     }
@@ -78,6 +86,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
         ['journalLineAnalytic', () =>
           prismaService.journalLineAnalytic.deleteMany({ where: { journalLine: { companyId: COMPANY } } })],
         ['journalLine', () => prismaService.journalLine.deleteMany({ where: { companyId: COMPANY } })],
+        ['accountingEvent', () => prismaService.accountingEvent.deleteMany({ where: { companyId: COMPANY } })],
         ['journalEntry', () => prismaService.journalEntry.deleteMany({ where: { companyId: COMPANY } })],
         ['fiscalPeriod', async () => {
           for (const id of myFiscalYearIds) {
@@ -86,6 +95,10 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
           }
         }],
         ['party', () => prismaService.party.deleteMany({ where: { companyId: COMPANY } })],
+        ['productVariant', () => prismaService.productVariant.deleteMany({ where: { companyId: COMPANY } })],
+        ['productTemplate', () => prismaService.productTemplate.deleteMany({ where: { companyId: COMPANY } })],
+        ['productCategory', () => prismaService.productCategory.deleteMany({ where: { companyId: COMPANY } })],
+        ['postingRule', () => prismaService.postingRule.deleteMany({ where: { companyId: COMPANY } })],
         ['chartOfAccount', () => prismaService.chartOfAccount.deleteMany({ where: { companyId: COMPANY } })],
         ['sequence', () => prismaService.sequence.deleteMany({ where: { companyId: COMPANY } })],
       ];
@@ -197,6 +210,119 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     expect(row).toBeTruthy();
         // liability runs CREDIT-positive (normal side), so +500 — not negative
     expect(row!.runningBalance.toString()).toBe('500');
+  });
+
+  itif('g7d-08 retry posts a FAILED event against its stored payload', async () => {
+    const srcEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'OPERATIONAL',
+      documentType: 'PURCHASE_FULFILLED',
+      lines: [
+        { accountCode: 'INVENTORY', debit: 150, credit: 0 },
+        { accountCode: 'PURCHASE_EXPENSE', debit: 0, credit: 150 },
+      ],
+    });
+    myEntryIds.push(srcEntry.id);
+    // a FAILED event as the queue would leave it (payload measures are strings)
+    await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: srcEntry.id,
+        payload: {
+          measures: { INVENTORY: '150', PAYABLE: '150' },
+          analytics: {},
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'FAILED',
+        error: 'simulated failure',
+        idempotencyKey: `g7d-08:${Date.now()}`,
+      },
+    });
+    // posting rule: INVENTORY debit / PAYABLE credit, measure-driven
+    await prismaService.postingRule.create({
+      data: {
+        companyId: COMPANY,
+        code: 'G7D-PURCHASE',
+        nameFa: 'قاعده خرید g7d',
+        eventType: 'PURCHASE_FULFILLED',
+        lines: {
+          create: [
+            { side: 'DEBIT', accountCode: 'INVENTORY', measure: 'INVENTORY', order: 1 },
+            { side: 'CREDIT', accountCode: 'PAYABLE', measure: 'PAYABLE', order: 2 },
+          ],
+        },
+      },
+    });
+    const listed = await events.list(COMPANY, { status: 'FAILED' });
+    expect(listed.items).toHaveLength(1);
+    const failedId = listed.items[0].id;
+
+    const retry = await events.retry(COMPANY, failedId);
+    expect(retry.status).toBe('POSTED');
+    const fresh = await prismaService.accountingEvent.findUniqueOrThrow({ where: { id: failedId } });
+    expect(fresh.status).toBe('POSTED');
+    expect(fresh.journalEntryId).toBeTruthy();
+    myEntryIds.push(fresh.journalEntryId!);
+    // idempotent: retrying a POSTED event does nothing harmful
+    const again = await events.retry(COMPANY, failedId);
+    expect(again.status).toBe('POSTED');
+  });
+
+  itif('g7d-09 profit report carries variant display name', async () => {
+    const variant = await prismaService.productVariant.create({
+      data: {
+        companyId: COMPANY,
+        templateId: (
+          await prismaService.productTemplate.create({
+            data: {
+              companyId: COMPANY,
+              categoryId: (await prismaService.productCategory.create({ data: { companyId: COMPANY, code: 'G7D', nameFa: 'گروه g7d' } })).id,
+              nameFa: 'g7d قالب',
+            },
+          })
+        ).id,
+        sku: 'G7D-V1',
+        nameFa: 'میلگرد g7d',
+        combinationKey: 'g7d-v1',
+      },
+    });
+    const srcEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'OPERATIONAL',
+      documentType: 'SALES_COMPLETED_LOADING',
+      lines: [
+        { accountCode: 'RECEIVABLE', debit: 80, credit: 0 },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 80 },
+      ],
+    });
+    myEntryIds.push(srcEntry.id);
+    await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'SALES_COMPLETED_LOADING',
+        sourceEntityType: 'sales_document',
+        sourceEntityId: srcEntry.id,
+        journalEntryId: srcEntry.id,
+        payload: {
+          measures: { REVENUE: '80', COGS: '30' },
+          analytics: { productVariantId: variant.id },
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'POSTED',
+        idempotencyKey: `g7d-09:${Date.now()}`,
+      },
+    });
+    const report = await profit.operationalProfit(COMPANY, {});
+    const row = report.rows.find((r) => r.productVariantId === variant.id);
+    expect(row).toBeTruthy();
+    expect(row!.variantNameFa).toBe('میلگرد g7d');
+    // Decimal-exact totals
+    expect(row!.revenue.toString()).toBe('80');
+    expect(row!.grossProfit.toString()).toBe('50');
   });
 
   itif('g7d-03 close year rejects posting; reopen year keeps periods closed; explicit period reopen restores posting', async () => {
