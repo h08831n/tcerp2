@@ -224,6 +224,9 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
       ],
     });
     myEntryIds.push(srcEntry.id);
+    // the FINANCIAL date the retry must reproduce — not the retry timestamp
+    const financialDate = new Date(Date.now() - 5 * 86400000);
+    financialDate.setUTCHours(9, 30, 0, 0);
     // a FAILED event as the queue would leave it (payload measures are strings)
     await prismaService.accountingEvent.create({
       data: {
@@ -235,6 +238,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
           measures: { INVENTORY: '150', PAYABLE: '150' },
           analytics: {},
           reversal: false,
+          entryDate: financialDate.toISOString(),
         } as unknown as Prisma.InputJsonValue,
         status: 'FAILED',
         error: 'simulated failure',
@@ -266,6 +270,12 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     expect(fresh.status).toBe('POSTED');
     expect(fresh.journalEntryId).toBeTruthy();
     myEntryIds.push(fresh.journalEntryId!);
+    // the reposted journal carries the PRESERVED financial date, not the retry time
+    const reposted = await prismaService.journalEntry.findUniqueOrThrow({
+      where: { id: fresh.journalEntryId! },
+      select: { entryDate: true },
+    });
+    expect(reposted.entryDate.toISOString()).toBe(financialDate.toISOString());
     // idempotent: retrying a POSTED event does nothing harmful
     const again = await events.retry(COMPANY, failedId);
     expect(again.status).toBe('POSTED');
@@ -420,6 +430,111 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
       expect(codes).not.toContain('accounting.fiscal.manage');
       expect(codes).not.toContain('accounting.posting.manage');
     }
+  });
+
+  itif('g7d-10 concurrent retries of one event post exactly one journal', async () => {
+    const srcEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'OPERATIONAL',
+      documentType: 'PURCHASE_FULFILLED',
+      lines: [
+        { accountCode: 'INVENTORY', debit: 60, credit: 0 },
+        { accountCode: 'PURCHASE_EXPENSE', debit: 0, credit: 60 },
+      ],
+    });
+    myEntryIds.push(srcEntry.id);
+    const ev = await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: srcEntry.id,
+        payload: {
+          measures: { INVENTORY: '60', PAYABLE: '60' },
+          analytics: {},
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'FAILED',
+        error: 'simulated',
+        idempotencyKey: `g7d-10:${Date.now()}`,
+      },
+    });
+    await prismaService.postingRule.create({
+      data: {
+        companyId: COMPANY,
+        code: 'G7D-CONCURRENT',
+        nameFa: 'قاعده هم‌زمانی g7d',
+        eventType: 'PURCHASE_FULFILLED',
+        lines: {
+          create: [
+            { side: 'DEBIT', accountCode: 'INVENTORY', measure: 'INVENTORY', order: 1 },
+            { side: 'CREDIT', accountCode: 'PAYABLE', measure: 'PAYABLE', order: 2 },
+          ],
+        },
+      },
+    });
+    // two simultaneous retries — the advisory lock serializes them
+    const [a, b] = await Promise.all([
+      events.retry(COMPANY, ev.id),
+      events.retry(COMPANY, ev.id),
+    ]);
+    expect(a.status).toBe('POSTED');
+    expect(b.status).toBe('POSTED');
+    const journalsForEvent = await prismaService.journalEntry.findMany({
+      where: { companyId: COMPANY, documentType: 'PURCHASE_FULFILLED' },
+      include: { lines: true },
+    });
+    // exactly ONE NEW journal from the retries — srcEntry itself is also a
+    // PURCHASE_FULFILLED journal with debit 60, so exclude it explicitly
+    const g7d10Journals = journalsForEvent.filter(
+      (j) => j.id !== srcEntry.id && j.lines.some((l) => l.debit.toString() === '60'),
+    );
+    expect(g7d10Journals).toHaveLength(1);
+    const fresh = await prismaService.accountingEvent.findUniqueOrThrow({ where: { id: ev.id } });
+    expect(fresh.status).toBe('POSTED');
+    myEntryIds.push(fresh.journalEntryId!);
+  });
+
+  itif('g7d-11 fiscal year: duplicate code and invalid range rejected; monthly periods contiguous', async () => {
+    const yearCode = `G7DX${Date.now()}`.slice(-8);
+    const start = '2026-03-01';
+    const end = '2026-05-31';
+    const year = (await fiscal.create(COMPANY, {
+      code: yearCode,
+      nameFa: 'سال ممیزی g7d',
+      startDate: start,
+      endDate: end,
+    }, ACTOR)) as never as { id: string; status: string };
+    myFiscalYearIds.push(year.id);
+    // duplicate code rejected
+    await expect(
+      fiscal.create(COMPANY, { code: yearCode, nameFa: 'تکراری', startDate: start, endDate: end }, ACTOR),
+    ).rejects.toThrow('FISCAL_YEAR_EXISTS');
+    // invalid range rejected
+    await expect(
+      fiscal.create(COMPANY, {
+        code: `${yearCode}B`,
+        nameFa: 'بازه معکوس',
+        startDate: end,
+        endDate: start,
+      }, ACTOR),
+    ).rejects.toThrow('INVALID_FISCAL_RANGE');
+    // monthly periods: contiguous (no gap/overlap) and inside the year
+    const periods = await prismaService.fiscalPeriod.findMany({
+      where: { fiscalYearId: year.id },
+      orderBy: { code: 'asc' },
+    });
+    expect(periods.length).toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < periods.length; i += 1) {
+      const prevEnd = periods[i - 1].endDate;
+      const curStart = periods[i].startDate;
+      const gapDays = (curStart.getTime() - prevEnd.getTime()) / 86400000;
+      expect(gapDays).toBeCloseTo(1, 5); // next starts the day after previous ends
+    }
+    expect(periods[0].startDate.toISOString().slice(0, 10)).toBe(start);
+    const last = periods[periods.length - 1];
+    expect(last.endDate.toISOString().slice(0, 10)).toBe(end);
   });
 
   itif('g7d-06 cleanup regression: an entry orphaned by a mid-test assertion failure leaves no data behind', async () => {

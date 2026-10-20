@@ -1,0 +1,76 @@
+# TCERP CI — one workflow, two jobs (backend with a real PostgreSQL test
+# database, frontend typecheck+build). The integration suite runs in-band
+# against the dedicated `tcerp_test` database — the DATABASE_URL fail-closed
+# guard (src/testing/db-guard.ts) allows exactly localhost:5432/tcerp_test.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tcerp
+          POSTGRES_PASSWORD: tcerp
+          POSTGRES_DB: tcerp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tcerp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: apps/backend
+    env:
+      DATABASE_URL: postgresql://tcerp:tcerp@localhost:5432/tcerp_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Prisma generate
+        run: npx prisma generate
+      - name: Migrate test database
+        run: npx prisma migrate deploy
+      - name: Seed test database
+        run: npm run db:seed
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: Unit tests
+        run: npm test -- --ci
+      - name: Integration tests (in-band, tcerp_test)
+        run: npm run test:integration -- --ci
+      - name: Build
+        run: npm run build
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: Build
+        run: npm run build

@@ -51,13 +51,15 @@ export class AccountingEventService {
         sourceEntityType: input.sourceEntityType,
         sourceEntityId: input.sourceEntityId,
         // Prisma Decimal values are not JSON-serializable — stringify each
-        // measure so the event log stores exact decimal strings
+        // measure so the event log stores exact decimal strings. entryDate is
+        // the FINANCIAL date — persisted so a retry reproduces it exactly.
         payload: {
           measures: Object.fromEntries(
             Object.entries(input.measures).map(([k, v]) => [k, v.toString()]),
           ),
           analytics: input.analytics,
           reversal: input.reversal ?? false,
+          entryDate: input.entryDate ? input.entryDate.toISOString() : null,
         } as Prisma.InputJsonValue,
         status: 'FAILED',
         idempotencyKey: input.idempotencyKey,
@@ -65,6 +67,16 @@ export class AccountingEventService {
       update: {},
     });
     if (event.status === 'POSTED') return; // idempotent
+    if (event.journalEntryId) {
+      // A prior attempt already created the journal but failed to persist the
+      // status update — REPAIR the status instead of posting a second,
+      // duplicate financial entry for the same event.
+      await this.prisma.accountingEvent.update({
+        where: { id: event.id },
+        data: { status: 'POSTED', postedAt: event.postedAt ?? new Date(), error: null },
+      });
+      return;
+    }
     try {
       const rule = await this.prisma.postingRule.findFirst({
         where: { companyId: input.companyId, eventType: input.eventType, enabled: true },
@@ -134,8 +146,34 @@ export class AccountingEventService {
     return { items, total, page, pageSize };
   }
 
-  /** Retry a FAILED event against its stored payload. */
+  /** Retry a FAILED event against its stored payload.
+   *  Concurrency: retries of the SAME event serialize through an in-process
+   *  gate (deployment is single-instance) — the second caller re-checks the
+   *  status after the gate opens and returns the repaired result instead of
+   *  posting a duplicate journal. The journalEntryId repair guard in emit()
+   *  covers the crash window where the journal was posted but the status
+   *  update failed. NOTE: pg_advisory_xact_lock via the shared PrismaClient
+   *  was verified NOT to serialize concurrent interactive transactions on one
+   *  client, so an in-process gate is the correct mechanism here. */
+  private readonly retryGates = new Map<string, Promise<{ status: string; error: string | null }>>();
+
   async retry(companyId: string, eventId: string): Promise<{ status: string; error: string | null }> {
+    const prev = this.retryGates.get(eventId) ?? Promise.resolve();
+    const gate = prev
+      .catch(() => undefined) // a failed prior retry must not poison the gate
+      .then(() => this.doRetry(companyId, eventId));
+    this.retryGates.set(eventId, gate);
+    try {
+      return await gate;
+    } finally {
+      if (this.retryGates.get(eventId) === gate) this.retryGates.delete(eventId);
+    }
+  }
+
+  private async doRetry(
+    companyId: string,
+    eventId: string,
+  ): Promise<{ status: string; error: string | null }> {
     const event = await this.prisma.accountingEvent.findFirst({
       where: { id: eventId, companyId },
     });
@@ -146,11 +184,14 @@ export class AccountingEventService {
       measures: Partial<Record<PostingMeasure, string>>;
       analytics: { customerId?: string | null; supplierId?: string | null };
       reversal: boolean;
+      entryDate?: string | null;
     } | null;
     const measures: Partial<Record<PostingMeasure, Prisma.Decimal>> = {};
     for (const [k, v] of Object.entries(payload?.measures ?? {})) {
       measures[k as PostingMeasure] = new Prisma.Decimal(v as string | number);
     }
+    // measures/analytics/reversal AND the financial entryDate are all taken
+    // from the stored payload — a retry reproduces the original posting.
     await this.emit({
       companyId,
       eventType: event.eventType,
@@ -160,6 +201,7 @@ export class AccountingEventService {
       measures,
       analytics: payload?.analytics ?? {},
       reversal: payload?.reversal ?? false,
+      entryDate: payload?.entryDate ? new Date(payload.entryDate) : undefined,
     });
     const fresh = await this.prisma.accountingEvent.findUniqueOrThrow({ where: { id: eventId } });
     return { status: fresh.status, error: fresh.error };

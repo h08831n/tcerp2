@@ -18,6 +18,7 @@ export default function InventoryValuationPage() {
   const [search, setSearch] = useState("");
   const [warehouses, setWarehouses] = useState<WarehouseDto[]>([]);
   const [warehouseId, setWarehouseId] = useState("");
+  const [warehouseError, setWarehouseError] = useState<string | null>(null);
   const [rows, setRows] = useState<ValuationRow[]>([]);
   const [grand, setGrand] = useState<ValuationReport["totals"] | null>(null);
   const [total, setTotal] = useState(0);
@@ -47,9 +48,14 @@ export default function InventoryValuationPage() {
   }, [search, warehouseId, page]);
 
   useEffect(() => {
+    // a failed warehouse list must be VISIBLE — silently emptying the filter
+    // would hide the problem and make the user trust an unfiltered view
     fetchWarehouses()
-      .then((ws) => setWarehouses(Array.isArray(ws) ? ws : []))
-      .catch(() => setWarehouses([])); // filter chrome only
+      .then((ws) => {
+        setWarehouses(Array.isArray(ws) ? ws : []);
+        setWarehouseError(null);
+      })
+      .catch((e) => setWarehouseError(e instanceof Error ? e.message : "خطا در دریافت فهرست انبارها."));
   }, []);
 
   useEffect(() => {
@@ -119,6 +125,11 @@ export default function InventoryValuationPage() {
 
       {error && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>
+      )}
+      {!error && warehouseError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          فیلتر انبار در دسترس نیست: {warehouseError} — گزارش بدون فیلتر انبار نمایش داده می‌شود.
+        </div>
       )}
 
       {grand && (
