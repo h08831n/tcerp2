@@ -2434,6 +2434,10 @@ model JournalEntry {
   id             String             @id @default(uuid()) @db.Uuid
   companyId      String             @map("company_id") @db.Uuid
   entryNumber    String             @map("entry_number")
+  // Durable posting idempotency key (Phase 7B stabilization): set when a
+  // journal is created FROM an accounting event — one event can never produce
+  // two journals (DB-enforced). NULL for manual/opening/reversal journals.
+  sourceEventId  String?            @unique @map("source_event_id") @db.Uuid
   entryDate      DateTime           @map("entry_date") @db.Timestamptz(6)
   journalCode    String             @default("GENERAL") @map("journal_code")
   documentType   String?            @map("document_type") // BANK_TRANSFER | RECEIPT | PAYMENT | CHECK_CLEAR ...

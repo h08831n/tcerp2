@@ -31,6 +31,10 @@ export interface PostJournalInput {
   description?: string;
   createdBy?: string;
   lines: JournalLineInput[];
+  /** Durable idempotency key (Phase 7B stabilization): the accounting event id
+   *  when this journal is created FROM an event. DB-unique — the same event
+   *  can never produce two journals. NULL for manual/opening/reversal posts. */
+  sourceEventId?: string;
 }
 
 type Tx = Prisma.TransactionClient;
@@ -120,6 +124,7 @@ export class JournalService {
         description: input.description,
         status: 'DRAFT',
         createdBy: input.createdBy,
+        sourceEventId: input.sourceEventId ?? null,
         lines: {
           create: input.lines.map((line) => ({
             companyId: input.companyId,

@@ -537,6 +537,190 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     expect(last.endDate.toISOString().slice(0, 10)).toBe(end);
   });
 
+  itif('g7d-12 journal-committed-but-event-FAILED is recovered without a duplicate', async () => {
+    // The reviewed failure mode, materialized as durable DB state: the journal
+    // WAS created (source_event_id set) but the event status persistence left
+    // it FAILED without journalEntryId. This state is exactly what a crash
+    // between the two old writes produced — and what the unique key now makes
+    // recoverable instead of duplicate-prone.
+    const ev = await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: '00000000-0000-4000-8000-0000000000d1',
+        payload: {
+          measures: { INVENTORY: '150', PAYABLE: '150' },
+          analytics: {},
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'FAILED',
+        error: 'event status persistence failed historically',
+        idempotencyKey: `g7d-12:${Date.now()}`,
+      },
+    });
+    const preExisting = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'OPERATIONAL',
+      documentType: 'PURCHASE_FULFILLED',
+      sourceEventId: ev.id, // the durable link a crashed write left behind
+      lines: [
+        { accountCode: 'INVENTORY', debit: 150, credit: 0 },
+        { accountCode: 'PURCHASE_EXPENSE', debit: 0, credit: 150 },
+      ],
+    });
+    myEntryIds.push(preExisting.id);
+    // posting rule (shared with g7d-08)
+    await prismaService.postingRule.create({
+      data: {
+        companyId: COMPANY,
+        code: 'G7D-RECOVER',
+        nameFa: 'قاعده بازیابی g7d',
+        eventType: 'PURCHASE_FULFILLED',
+        lines: {
+          create: [
+            { side: 'DEBIT', accountCode: 'INVENTORY', measure: 'INVENTORY', order: 1 },
+            { side: 'CREDIT', accountCode: 'PAYABLE', measure: 'PAYABLE', order: 2 },
+          ],
+        },
+      },
+    });
+    // retry (fresh instance == restart semantics) — must RECONCILE, not repost
+    const freshInstance = new AccountingEventService(prismaService as never, journal);
+    const res = await freshInstance.retry(COMPANY, ev.id);
+    expect(res.status).toBe('POSTED');
+    // linked to the PRE-EXISTING journal; exactly ONE journal for this event
+    const linked = await prismaService.journalEntry.findMany({
+      where: { companyId: COMPANY, sourceEventId: ev.id },
+      include: { lines: true },
+    });
+    expect(linked).toHaveLength(1);
+    expect(linked[0].id).toBe(preExisting.id);
+    // totals consistent
+    expect(linked[0].lines.find((l) => l.debit.toString() === '150')).toBeTruthy();
+    expect(linked[0].lines.find((l) => l.credit.toString() === '150')).toBeTruthy();
+    // repeated retries after recovery: idempotent, still one journal
+    for (let i = 0; i < 2; i += 1) {
+      const again = await freshInstance.retry(COMPANY, ev.id);
+      expect(again.status).toBe('POSTED');
+    }
+    expect(
+      (await prismaService.journalEntry.findMany({ where: { companyId: COMPANY, sourceEventId: ev.id } })),
+    ).toHaveLength(1);
+  });
+
+  itif('g7d-13 two independent service instances cannot duplicate one event', async () => {
+    const ev = await prismaService.accountingEvent.create({
+      data: {
+        companyId: COMPANY,
+        eventType: 'PURCHASE_FULFILLED',
+        sourceEntityType: 'purchase_document',
+        sourceEntityId: '00000000-0000-4000-8000-0000000000d2',
+        payload: {
+          measures: { INVENTORY: '75', PAYABLE: '75' },
+          analytics: {},
+          reversal: false,
+        } as unknown as Prisma.InputJsonValue,
+        status: 'FAILED',
+        error: 'simulated',
+        idempotencyKey: `g7d-13:${Date.now()}`,
+      },
+    });
+    await prismaService.postingRule.create({
+      data: {
+        companyId: COMPANY,
+        code: 'G7D-XINSTANCE',
+        nameFa: 'قاعده چندنمونه‌ای g7d',
+        eventType: 'PURCHASE_FULFILLED',
+        lines: {
+          create: [
+            { side: 'DEBIT', accountCode: 'INVENTORY', measure: 'INVENTORY', order: 1 },
+            { side: 'CREDIT', accountCode: 'PAYABLE', measure: 'PAYABLE', order: 2 },
+          ],
+        },
+      },
+    });
+    // instance B: its own PrismaClient (no shared in-process gate)
+    const clientB = new PrismaClient();
+    try {
+      const serviceB = new AccountingEventService(clientB as never, journal);
+      const [a, b] = await Promise.all([
+        events.retry(COMPANY, ev.id),
+        serviceB.retry(COMPANY, ev.id),
+      ]);
+      expect(a.status).toBe('POSTED');
+      expect(b.status).toBe('POSTED');
+      // the DB-unique source_event_id allowed exactly ONE journal
+      const linked = await prismaService.journalEntry.findMany({
+        where: { companyId: COMPANY, sourceEventId: ev.id },
+        include: { lines: true },
+      });
+      expect(linked).toHaveLength(1);
+      expect(linked[0].lines.find((l) => l.debit.toString() === '75')).toBeTruthy();
+      const fresh = await prismaService.accountingEvent.findUniqueOrThrow({ where: { id: ev.id } });
+      expect(fresh.status).toBe('POSTED');
+      expect(fresh.journalEntryId).toBe(linked[0].id);
+      myEntryIds.push(fresh.journalEntryId!);
+    } finally {
+      await clientB.$disconnect();
+    }
+  });
+
+  itif('g7d-14 two legitimate distinct events create two separate journals', async () => {
+    const mkEvent = async (amount: string, key: string) => {
+      const src = await journal.post(prismaService as never, {
+        companyId: COMPANY,
+        entryDate: new Date(),
+        journalCode: 'OPERATIONAL',
+        documentType: 'PURCHASE_FULFILLED',
+        lines: [
+          { accountCode: 'INVENTORY', debit: Number(amount), credit: 0 },
+          { accountCode: 'PURCHASE_EXPENSE', debit: 0, credit: Number(amount) },
+        ],
+      });
+      myEntryIds.push(src.id);
+      return prismaService.accountingEvent.create({
+        data: {
+          companyId: COMPANY,
+          eventType: 'PURCHASE_FULFILLED',
+          sourceEntityType: 'purchase_document',
+          sourceEntityId: src.id,
+          payload: {
+            measures: { INVENTORY: amount, PAYABLE: amount },
+            analytics: {},
+            reversal: false,
+          } as unknown as Prisma.InputJsonValue,
+          status: 'FAILED',
+          error: 'simulated',
+          idempotencyKey: key,
+        },
+      });
+    };
+    const e1 = await mkEvent('100', `g7d-14a:${Date.now()}`);
+    const e2 = await mkEvent('200', `g7d-14b:${Date.now()}`);
+    await events.retry(COMPANY, e1.id);
+    await events.retry(COMPANY, e2.id);
+    const j1 = await prismaService.journalEntry.findFirstOrThrow({
+      where: { companyId: COMPANY, sourceEventId: e1.id },
+    });
+    const j2 = await prismaService.journalEntry.findFirstOrThrow({
+      where: { companyId: COMPANY, sourceEventId: e2.id },
+    });
+    expect(j1.id).not.toBe(j2.id);
+    myEntryIds.push(j1.id, j2.id);
+    // each journal carries exactly its own event's amounts
+    const totals = await Promise.all(
+      [j1, j2].map((j) =>
+        prismaService.journalLine.findMany({ where: { journalEntryId: j.id } }),
+      ),
+    );
+    const debitOf = (lines: { debit: Prisma.Decimal }[]) =>
+      lines.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0));
+    expect(debitOf(totals[0]).toString()).toBe('100');
+    expect(debitOf(totals[1]).toString()).toBe('200');
+  });
+
   itif('g7d-06 cleanup regression: an entry orphaned by a mid-test assertion failure leaves no data behind', async () => {
     // Simulate the failure path: post + register the id, then swallow a
     // FAILED assertion (exactly what a broken mid-test expect would do) and

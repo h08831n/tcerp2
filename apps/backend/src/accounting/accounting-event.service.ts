@@ -103,19 +103,52 @@ export class AccountingEventService {
           analytics: this.analyticsFor(l.measure, input.analytics),
         };
       });
-      const entry = await this.journal.post(this.prisma as unknown as Prisma.TransactionClient, {
-        companyId: input.companyId,
-        entryDate: input.entryDate ?? new Date(),
-        journalCode: 'OPERATIONAL',
-        documentType: input.eventType,
-        description: input.description ?? `${input.eventType} ${input.sourceEntityType}:${input.sourceEntityId}`,
-        createdBy: undefined,
-        lines,
-      });
-      await this.prisma.accountingEvent.update({
-        where: { id: event.id },
-        data: { status: 'POSTED', journalEntryId: entry.id, postedAt: new Date(), error: null },
-      });
+      // ATOMIC LINK (Phase 7B stabilization): the journal and the event's
+      // POSTED status (with journalEntryId) commit in ONE transaction — there
+      // is no window where a journal exists but the event still reads FAILED.
+      // The journal carries sourceEventId = event.id, DB-unique, so a
+      // concurrent/replayed posting of the SAME event can never create a
+      // second journal (P2002 → reconcile below); distinct events post freely.
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          const entry = await this.journal.post(tx as unknown as Prisma.TransactionClient, {
+            companyId: input.companyId,
+            entryDate: input.entryDate ?? new Date(),
+            journalCode: 'OPERATIONAL',
+            documentType: input.eventType,
+            description:
+              input.description ??
+              `${input.eventType} ${input.sourceEntityType}:${input.sourceEntityId}`,
+            createdBy: undefined,
+            lines,
+            sourceEventId: event.id,
+          });
+          await tx.accountingEvent.update({
+            where: { id: event.id },
+            data: { status: 'POSTED', journalEntryId: entry.id, postedAt: new Date(), error: null },
+          });
+        });
+      } catch (postingError) {
+        const isDuplicateSource =
+          postingError instanceof Prisma.PrismaClientKnownRequestError &&
+          postingError.code === 'P2002' &&
+          JSON.stringify(postingError.meta ?? {}).includes('source_event_id');
+        if (!isDuplicateSource) throw postingError;
+        // RECONCILE: another transaction (concurrent instance or a replay)
+        // already created THIS event's journal. Link it instead of failing.
+        const existing = await this.prisma.journalEntry.findFirst({
+          where: { companyId: input.companyId, sourceEventId: event.id },
+          select: { id: true },
+        });
+        if (existing) {
+          await this.prisma.accountingEvent.update({
+            where: { id: event.id },
+            data: { status: 'POSTED', journalEntryId: existing.id, postedAt: new Date(), error: null },
+          });
+          return;
+        }
+        throw postingError;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`event ${event.id} FAILED: ${message}`);
