@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { JournalService } from './journal.service';
 import { ReportsService } from './reports.service';
+import { SubsidiaryLedgerService } from './subsidiary-ledger.service';
 import { FiscalYearService } from './fiscal-year.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { TEST_INTEGRATION, integrationPrisma, disconnectIntegrationPrisma } from '../testing/integration';
@@ -22,6 +23,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
   let prisma: PrismaClient;
   let journal: JournalService;
   let reports: ReportsService;
+  let subsidiary: SubsidiaryLedgerService;
   let fiscal: FiscalYearService;
   let COMPANY = '';
   const myEntryIds: string[] = [];
@@ -36,6 +38,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     const audit = new AuditService(prismaService as never);
     journal = new JournalService(prismaService as never, new SequencesService(prismaService as never, audit));
     reports = new ReportsService(prismaService as never);
+    subsidiary = new SubsidiaryLedgerService(prismaService as never);
     fiscal = new FiscalYearService(prismaService as never, audit);
 
     const company = await prismaService.company.create({
@@ -45,6 +48,8 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     for (const a of [
       { code: 'BANK', name: 'بانک', type: 'ASSET' as const },
       { code: 'SALES_REVENUE', name: 'درآمد', type: 'REVENUE' as const },
+      { code: 'RECEIVABLE', name: 'دریافتنی', type: 'ASSET' as const },
+      { code: 'PAYABLE', name: 'پرداختنی', type: 'LIABILITY' as const },
     ]) {
       await prismaService.chartOfAccount.create({ data: { ...a, companyId: COMPANY } });
     }
@@ -80,6 +85,7 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
             await prismaService.fiscalYear.deleteMany({ where: { id } });
           }
         }],
+        ['party', () => prismaService.party.deleteMany({ where: { companyId: COMPANY } })],
         ['chartOfAccount', () => prismaService.chartOfAccount.deleteMany({ where: { companyId: COMPANY } })],
         ['sequence', () => prismaService.sequence.deleteMany({ where: { companyId: COMPANY } })],
       ];
@@ -147,6 +153,50 @@ describe('g7d — Phase 7D accounting API (hermetic live DB)', () => {
     await expect(
       reports.journalEntry('00000000-0000-4000-8000-00000000000f', entry.id),
     ).rejects.toThrow('JOURNAL_ENTRY_NOT_FOUND');
+  });
+
+  itif('g7d-07 subsidiary ledger: customer drills RECEIVABLE, supplier drills PAYABLE', async () => {
+    const customer = await prismaService.party.create({
+      data: { companyId: COMPANY, type: 'PERSON', nameFa: 'g7d مشتری', roles: { create: [{ role: 'CUSTOMER' }] } },
+    });
+    const supplier = await prismaService.party.create({
+      data: { companyId: COMPANY, type: 'PERSON', nameFa: 'g7d تامین‌کننده', roles: { create: [{ role: 'SUPPLIER' }] } },
+    });
+    // customer: RECEIVABLE debit 300; supplier: PAYABLE credit 500
+    const custEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'GENERAL',
+      lines: [
+        { accountCode: 'RECEIVABLE', debit: 300, credit: 0, partyId: customer.id },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 300 },
+      ],
+    });
+    myEntryIds.push(custEntry.id);
+    // supplier entry: PAYABLE credit 500 (debit side on the revenue account)
+    const supplierEntry = await journal.post(prismaService as never, {
+      companyId: COMPANY,
+      entryDate: new Date(),
+      journalCode: 'GENERAL',
+      lines: [
+        { accountCode: 'SALES_REVENUE', debit: 500, credit: 0 },
+        { accountCode: 'PAYABLE', debit: 0, credit: 500, partyId: supplier.id },
+      ],
+    });
+    myEntryIds.push(supplierEntry.id);
+
+    // the controller default is RECEIVABLE (unchanged contract): customer drill works
+    const custLedger = await subsidiary.partyLedger(COMPANY, customer.id, { accountCode: 'RECEIVABLE' });
+    expect(custLedger.rows.some((r) => r.debit.toString() === '300')).toBe(true);
+    // that same default on a supplier returns NO rows — the caller must ask for PAYABLE
+    const supplierDefault = await subsidiary.partyLedger(COMPANY, supplier.id, { accountCode: 'RECEIVABLE' });
+    expect(supplierDefault.rows).toHaveLength(0);
+    // explicit PAYABLE returns the supplier's ledger (what the UI now sends)
+    const supplierPayable = await subsidiary.partyLedger(COMPANY, supplier.id, { accountCode: 'PAYABLE' });
+    const row = supplierPayable.rows.find((r) => r.credit.toString() === '500');
+    expect(row).toBeTruthy();
+        // liability runs CREDIT-positive (normal side), so +500 — not negative
+    expect(row!.runningBalance.toString()).toBe('500');
   });
 
   itif('g7d-03 close year rejects posting; reopen year keeps periods closed; explicit period reopen restores posting', async () => {

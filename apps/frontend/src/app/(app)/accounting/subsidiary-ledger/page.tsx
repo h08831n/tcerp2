@@ -15,7 +15,16 @@ import {
   type PartyBalanceRow,
 } from "@/lib/accounting";
 
-type View = { role: "CUSTOMER" | "SUPPLIER" } | { partyId: string; nameFa: string };
+type View =
+  | { role: "CUSTOMER" | "SUPPLIER" }
+  | { partyId: string; nameFa: string; role: "CUSTOMER" | "SUPPLIER" };
+
+/** Ledger account per role: customers post to RECEIVABLE, suppliers to PAYABLE
+ *  (the backend default is RECEIVABLE — drill-down must state it explicitly). */
+const LEDGER_ACCOUNT: Record<"CUSTOMER" | "SUPPLIER", string> = {
+  CUSTOMER: "RECEIVABLE",
+  SUPPLIER: "PAYABLE",
+};
 
 /** دفتر معین — party balances list, drill into each party's ledger rows. */
 
@@ -50,7 +59,7 @@ export default function SubsidiaryLedgerPage() {
   const pageSize = 25;
 
   const loadBalances = useCallback(async () => {
-    if (!("role" in view)) return;
+    if ("partyId" in view) return; // balances view needs the role variant
     setLoading(true);
     setError(null);
     try {
@@ -75,6 +84,7 @@ export default function SubsidiaryLedgerPage() {
     setError(null);
     try {
       const res = await fetchPartyLedger(view.partyId, {
+        accountCode: LEDGER_ACCOUNT[view.role],
         from: from ?? undefined,
         to: to ?? undefined,
       });
@@ -87,7 +97,7 @@ export default function SubsidiaryLedgerPage() {
   }, [view, from, to]);
 
   useEffect(() => {
-    if ("role" in view) void loadBalances();
+    if (!("partyId" in view)) void loadBalances();
     else void loadLedger();
   }, [view, loadBalances, loadLedger]);
 
@@ -113,7 +123,7 @@ export default function SubsidiaryLedgerPage() {
       key: "actions",
       header: "",
       render: (r) => (
-        <Button variant="secondary" onClick={() => setView({ partyId: r.partyId, nameFa: r.nameFa })}>
+        <Button variant="secondary" onClick={() => setView({ partyId: r.partyId, nameFa: r.nameFa, role: view.role })}>
           گردش حساب
         </Button>
       ),
@@ -156,7 +166,51 @@ export default function SubsidiaryLedgerPage() {
 
   return (
     <div className="space-y-4">
-      {"role" in view ? (
+      {"partyId" in view ? (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <button
+                type="button"
+                className="text-sm text-teal-700 underline-offset-2 hover:underline"
+                onClick={() => setView({ role: view.role })}
+              >
+                ← بازگشت به فهرست مانده‌ها
+              </button>
+              <h3 className="mt-1 text-sm font-semibold text-slate-900">دفتر معین: {view.nameFa}</h3>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <span className="mb-1 block text-xs text-slate-500">از تاریخ</span>
+                <JalaliDateInput value={from} onChange={setFrom} />
+              </div>
+              <div>
+                <span className="mb-1 block text-xs text-slate-500">تا تاریخ</span>
+                <JalaliDateInput value={to} onChange={setTo} />
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>
+          )}
+
+          <DataTable
+            columns={ledgerColumns}
+            rows={ledgerRows ?? []}
+            rowKey={(r) => r.entryId + ":" + r.debit + ":" + r.credit}
+            loading={loading}
+            emptyMessage="گردشی برای این حساب در بازه انتخابی ثبت نشده است."
+            dense
+          />
+
+          <JournalEntryModal
+            entryId={drillEntryId}
+            onClose={() => setDrillEntryId(null)}
+            onNavigate={(id) => setDrillEntryId(id)}
+          />
+        </>
+      ) : (
         <>
           <div className="flex flex-wrap items-end gap-3">
             <div>
@@ -216,50 +270,6 @@ export default function SubsidiaryLedgerPage() {
               </Button>
             </div>
           )}
-        </>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <button
-                type="button"
-                className="text-sm text-teal-700 underline-offset-2 hover:underline"
-                onClick={() => setView({ role: "CUSTOMER" })}
-              >
-                ← بازگشت به فهرست مانده‌ها
-              </button>
-              <h3 className="mt-1 text-sm font-semibold text-slate-900">دفتر معین: {view.nameFa}</h3>
-            </div>
-            <div className="flex flex-wrap items-end gap-3">
-              <div>
-                <span className="mb-1 block text-xs text-slate-500">از تاریخ</span>
-                <JalaliDateInput value={from} onChange={setFrom} />
-              </div>
-              <div>
-                <span className="mb-1 block text-xs text-slate-500">تا تاریخ</span>
-                <JalaliDateInput value={to} onChange={setTo} />
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>
-          )}
-
-          <DataTable
-            columns={ledgerColumns}
-            rows={ledgerRows ?? []}
-            rowKey={(r) => r.entryId + ":" + r.debit + ":" + r.credit}
-            loading={loading}
-            emptyMessage="گردشی برای این حساب در بازه انتخابی ثبت نشده است."
-            dense
-          />
-
-          <JournalEntryModal
-            entryId={drillEntryId}
-            onClose={() => setDrillEntryId(null)}
-            onNavigate={(id) => setDrillEntryId(id)}
-          />
         </>
       )}
     </div>

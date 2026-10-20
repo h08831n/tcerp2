@@ -41,14 +41,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await apiFetch("/auth/me");
       const data = (await response.json()) as {
-        user?: AuthUser | null;
+        id?: AuthUser["id"];
+        username?: string;
         permissions?: unknown;
-      };
-      setUser(data.user ?? null);
-      setPermissions(
-        Array.isArray(data.permissions) ? (data.permissions as string[]) : [],
-      );
-      return Boolean(data.user);
+      } & Partial<AuthUser>;
+      // /auth/me contract (Phase 1+2, unchanged): the profile comes back FLAT —
+      // {id, username, ..., permissions, companies, defaultCompanyId} — with NO
+      // {user: ...} wrapper. Reading data.user left `user` permanently null and
+      // bounced every authenticated route back to /login (browser smoke test).
+      if (data.id && data.username) {
+        setUser(data as AuthUser);
+        setPermissions(
+          Array.isArray(data.permissions) ? (data.permissions as string[]) : [],
+        );
+        return true;
+      }
+      setUser(null);
+      setPermissions([]);
+      return false;
     } catch {
       setUser(null);
       setPermissions([]);
