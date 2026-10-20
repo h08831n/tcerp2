@@ -77,18 +77,42 @@ cd apps/backend && DATABASE_URL=... npx prisma migrate deploy
 - دستور آزمایش: `npx prisma migrate deploy` با
   `DATABASE_URL=postgresql://…@localhost:5433/tcerp_shadow` (دیتابیس
   آزمایشی دورریختنی — پس از آزمایش DROP شد) پس از اعمال کامل تاریخچه واقعی.
-- فایل آزمایش شامل **دقیقاً همان دو statement فایل واقعی
-  `20241021000000_journal_source_event_id`** (ALTER TABLE … ADD COLUMN +
-  CREATE UNIQUE INDEX) به‌علاوه statement سوم همیشه-شکننده (`SELECT 1/0`).
-- نتیجه: خطای `P3018`، رکورد در `_prisma_migrations` با `finished_at = NULL`
-  و **هم ستون و هم ایندکس ABSENT** — یعنی هر دو statement واقعی با هم
-  rollback شدند (PostgreSQL DDL تراکنشی است و Prisma 5.22.0 هر فایل migration
-  را در یک تراکنش واحد اجرا می‌کند).
-- مسیر بازیابی نیز روی همان state آزمایش شد:
-  `prisma migrate resolve --rolled-back zzz_evidence2` رکورد را resolved
-  علامت زد و `migrate deploy` بعدی کل migration را **از نو و کامل** اجرا کرد
-  (در آزمایش دوباره P3018 گرفت چون SQL عمداً خراب بود — رفتار صحیح؛ با SQL
-  سالم، تلاش مجدد موفق می‌شود).
+
+**۱. محتوای واقعی فایل migration — بدون BEGIN/COMMIT صریح:**
+```sql
+-- apps/backend/prisma/migrations/20241021000000_journal_source_event_id/migration.sql
+-- Durable idempotency key for event-driven postings: …
+ALTER TABLE "journal_entries" ADD COLUMN "source_event_id" UUID;
+CREATE UNIQUE INDEX "journal_entries_source_event_id_key" ON "journal_entries"("source_event_id");
+```
+تراکنش را موتور Prisma اضافه می‌کند (ادعای زیر با کنترل تجربی اثبات شد).
+
+**۲. اثبات سه‌وجهی مکانیزم rollback (همه روی `tcerp_shadow`، Prisma 5.22.0):**
+- **کنترل منفی — autocommit بدون Prisma:** اجرای مستقیم
+  `ALTER TABLE … ADD COLUMN baseline_col` با psql (هر statement autocommit)
+  و سپس `SELECT 1/0` → شکست، ولی **ستون PERSISTS**. یعنی PostgreSQL به‌تنهایی
+  DDL را بدون تراکنش صریح rollback نمی‌کند.
+- **آزمایش شکست با Prisma:** فایل با ساختار دقیقاً یکسان (zzz-prefixed تا با
+  migration واقعی تلاقی نکند): `ALTER … ADD COLUMN zzz_source_event_id` +
+  `CREATE UNIQUE INDEX …zzz…` + `SELECT 1/0` → `P3018`، رکورد
+  `_prisma_migrations` با `finished_at = NULL`، و **هر دو ستون و ایندکس
+  ABSENT**. چون کنترل منفی نشان داد autocommit آن‌ها را باقی می‌گذاشت،
+  rollback فقط از **تراکنش واحدی که موتور Prisma به‌دور از هر فایل
+  migration می‌کشد** می‌تواند باشد.
+- **کنترل مثبت:** همان migration واقعی بدون شکست در تاریخچه deploy → ستون و
+  ایندکس EXIST (مسیر موفق عادی).
+- **درس روش‌شناختی (ثبت‌شده):** نخستین تلاش آزمایش با نام‌های بدون پیشوند
+  (`source_event_id`) false positive داد — ستون/ایندکس مشاهده‌شده متعلق به
+  migration واقعیِ قبلاً-اعمال‌شده بود، نه باقی‌مانده فایل شکست‌خورده. آزمایش
+  نهایی با شناسه‌های متمایز (`zzz_`) تکرار شد. همچنین تلاقی رکورد FAILED قبلی
+  `P3009` داد که با `migrate resolve --rolled-back zzz_evidence3` حل و سپس
+  deploy دوباره اجرا شد (مسیر (ب) زیر — عملاً تمرین شد).
+
+**۳. مسیر بازیابی روی همان state آزمایش شد:**
+`prisma migrate resolve --rolled-back zzz_evidence3` رکورد را resolved علامت
+زد و `migrate deploy` بعدی کل migration را **از نو و کامل** اجرا کرد (در
+آزمایش دوباره P3018 گرفت چون SQL عمداً خراب بود — رفتار صحیح؛ با SQL سالم،
+تلاش مجدد موفق می‌شود).
 
 **این شواهد فقط برای Prisma 5.22.0 + PostgreSQL 16 این پروژه معتبر است؛ قبل
 از ارتقای Prisma/Postgres، آزمایش بالا را روی دیتابیس آزمایشی تکرار کنید.**
