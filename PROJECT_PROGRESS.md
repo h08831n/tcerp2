@@ -318,6 +318,17 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Year-end closing journals / retained-earnings transfer: NOT implemented — the requirements do not define their accounting semantics (documented gap, not invented)
 - Tests: 5 new g7d cases (drill-down + reversal linkage, company isolation, close/reopen-year posting lifecycle, audit trail, seeded role permissions); 184 suites — 675/675 integration
 
+### Phase 8 — Tax Invoices & Moadian (COMPLETED — commits Phase 8 series)
+- Schema: `SalesTaxInvoice` (+lines, +submissions) با وضعیت‌های DRAFT→READY→SENDING→SUBMITTED→SUCCESS/FAILED، `PurchaseTaxInvoice` ثبت حداقلی، migration `20241021090000_phase8_tax_invoices` (افزایشی، non-destructive)
+- Submission lifecycle: claim اتمیک READY/FAILED→SENDING، uid یکتا DB-level، `retry=true` رسمی در ارسال مجدد، payload_snapshot هر تلاش، استعلام PENDING/SUCCESS/FAILED رسمی
+- Adapter مودیان: interface + **MockMoadianAdapter** (پیش‌فرض) + **MoadianHttpAdapter** (طبق دستورالعمل فنی tax.gov.ir: normal-enqueue/INQUIRY_BY_UID/GET_TOKEN، امضا RSA2048-SHA256، AES-256-GCM/RSA-OAEP — **تأییدنشده روی سرویس واقعی**؛ نیازمند اعتبارنامه Sharjh که عمداً در مخزن نیست)
+- بدون سند حسابداری جدید: صورتحساب مالیاتی لایه گزارش/ارسال است؛ مالیات/درآمد قبلاً با رویدادهای بارگیری ثبت شده (مرز مصوب docs/05 §7)
+- Permission جدید `tax.submit`؛ salesperson هیچ دسترسی tax.* ندارد (p8-03)
+- UI: `/tax-invoices` (فهرست+فیلتر+ایجاد از سند تکمیل‌شده+ارسال/استعلام/تاریخچه+جزئیات) + nav
+- مقدار صورتحساب = بارگیری‌شده (tax_invoiced_quantity ≠ ordered) با Decimal دقیق؛ مبلغ هر تخصیص M:N = جمع کل فاکتور
+- شکاف‌های مستند: sstid (نگاه docs/08)، اتصال واقعی نیازمند اعتبارنامه، ارسال زمان‌دار در صف نیست
+- Tests: p8-01..09 (صدور/ردی/مجوز/ارسال/استعلام/retry/هم‌زمانی/خرید/وضعیت مودیان سند) — 181 suite، 694/694 integration
+
 ## Current module
 - **Phase 4 (Sales/Purchase: CRM funnel, sales, purchase, allocations, price requests,
   document flow) is COMPLETE.** Next: **Phase 5 — Daily Pricing + Publishing**.
