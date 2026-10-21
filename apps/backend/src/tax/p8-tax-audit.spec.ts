@@ -233,7 +233,19 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(payload.header.inno).toBe(invoice.number);
     expect(payload.header.inty).toBe(1); // MAIN → type 1
     expect(payload.header.ins).toBe(1); // subject اصلی
-    expect(payload.header.indatim).toBe(Math.floor(new Date('2026-03-15').getTime() / 1000)); // epoch seconds — issueDate is DATE-only → midnight
+    const createdFresh = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+    // inty = invoice TYPE (1=نوع اول), independent of ins (subject) — جدول ۷
+    expect(payload.header.inty).toBe(1);
+    expect(createdFresh.inty).toBe(1);
+    expect(payload.header.ins).toBe(1); // subject اصلی
+    // indatim/indati2m = MILLISECONDS (official Timestamp 14 digits, sample
+    // 1655620821274): indatim = issue date midnight (DATE column),
+    // indati2m = record creation moment
+    expect(payload.header.indatim).toBe(new Date('2026-03-15').getTime());
+    expect(Number.isInteger(payload.header.indatim)).toBe(true);
+    expect(payload.header.indatim).toBeGreaterThan(1_600_000_000_000); // ms, not seconds
+    expect(payload.header.indati2m).toBe(createdFresh.createdAt.getTime());
+    expect(Number.isInteger(payload.header.indati2m)).toBe(true);
         const buyer = await prisma.party.findFirstOrThrow({
       where: { companyId: COMPANY, id: invoice.customerPartyId },
     });
@@ -283,6 +295,10 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(payload.header.inty).toBe(2);
     expect(payload.header.ins).toBe(2);
     expect(payload.header.irtaxid).toBe(taxid);
+    const correctiveRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: corrective.id } });
+    expect(correctiveRow.inty).toBe(2); // نوع دوم row-level
+    expect(correctiveRow.subject).toBe('CORRECTIVE');
+    expect(payload.header.indati2m).toBe(correctiveRow.createdAt.getTime());
   });
 
   itif('p8-12 over-invoicing blocked; cancelled frees; override above remaining rejected', async () => {

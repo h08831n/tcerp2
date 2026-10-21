@@ -212,6 +212,7 @@ export class TaxInvoiceService {
         number,
         status: 'READY',
         subject,
+        inty: subject === 'MAIN' ? 1 : 2, // official inty: type1=اصلی، type2=اصلاحی/ابطالی/برگشتی
         relatedTaxid: input.relatedTaxid ?? null,
         customerPartyId: doc.customerPartyId,
         issueDate: input.issueDate ?? new Date(),
@@ -574,7 +575,9 @@ export class TaxInvoiceService {
   private buildPayload(invoice: {
     number: string;
     subject: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
+    inty: number;
     issueDate: Date;
+    createdAt: Date;
     customer: { type: 'COMPANY' | 'PERSON'; nameFa: string; nationalId: string | null; economicCode: string | null; nationalCode: string | null };
     subtotal: Prisma.Decimal;
     discountTotal: Prisma.Decimal;
@@ -596,28 +599,33 @@ export class TaxInvoiceService {
     }>;
   }) {
     // Official template field mapping (دستورالعمل فنی, tax.gov.ir):
-    //  inty — invoice TYPE: 1 = type1 (اصلی فروش), 2 = type2 (اصلاحی/ابطالی/
-    //    برگشتی مرتبط), 3 = type3 (خرید). Subject determines inty 1 vs 2.
-    //  ins — subject: 1 اصلی, 2 اصلاحی, 3 ابطال توسط مودی, 4 برگشت از فروش.
-    //  irtaxid — the ORIGINAL invoice's taxid, required for non-MAIN subjects.
-    //  indatim — issue DATE-TIME; official format = epoch seconds (number).
-    //    ⚠️ UNVERIFIED against a live response — flagged in docs/08.
+    // Official جدول ۷ (technical instruction, tax.gov.ir):
+    //  inty — invoice TYPE (independent of subject): 1=نوع اول, 2=نوع دوم,
+    //    3=نوع سوم (خرید). Stored on the invoice row at creation.
+    //  ins — SUBJECT: 1=اصلی, 2=اصلاحی, 3=ابطالی, 4=برگشت از فروش.
+    //  irtaxid — ORIGINAL invoice taxid, required for non-MAIN subjects.
+    //  indatim — صدور: Timestamp, 14 digits = MILLISECONDS (sample
+    //    1655620821274). issueDate is DATE-only → midnight ms.
+    //  indati2m — ایجاد: Timestamp ms = the moment this invoice record was
+    //    created in our system (createdAt).
+    //  taxid — 22-character unique tax id (generated with fiscal key
+    //    material — documented gap; nullable until then).
     //  tins — buyer national id (legal) / national code (real person).
-    //  tob — buyer business type: 1 حقوقی, 2 حقیقی.
+    //  tob — buyer business type: 1=حقوقی (COMPANY), 2=حقیقی (PERSON).
     //  tprdis/tdis/tadis/tvam/tbill — grand totals, all Decimal strings.
     const subjectToIns: Record<string, number> = { MAIN: 1, CORRECTIVE: 2, CANCEL: 3, RETURN: 4 };
     const ins = subjectToIns[invoice.subject] ?? 1;
-    const inty = invoice.subject === 'MAIN' ? 1 : 2;
-    const tob = invoice.customer.type === 'COMPANY' ? 1 : 2;
+    const tob = invoice.customer.type === 'COMPANY' ? 1 : 2; // 1=حقوقی, 2=حقیقی
     return {
       header: {
         inno: invoice.number,
-        inty,
+        inty: invoice.inty,
         ins,
         ...(invoice.subject !== 'MAIN' && invoice.relatedTaxid
           ? { irtaxid: invoice.relatedTaxid }
           : {}),
-        indatim: Math.floor(invoice.issueDate.getTime() / 1000),
+        indatim: invoice.issueDate.getTime(),
+        indati2m: invoice.createdAt.getTime(),
         tins: invoice.customer.nationalId ?? invoice.customer.nationalCode ?? null,
         tob,
         tprdis: invoice.subtotal.toString(),
