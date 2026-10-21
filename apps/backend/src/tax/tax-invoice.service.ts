@@ -48,12 +48,41 @@ export class TaxInvoiceService {
    * sales-line tax data, quantities = SUM(loading allocations) per line
    * (tax_invoiced_quantity), VAT per line from the tax rate snapshot.
    */
+  /** Serializes concurrent creations for the SAME sales document — two
+   *  simultaneous creates must not both pass the remaining-quantity check.
+   *  (In-process gate: deployment is single-instance; cross-instance gap is
+   *  documented in docs/08. pg_advisory_xact_lock was verified NOT to
+   *  serialize concurrent same-client interactive transactions.) */
+  private readonly creationGates = new Map<string, Promise<unknown>>();
+
   async createFromSalesDocument(
     companyId: string,
     input: {
       salesDocumentId: string;
       subject?: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
       issueDate?: Date;
+      relatedTaxid?: string; // original invoice taxid for CORRECTIVE/CANCEL/RETURN
+      lineOverrides?: Array<{ salesLineId: string; quantity: string }>;
+    },
+    actor: { id: string; username: string },
+  ) {
+    const prev = this.creationGates.get(input.salesDocumentId) ?? Promise.resolve();
+    const gate = prev.catch(() => undefined).then(() => this.doCreate(companyId, input, actor));
+    this.creationGates.set(input.salesDocumentId, gate);
+    try {
+      return await gate;
+    } finally {
+      if (this.creationGates.get(input.salesDocumentId) === gate) this.creationGates.delete(input.salesDocumentId);
+    }
+  }
+
+  private async doCreate(
+    companyId: string,
+    input: {
+      salesDocumentId: string;
+      subject?: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
+      issueDate?: Date;
+      relatedTaxid?: string;
       lineOverrides?: Array<{ salesLineId: string; quantity: string }>;
     },
     actor: { id: string; username: string },
@@ -68,6 +97,12 @@ export class TaxInvoiceService {
     }
     if (!doc.customer.economicCode && !doc.customer.nationalId && !doc.customer.nationalCode) {
       throw new ValidationError('TAX_INVOICE_CUSTOMER_IDENTITY_MISSING', { customerPartyId: doc.customerPartyId });
+    }
+    const subject = input.subject ?? 'MAIN';
+    if (subject !== 'MAIN' && !input.relatedTaxid) {
+      // official template: corrective/cancel/return invoices must reference
+      // the original invoice's taxid (irtaxid header field)
+      throw new ValidationError('TAX_INVOICE_RELATED_TAXID_REQUIRED', { subject });
     }
 
     const loadedByLine = new Map<string, Prisma.Decimal>();
@@ -89,14 +124,63 @@ export class TaxInvoiceService {
     const overrideByLine = new Map(
       (input.lineOverrides ?? []).map((o) => [o.salesLineId, new Prisma.Decimal(o.quantity)]),
     );
-    const lines = doc.lines.map((line) => {
-      const quantity = overrideByLine.get(line.id) ?? loadedByLine.get(line.id) ?? new Prisma.Decimal(0);
+
+    // Over-invoicing guard (Critical Tax Audit): previously ISSUED invoice
+    // quantities (any status except CANCELLED) reduce the remaining
+    // tax-invoiceable quantity per line. Partial, multi-stage issuance is
+    // supported: each invoice issues at most the remaining amount.
+    const priorLines = await this.prisma.salesTaxInvoiceLine.findMany({
+      where: {
+        companyId,
+        salesLineId: { in: doc.lines.map((l) => l.id) },
+        salesTaxInvoice: { status: { not: 'CANCELLED' } },
+      },
+      select: { salesLineId: true, quantity: true },
+    });
+    const issuedByLine = new Map<string, Prisma.Decimal>();
+    for (const l of priorLines) {
+      if (!l.salesLineId) continue;
+      issuedByLine.set(l.salesLineId, (issuedByLine.get(l.salesLineId) ?? new Prisma.Decimal(0)).plus(l.quantity));
+    }
+
+    // The remaining-quantity cap applies to MAIN invoices only — corrective/
+    // cancel/return invoices ADJUST a prior invoice (they reference it via
+    // relatedTaxid) and do not consume fresh loaded quantity.
+    const enforceCap = (input.subject ?? 'MAIN') === 'MAIN';
+    const lines: Array<{
+      salesLineId: string;
+      sstid: string | null;
+      description: string;
+      mu: string | null;
+      quantity: Prisma.Decimal;
+      unitPrice: Prisma.Decimal;
+      prdis: Prisma.Decimal;
+      dis: Prisma.Decimal;
+      adis: Prisma.Decimal;
+      vra: Prisma.Decimal;
+      vam: Prisma.Decimal;
+      tsstam: Prisma.Decimal;
+      lineOrder: number;
+    }> = [];
+    for (const line of doc.lines) {
+      const requested = overrideByLine.get(line.id) ?? loadedByLine.get(line.id) ?? new Prisma.Decimal(0);
+      const alreadyIssued = issuedByLine.get(line.id) ?? new Prisma.Decimal(0);
+      const remaining = new Prisma.Decimal(loadedByLine.get(line.id) ?? 0).minus(alreadyIssued);
+      if (enforceCap && requested.gt(remaining)) {
+        throw new ValidationError('TAX_INVOICE_QUANTITY_EXCEEDED', {
+          salesLineId: line.id,
+          requested: requested.toString(),
+          remaining: remaining.toString(),
+        });
+      }
+      if (enforceCap && remaining.isZero() && requested.isZero()) continue; // nothing left to invoice on this line
+      const quantity = requested;
       const gross = new Prisma.Decimal(line.unitPrice).times(quantity);
       const discount = new Prisma.Decimal(line.discountAmount);
       const net = gross.minus(discount);
       const vra = new Prisma.Decimal(line.taxRateSnapshot ?? 0);
       const vam = net.times(vra).dividedBy(100);
-      return {
+      lines.push({
         salesLineId: line.id,
         sstid: null as string | null, // official service code — mapped from the goods list at send time (documented gap)
         description: line.printableDescription ?? line.productVariant.nameFa,
@@ -110,9 +194,9 @@ export class TaxInvoiceService {
         vam,
         tsstam: vam,
         lineOrder: line.lineOrder,
-      };
-    });
-    if (lines.every((l) => l.quantity.isZero())) {
+      });
+    }
+    if (lines.length === 0 || lines.every((l) => l.quantity.isZero())) {
       throw new ValidationError('TAX_INVOICE_NO_INVOICED_QUANTITY', { salesDocumentId: input.salesDocumentId });
     }
 
@@ -127,7 +211,8 @@ export class TaxInvoiceService {
         companyId,
         number,
         status: 'READY',
-        subject: input.subject ?? 'MAIN',
+        subject,
+        relatedTaxid: input.relatedTaxid ?? null,
         customerPartyId: doc.customerPartyId,
         issueDate: input.issueDate ?? new Date(),
         subtotal,
@@ -196,18 +281,121 @@ export class TaxInvoiceService {
 
   // ─── submission lifecycle ────────────────────────────────────────────────
 
-  /** Atomic claim: only one concurrent caller can move READY→SENDING. */
-  async send(companyId: string, invoiceId: string, actor: { id: string; username: string }) {
+  /** UNKNOWN-OUTCOME resolution: a SENDING invoice (crashed claim) or a
+   *  PENDING submission is reconciled against the authority BEFORE any
+   *  resend. Returns the resolved invoice status:
+   *  'SUBMITTED' (still pending at the authority — caller waits),
+   *  'SUCCESS', or 'FAILED' (safe to retry). Newer attempt outcomes always
+   *  win over older ones — stale responses never overwrite newer state. */
+  private async recoverPending(
+    companyId: string,
+    invoiceId: string,
+  ): Promise<'SUBMITTED' | 'SUCCESS' | 'FAILED'> {
+    const pending = await this.prisma.salesTaxInvoiceSubmission.findMany({
+      where: { invoiceId, companyId, status: 'PENDING' },
+      orderBy: { attempt: 'desc' },
+    });
+    if (pending.length === 0) return 'FAILED'; // nothing at the authority → safe retry
+    const results = await this.adapter.inquiryByUid(pending.map((s) => s.uid));
+    const byUid = new Map(results.map((r) => [r.uid, r]));
+    for (const submission of pending) {
+      const result = byUid.get(submission.uid);
+      if (!result || result.status === 'PENDING') continue;
+      await this.prisma.salesTaxInvoiceSubmission.update({
+        where: { id: submission.id },
+        data: {
+          status: result.status,
+          errorCode: result.errorCode || null,
+          errorDetail: result.errorDetail || null,
+          confirmationReferenceId: result.confirmationReferenceId || null,
+          taxResult: result.taxResult || null,
+          inquiredAt: new Date(),
+        },
+      });
+    }
+    const latest = pending[0]; // newest attempt (attempt desc)
+    const latestResult = byUid.get(latest.uid);
+    let resolved: 'SUBMITTED' | 'SUCCESS' | 'FAILED' = 'SUBMITTED';
+    if (latestResult?.status === 'SUCCESS') {
+      await this.prisma.salesTaxInvoice.update({
+        where: { id: invoiceId },
+        data: {
+          status: 'SUCCESS',
+          moadianStatus: 'SUCCESS',
+          moadianError: null,
+          confirmationReferenceId: latestResult.confirmationReferenceId || null,
+          taxResult: latestResult.taxResult || null,
+        },
+      });
+      resolved = 'SUCCESS';
+    } else if (latestResult?.status === 'FAILED') {
+      await this.prisma.salesTaxInvoice.update({
+        where: { id: invoiceId },
+        data: {
+          status: 'FAILED',
+          moadianStatus: 'FAILED',
+          moadianError: `${latestResult.errorCode ?? ''}: ${latestResult.errorDetail ?? ''}`,
+        },
+      });
+      resolved = 'FAILED';
+    }
+    // older attempts update only their own rows — never the invoice status
+    return resolved;
+  }
+
+  /** Atomic claim: only one concurrent caller can move READY→SENDING.
+   *  UNKNOWN-OUTCOME SAFETY: if a previous attempt is still PENDING (its
+   *  result never became final — e.g. timeout after the authority accepted
+   *  the packet), send() NEVER blindly resends. It inquires the pending uid
+   *  first: PENDING → caller waits; SUCCESS → invoice promoted; FAILED →
+   *  safe retry proceeds. Duplicate-response 5005 (duplicate.request.uid)
+   *  is treated as ALREADY ACCEPTED, not a failure. */
+  async send(
+    companyId: string,
+    invoiceId: string,
+    actor: { id: string; username: string },
+  ): Promise<
+    | { status: 'SUBMITTED' | 'SUCCESS' | 'FAILED'; submissionId?: string; uid?: string; referenceNumber?: string | null; errorCode?: string; awaitingInquiry?: boolean; recoveredLateSuccess?: boolean; duplicateUid?: boolean }
+  > {
     const invoice = await this.prisma.salesTaxInvoice.findFirst({
       where: { id: invoiceId, companyId },
-      include: { lines: true, customer: true },
+      include: { lines: true, customer: { select: { type: true, nameFa: true, nationalId: true, economicCode: true, nationalCode: true } } },
     });
     if (!invoice) throw new NotFoundError('Tax invoice not found', { invoiceId });
     if (invoice.status === 'SENDING') {
-      throw new ConflictError('TAX_INVOICE_SEND_IN_PROGRESS');
+      // crash/timeout recovery path: a prior claim never completed — check
+      // its pending submissions instead of blocking forever
+      const recovered = await this.recoverPending(companyId, invoiceId);
+      if (recovered === 'SUBMITTED') {
+        // the authority still holds the packet unresolved — never resend
+        throw new ConflictError('TAX_INVOICE_SEND_IN_PROGRESS');
+      }
+      // recovered SUCCESS/FAILED → invoice status updated; continue below
     }
     if (invoice.status !== 'READY' && invoice.status !== 'FAILED') {
       throw new ConflictError('TAX_INVOICE_NOT_SENDABLE', { status: invoice.status });
+    }
+    // unknown-outcome guard: a still-PENDING prior submission means the
+    // authority may have (or has) the packet — resolve it before resending
+    const pendingPrior = await this.prisma.salesTaxInvoiceSubmission.findFirst({
+      where: { invoiceId, companyId, status: 'PENDING' },
+      orderBy: { attempt: 'desc' },
+    });
+    if (pendingPrior) {
+      const recovered = await this.recoverPending(companyId, invoiceId);
+      if (recovered === 'SUBMITTED') {
+        // unknown outcome is STILL pending at the authority — wait, no resend
+        await this.prisma.salesTaxInvoice.update({
+          where: { id: invoiceId },
+          data: { status: 'SUBMITTED', moadianStatus: 'PENDING' },
+        });
+        return { status: 'SUBMITTED' as const, awaitingInquiry: true };
+      }
+      // recovered SUCCESS (late success) → reflect and stop
+      if (recovered === 'SUCCESS') {
+        return { status: 'SUCCESS' as const, recoveredLateSuccess: true };
+      }
+      // prior attempt is definitively FAILED → fall through to a safe retry
     }
     const isRetry = invoice.status === 'FAILED';
     // atomic claim (like the loading allocation pattern): READY/FAILED → SENDING
@@ -263,8 +451,18 @@ export class TaxInvoiceService {
           errorDetail: response?.errorDetail || null,
         },
       });
+      if (response?.errorCode === '5005') {
+        // duplicate.request.uid — the authority ALREADY has this uid: treat
+        // as accepted (submission stays PENDING; inquiry resolves it) and
+        // never mark the invoice FAILED for a duplicate of itself
+        await this.prisma.salesTaxInvoice.update({
+          where: { id: invoiceId },
+          data: { status: 'SUBMITTED', moadianStatus: 'PENDING', moadianError: null },
+        });
+        return { status: 'SUBMITTED' as const, submissionId: submission.id, uid, duplicateUid: true };
+      }
       if (response?.errorCode) {
-        // transport-level rejection (bad request, duplicate uid, too large…)
+        // transport-level rejection (bad request, too large…)
         await this.prisma.salesTaxInvoice.update({
           where: { id: invoiceId },
           data: {
@@ -327,11 +525,12 @@ export class TaxInvoiceService {
     const pending = invoice.submissions;
     if (pending.length === 0) throw new ConflictError('TAX_INVOICE_NO_PENDING_SUBMISSION');
     const results = await this.adapter.inquiryByUid(pending.map((s) => s.uid));
+    const byUid = new Map(results.map((r) => [r.uid, r]));
     let finalStatus: SalesTaxInvoiceStatus | null = null;
-    for (const result of results) {
-      const submission = pending.find((s) => s.uid === result.uid);
-      if (!submission) continue;
-      if (result.status === 'PENDING') continue;
+    const latest = pending[0]; // attempt desc → newest attempt
+    for (const submission of pending) {
+      const result = byUid.get(submission.uid);
+      if (!result || result.status === 'PENDING') continue;
       await this.prisma.salesTaxInvoiceSubmission.update({
         where: { id: submission.id },
         data: {
@@ -343,6 +542,7 @@ export class TaxInvoiceService {
           inquiredAt: new Date(),
         },
       });
+      if (submission.id !== latest.id) continue; // stale attempt: row only
       if (result.status === 'SUCCESS') {
         await this.prisma.salesTaxInvoice.update({
           where: { id: invoiceId },
@@ -375,11 +575,12 @@ export class TaxInvoiceService {
     number: string;
     subject: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
     issueDate: Date;
-    customer: { nameFa: string; nationalId: string | null; economicCode: string | null; nationalCode: string | null };
+    customer: { type: 'COMPANY' | 'PERSON'; nameFa: string; nationalId: string | null; economicCode: string | null; nationalCode: string | null };
     subtotal: Prisma.Decimal;
     discountTotal: Prisma.Decimal;
     taxTotal: Prisma.Decimal;
     grandTotal: Prisma.Decimal;
+    relatedTaxid: string | null;
     lines: Array<{
       sstid: string | null;
       description: string;
@@ -394,18 +595,34 @@ export class TaxInvoiceService {
       tsstam: Prisma.Decimal;
     }>;
   }) {
-    const subjectMap: Record<string, number> = { MAIN: 1, CORRECTIVE: 2, CANCEL: 3, RETURN: 4 };
+    // Official template field mapping (دستورالعمل فنی, tax.gov.ir):
+    //  inty — invoice TYPE: 1 = type1 (اصلی فروش), 2 = type2 (اصلاحی/ابطالی/
+    //    برگشتی مرتبط), 3 = type3 (خرید). Subject determines inty 1 vs 2.
+    //  ins — subject: 1 اصلی, 2 اصلاحی, 3 ابطال توسط مودی, 4 برگشت از فروش.
+    //  irtaxid — the ORIGINAL invoice's taxid, required for non-MAIN subjects.
+    //  indatim — issue DATE-TIME; official format = epoch seconds (number).
+    //    ⚠️ UNVERIFIED against a live response — flagged in docs/08.
+    //  tins — buyer national id (legal) / national code (real person).
+    //  tob — buyer business type: 1 حقوقی, 2 حقیقی.
+    //  tprdis/tdis/tadis/tvam/tbill — grand totals, all Decimal strings.
+    const subjectToIns: Record<string, number> = { MAIN: 1, CORRECTIVE: 2, CANCEL: 3, RETURN: 4 };
+    const ins = subjectToIns[invoice.subject] ?? 1;
+    const inty = invoice.subject === 'MAIN' ? 1 : 2;
+    const tob = invoice.customer.type === 'COMPANY' ? 1 : 2;
     return {
       header: {
         inno: invoice.number,
-        inty: 1, // type 1 = فروش (types 2/3 are corrective/purchase per the official spec)
-        ins: subjectMap[invoice.subject] ?? 1,
-        indatim: invoice.issueDate.toISOString().slice(0, 10),
+        inty,
+        ins,
+        ...(invoice.subject !== 'MAIN' && invoice.relatedTaxid
+          ? { irtaxid: invoice.relatedTaxid }
+          : {}),
+        indatim: Math.floor(invoice.issueDate.getTime() / 1000),
         tins: invoice.customer.nationalId ?? invoice.customer.nationalCode ?? null,
-        tob: 1, // business type: حقوقی/حقیقی — refined at send time from party data
+        tob,
         tprdis: invoice.subtotal.toString(),
         tdis: invoice.discountTotal.toString(),
-        tadis: invoice.discountTotal.toString(),
+        tadis: invoice.subtotal.minus(invoice.discountTotal).toString(),
         tvam: invoice.taxTotal.toString(),
         tbill: invoice.grandTotal.toString(),
       },

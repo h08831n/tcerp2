@@ -194,6 +194,61 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
         return it.skip(name, fn);
       };
 
+  /** own COMPLETED doc per test — the over-invoicing cap (Critical Tax
+   *  Audit) means one doc yields ONE full invoice, so send/inquiry tests
+   *  each need a fresh document. */
+  async function makeOwnDoc() {
+    const customer = await prisma.party.create({
+      data: {
+        companyId: COMPANY,
+        type: 'PERSON',
+        nameFa: `p8 مشتری ${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        economicCode: '411598765432',
+        nationalCode: `0012345${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`,
+        roles: { create: [{ role: 'CUSTOMER' }] },
+      },
+    });
+    myPartyIds.push(customer.id);
+    const salesperson = await prisma.user.create({
+      data: { username: `p8-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, passwordHash: 'x', status: 'ACTIVE' },
+    });
+    myUserIds.push(salesperson.id);
+    const uom = await prisma.uom.findFirstOrThrow({ where: { companyId: COMPANY } });
+    const doc = await prisma.salesDocument.create({
+      data: {
+        companyId: COMPANY,
+        documentNumber: `P8-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        customerPartyId: customer.id,
+        salespersonUserId: salesperson.id,
+        documentDate: new Date(),
+        status: 'COMPLETED',
+        lines: {
+          create: {
+            companyId: COMPANY,
+            productVariantId: myVariantIds[0],
+            orderedQuantity: new Prisma.Decimal(999),
+            uomId: uom.id,
+            unitPrice: new Prisma.Decimal('123.45'),
+            taxRateSnapshot: new Prisma.Decimal(9),
+            subtotal: new Prisma.Decimal('0'),
+            lineTotal: new Prisma.Decimal('0'),
+          },
+        },
+      },
+      include: { lines: true },
+    });
+    mySalesDocIds.push(doc.id);
+    mySalesLineIds.push(doc.lines[0].id);
+    const loading = await prisma.loading.create({ data: { companyId: COMPANY, loadingDate: new Date() } });
+    const loadingLine = await prisma.loadingLine.create({
+      data: { loadingId: loading.id, productVariantId: myVariantIds[0], actualQuantity: new Prisma.Decimal(50), uomId: uom.id },
+    });
+    await prisma.loadingAllocation.create({
+      data: { companyId: COMPANY, loadingLineId: loadingLine.id, salesLineId: doc.lines[0].id, allocatedQuantity: new Prisma.Decimal(50) },
+    });
+    return doc;
+  }
+
   afterAll(async () => {
     if (!prismaService || !COMPANY) {
       if (prismaService) await prismaService.$disconnect();
@@ -208,9 +263,9 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
         ['purchaseTaxInvoice', () => prismaService.purchaseTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
         ['salesAllocation', () => prismaService.salesTaxInvoiceOrderAllocation.deleteMany({ where: { companyId: COMPANY } })],
         ['purchaseAllocation', () => prismaService.purchaseTaxInvoiceOrderAllocation.deleteMany({ where: { companyId: COMPANY } })],
-        ['loadingAllocation', () => prismaService.loadingAllocation.deleteMany({ where: { id: { in: myLoadingAllocationIds } } })],
-        ['loadingLine', () => prismaService.loadingLine.deleteMany({ where: { id: { in: myLoadingLineIds } } })],
-        ['loading', () => prismaService.loading.deleteMany({ where: { id: { in: myLoadingIds } } })],
+        ['loadingAllocation', () => prismaService.loadingAllocation.deleteMany({ where: { companyId: COMPANY } })],
+        ['loadingLine', () => prismaService.loadingLine.deleteMany({ where: { loading: { companyId: COMPANY } } })],
+        ['loading', () => prismaService.loading.deleteMany({ where: { companyId: COMPANY } })],
         ['salesLine', () => prismaService.salesLine.deleteMany({ where: { id: { in: mySalesLineIds } } })],
         ['salesDocument', () => prismaService.salesDocument.deleteMany({ where: { id: { in: mySalesDocIds } } })],
         ['variant', () => prismaService.productVariant.deleteMany({ where: { id: { in: myVariantIds } } })],
@@ -246,15 +301,19 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   itif('p8-01 create from COMPLETED doc: loaded quantities, exact Decimal totals, allocation', async () => {
     const docId = mySalesDocIds[0];
     const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: docId }, ACTOR);
+    const withLines = await prisma.salesTaxInvoice.findUniqueOrThrow({
+      where: { id: invoice.id },
+      include: { lines: true },
+    });
     expect(invoice.status).toBe('READY');
     expect(invoice.number).toMatch(/^STI-\d{5}$/); // resetCycle NEVER → no year segment
     // tax_invoiced_quantity = 50 (loading allocation), not 100 (ordered)
-    expect(invoice.lines[0].quantity.toString()).toBe('50');
+    expect(withLines.lines[0].quantity.toString()).toBe('50');
     // Decimal-exact: unitPrice 123.45 × 50 = 6172.5 prdis; dis 23.45;
     // vam = (6172.5 − 23.45) × 9% = 553.4145
-    expect(invoice.lines[0].prdis.toString()).toBe('6172.5');
-    expect(invoice.lines[0].dis.toString()).toBe('23.45');
-    expect(invoice.lines[0].vam.toString()).toBe('553.4145');
+    expect(withLines.lines[0].prdis.toString()).toBe('6172.5');
+    expect(withLines.lines[0].dis.toString()).toBe('23.45');
+    expect(withLines.lines[0].vam.toString()).toBe('553.4145');
     expect(invoice.subtotal.toString()).toBe('6172.5');
     expect(invoice.taxTotal.toString()).toBe('553.4145');
     expect(invoice.grandTotal.toString()).toBe('6702.4645'); // 6172.5 − 23.45 + 553.4145
@@ -340,7 +399,8 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   });
 
   itif('p8-04 send → SUBMITTED with unique uid + submission row; re-send while SUBMITTED conflicts', async () => {
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: mySalesDocIds[0] }, ACTOR);
+    const doc = await makeOwnDoc();
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
     const res = await service.send(COMPANY, invoice.id, ACTOR);
     expect(res.status).toBe('SUBMITTED');
     const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({
@@ -360,7 +420,8 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   });
 
   itif('p8-05 inquiry lifecycle: PENDING → SUCCESS and → FAILED', async () => {
-    const successInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: mySalesDocIds[0] }, ACTOR);
+    const successDoc = await makeOwnDoc();
+    const successInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: successDoc.id }, ACTOR);
     await service.send(COMPANY, successInvoice.id, ACTOR);
     fakeAdapter.inquiryQueue.push('PENDING');
     expect((await service.inquiry(COMPANY, successInvoice.id)).status).toBe('PENDING');
@@ -372,7 +433,8 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     expect(done.confirmationReferenceId).toMatch(/^conf-/);
 
     // FAILED inquiry → FAILED invoice, retry carries retry=true
-    const failInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: mySalesDocIds[0] }, ACTOR);
+    const failDoc = await makeOwnDoc();
+    const failInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: failDoc.id }, ACTOR);
     await service.send(COMPANY, failInvoice.id, ACTOR);
     fakeAdapter.inquiryQueue.push('FAILED');
     expect((await service.inquiry(COMPANY, failInvoice.id)).status).toBe('FAILED');
@@ -392,7 +454,8 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   });
 
   itif('p8-06 enqueue transport failure → FAILED with error kept; retry succeeds', async () => {
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: mySalesDocIds[0] }, ACTOR);
+    const doc = await makeOwnDoc();
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
     fakeAdapter.failEnqueue = true;
     const res = await service.send(COMPANY, invoice.id, ACTOR);
     expect(res.status).toBe('FAILED');
@@ -410,7 +473,8 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   });
 
   itif('p8-07 two concurrent sends on one invoice claim atomically (single submission)', async () => {
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: mySalesDocIds[0] }, ACTOR);
+    const doc = await makeOwnDoc();
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
     const [a, b] = await Promise.allSettled([
       service.send(COMPANY, invoice.id, ACTOR),
       service.send(COMPANY, invoice.id, ACTOR),
@@ -448,10 +512,23 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   });
 
   itif('p8-09 sales document Moadian registration status', async () => {
-    const status = await service.salesDocumentMoadianStatus(COMPANY, mySalesDocIds[0]);
-    // invoices from this doc exist: one SUCCESS (p8-05) + others; coverage ≥ partial
-    expect(['Partially Registered', 'Fully Registered']).toContain(status.moadianStatus);
-    expect(status.invoiceCount).toBeGreaterThanOrEqual(1);
-    expect(status.allocations.length).toBeGreaterThanOrEqual(1);
+    // fresh doc with an invoice that is created but never sent → Not Registered
+    const freshDoc = await makeOwnDoc();
+    await service.createFromSalesDocument(COMPANY, { salesDocumentId: freshDoc.id }, ACTOR);
+    const notRegistered = await service.salesDocumentMoadianStatus(COMPANY, freshDoc.id);
+    expect(notRegistered.moadianStatus).toBe('Not Registered');
+    // doc sent + confirmed → Fully Registered with covered amount
+    const sentDoc = await makeOwnDoc();
+    const inv = await service.createFromSalesDocument(COMPANY, { salesDocumentId: sentDoc.id }, ACTOR);
+    await service.send(COMPANY, inv.id, ACTOR);
+    fakeAdapter.inquiryQueue.push('SUCCESS');
+    await service.inquiry(COMPANY, inv.id);
+    // doc.total drives the coverage percentage — set it to the invoice total
+    const invFresh = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: inv.id } });
+    await prisma.salesDocument.update({ where: { id: sentDoc.id }, data: { total: invFresh.grandTotal } });
+    const registered = await service.salesDocumentMoadianStatus(COMPANY, sentDoc.id);
+    expect(registered.moadianStatus).toBe('Fully Registered');
+    expect(registered.invoiceCount).toBe(1);
+    expect(registered.coveredPct).not.toBeNull();
   });
 });

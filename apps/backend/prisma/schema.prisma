@@ -1021,6 +1021,9 @@ model SalesTaxInvoice {
   moadianError String?              @map("moadian_error")
   confirmationReferenceId String?   @map("confirmation_reference_id")
   taxResult    String?              @map("tax_result")
+  // for CORRECTIVE/CANCEL/RETURN subjects — the original invoice's taxid
+  // (official header field irtaxid)
+  relatedTaxid String?              @map("related_taxid")
   createdBy    String?              @map("created_by") @db.Uuid
   createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
