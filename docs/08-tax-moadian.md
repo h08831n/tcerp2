@@ -39,6 +39,31 @@
   GET_TOKEN) — **مغایرت ثبت‌شده؛ UNVERIFIED**.
 - **Base URL:** `https://tp.tax.gov.ir/req` با `/api/self-tsp/…` (نسخه دوم).
 
+## ماتریس وضعیت پیاده‌سازی مودیان (Adapter Audit — 2026-10-22)
+
+| بخش پروتکل | وضعیت | شواهد |
+|---|---|---|
+| Normalization (Table 1, values-only) | **پیاده‌شده + offline-tested** با نمونه رسمی | `moadian-http.adapter.ts` normalize + p8a Table-1 test |
+| آرایه index form (key.0 در C# appendix در برابر key.E0 در Java) | پیاده: key.0 — **تأییدنشده** (دو appendix دستورالعمل متفاوت‌اند) | docs همین بخش |
+| null/empty → slot خالی بین جداکننده‌ها (### notation) | **پیاده‌شده** و منطبق با نمونه فاکتور رسمی (`0###32652362589632`) | p8a null-slot test |
+| X.509 cert + تطبیق کلید عمومی با کلید خصوصی | **پیاده‌شده + offline-tested** (MOADIAN_CERT_INVALID / KEY_MISMATCH) | moadian-http.protocol.spec |
+| JWS (RS256/x5c/sigT/crit) — نسخه دوم | **پیاده‌شده + offline-tested** (امضا با کلید عمومی verify می‌شود) | moadian-http.protocol.spec |
+| packet crypto: XOR-whitening + AES-256-GCM + RSA-OAEP wrap + dataSignature | **پیاده‌شده + offline-tested** (round-trip کامل بازیابی می‌شود) | p8a preparePacket test |
+| envelope.signature (RSA روی normalized packets) + signatureKeyId | **پیاده‌شده + offline-tested** | p8a envelopeSignature test |
+| nonce endpoint (`/nonce?timeToLive`) | پیاده‌شده — **تأییدنشده** (شبکه‌ای) | adapter getNonce |
+| server-information (`GET …/server-information`, Bearer JWS) | پیاده‌شده — **تأییدنشده** | adapter |
+| normal-enqueue + INQUIRY_BY_UID (POST، Bearer JWS) | پیاده‌شده — **تأییدنشده** | adapter |
+| GET_TOKEN (جریان نسخه اول) | **حذف شد** — نسخه دوم از nonce+JWS استفاده می‌کند | git history |
+| taxid 22 کاراکتری (تولید با کلید حافظه) | **gap** — نیازمند سند «قالب شناسه یکتا» + کلید | docs همین بخش |
+| sstid (کد کالا از GET_SERVICE_STUFF_LIST) | **gap** | docs |
+| payment (اقلام پرداخت pym) | **gap** — ساختار تسویه تعریف نشده | docs |
+| اتصال واقعی sandbox/live | **نشده** — نیازمند اعتبارنامه Sharjh مجاز | — |
+
+**دستگاه زمانی indatim/indati2m: میلی‌ثانیه** (نمونه رسمی 1655620821274 = ۱۳
+رقم ms؛ «طول ۱۴» ظرفیت ذخیره‌سازی است). indatim=صدور (issueDate روزانه →
+نیمه‌شب ms — محدودیت دقت مستند)، indati2m=ایجاد (createdAt لحظه‌ای). تست‌های
+قطعی در p8-10/11. ادعای قبلی «epoch seconds» غلط بود و اصلاح شد.
+
 ## الزامات رسمی مودیان — منبع و وضعیت اعتبار
 
 مرجع فنی: «دستورالعمل فنی نحوه اتصال به سامانه مودیان» (tax.gov.ir —
