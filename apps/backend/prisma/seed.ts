@@ -79,6 +79,7 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'tax.view', module: 'tax', action: 'view', description: 'View tax definitions and allocations' },
   { code: 'tax.create', module: 'tax', action: 'create', description: 'Create tax definitions' },
   { code: 'tax.edit', module: 'tax', action: 'edit', description: 'Edit tax definitions / create allocations' },
+  { code: 'tax.submit', module: 'tax', action: 'submit', description: 'Send tax invoices to Moadian / register purchase invoices' },
   // supplier product mapping
   { code: 'supplierproduct.view', module: 'supplierproduct', action: 'view', description: 'View supplier product mappings' },
   { code: 'supplierproduct.create', module: 'supplierproduct', action: 'create', description: 'Create supplier product mappings' },
@@ -266,7 +267,7 @@ const ROLE_DEFS: {
     // powers — financial reports, fiscal calendar, posting rules. Never grant
     // accounting.* to operational roles by default.
     permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit',
-      'sales.view', 'purchase.view',
+      'sales.view', 'purchase.view', 'tax.submit',
       'accounting.report', 'accounting.fiscal.manage', 'accounting.posting.manage'],
   },
   {
