@@ -104,6 +104,17 @@ export class TaxInvoiceService {
       // the original invoice's taxid (irtaxid header field)
       throw new ValidationError('TAX_INVOICE_RELATED_TAXID_REQUIRED', { subject });
     }
+    // inty: a corrective/cancel/return invoice has the SAME type as the
+    // original it adjusts (they are tied via irtaxid); MAIN derives from the
+    // buyer's economic-operator status
+    let inty: 1 | 2 | 3 = this.deriveInty(subject, doc.customer, input.relatedTaxid);
+    if (subject !== 'MAIN' && input.relatedTaxid) {
+      const original = await this.prisma.salesTaxInvoice.findFirst({
+        where: { companyId, taxid: input.relatedTaxid },
+        select: { inty: true },
+      });
+      if (original) inty = original.inty as 1 | 2 | 3;
+    }
 
     const loadedByLine = new Map<string, Prisma.Decimal>();
     const allocations = (
@@ -212,7 +223,7 @@ export class TaxInvoiceService {
         number,
         status: 'READY',
         subject,
-        inty: subject === 'MAIN' ? 1 : 2, // official inty: type1=اصلی، type2=اصلاحی/ابطالی/برگشتی
+        inty,
         relatedTaxid: input.relatedTaxid ?? null,
         customerPartyId: doc.customerPartyId,
         issueDate: input.issueDate ?? new Date(),
@@ -565,6 +576,25 @@ export class TaxInvoiceService {
       }
     }
     return { status: finalStatus ?? 'PENDING' };
+  }
+
+  // ─── invoice type derivation (official issuance rules) ──────────────────
+  /** Official inty semantics (الگوی صورتحساب الکترونیکی، دستورالعمل صدور —
+   *  tax.gov.ir): نوع اول (1) = buyer IS a registered economic operator
+   *  (کد اقتصادی present); نوع دوم (2) = buyer is a final consumer without
+   *  economic code; نوع سوم (3) = export (not implemented). CORRECTIVE/
+   *  CANCEL/RETURN invoices inherit the ORIGINAL invoice's type (they adjust
+   *  it and carry its taxid via irtaxid); when the original is not in our
+   *  system, derive from the buyer. Subject is INDEPENDENT of inty. */
+  deriveInty(
+    subject: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN',
+    buyer: { type: string; economicCode: string | null; nationalId: string | null },
+    relatedTaxid?: string | null,
+  ): 1 | 2 | 3 {
+    if (subject !== 'MAIN' && relatedTaxid) {
+      // synchronous best-effort lookup; callers may pre-resolve
+    }
+    return buyer.economicCode ? 1 : 2;
   }
 
   // ─── Moadian payload (official template mapping) ─────────────────────────

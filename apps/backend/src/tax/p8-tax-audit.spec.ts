@@ -85,7 +85,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
   const itif = TEST_INTEGRATION && DB_URL ? it : (n: string, f: jest.ProvidesCallback) => it.skip(n, f);
 
   /** minimal COMPLETED doc + one taxed line + loading allocation of `loaded` */
-  async function makeDoc(loaded: string) {
+  async function makeDoc(loaded: string, opts: { withEconomicCode?: boolean } = {}) {
     seq += 1;
     const stamp = `${Date.now()}-${seq}`;
     const customer = await prisma.party.create({
@@ -93,7 +93,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         companyId: COMPANY,
         type: 'PERSON',
         nameFa: `p8a مشتری ${stamp}`,
-        economicCode: '411598765432',
+        economicCode: opts.withEconomicCode === false ? null : '411598765432',
         nationalCode: `0012${seq}789${String(seq).padStart(3, '0')}`,
         roles: { create: [{ role: 'CUSTOMER' }] },
       },
@@ -271,7 +271,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(new Prisma.Decimal(payload.header.tprdis).minus(payload.header.tdis).toString()).toBe(payload.header.tadis);
   });
 
-  itif('p8-11 corrective invoice: inty=2, ins=2, irtaxid required and emitted', async () => {
+  itif('p8-11 corrective invoice inherits the ORIGINAL invoice type (inty), ins is independent, irtaxid required', async () => {
     const { doc } = await makeDoc('5');
     const original = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
     const taxid = 'A1B2C3D4E5F6G7H';
@@ -292,13 +292,40 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     const payload = JSON.parse((submission.payloadSnapshot as { packets: Array<{ data: string }> }).packets[0].data) as {
       header: Record<string, unknown>;
     };
-    expect(payload.header.inty).toBe(2);
+    // inty INHERITS the original's type (buyer is an economic operator →
+    // original inty=1); ins=2 (اصلاحی) is the independent subject dimension —
+    // per official issuance rules inty is determined by the buyer, NOT by subject
+    expect(payload.header.inty).toBe(1);
     expect(payload.header.ins).toBe(2);
     expect(payload.header.irtaxid).toBe(taxid);
     const correctiveRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: corrective.id } });
-    expect(correctiveRow.inty).toBe(2); // نوع دوم row-level
+    expect(correctiveRow.inty).toBe(1); // inherited row-level
     expect(correctiveRow.subject).toBe('CORRECTIVE');
     expect(payload.header.indati2m).toBe(correctiveRow.createdAt.getTime());
+  });
+
+  itif('p8-17 table-driven inty/ins derivation: buyer determines type, subject is independent', async () => {
+    // buyer WITH economicCode → نوع اول (inty=1) for every subject
+    const { doc: b2bDoc } = await makeDoc('4');
+    const b2bMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: b2bDoc.id }, ACTOR);
+    expect(b2bMain.inty).toBe(1);
+    expect(b2bMain.subject).toBe('MAIN');
+    // consumer WITHOUT economicCode → نوع دوم (inty=2)
+    const { doc: consumerDoc } = await makeDoc('4', { withEconomicCode: false });
+    const consumerMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: consumerDoc.id }, ACTOR);
+    expect(consumerMain.inty).toBe(2);
+    expect(consumerMain.subject).toBe('MAIN');
+    // corrective on a consumer invoice: inherits inty=2, ins=2
+    const consumerTaxid = 'B1B2C3D4E5F6G7H';
+    await prisma.salesTaxInvoice.update({ where: { id: consumerMain.id }, data: { taxid: consumerTaxid } });
+    const corrective = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: consumerDoc.id,
+      subject: 'RETURN',
+      relatedTaxid: consumerTaxid,
+    }, ACTOR);
+    expect(corrective.inty).toBe(2); // inherited from consumer original
+    expect(corrective.subject).toBe('RETURN');
+    expect(corrective.relatedTaxid).toBe(consumerTaxid);
   });
 
   itif('p8-12 over-invoicing blocked; cancelled frees; override above remaining rejected', async () => {
