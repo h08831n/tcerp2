@@ -32,12 +32,12 @@
   گزارش قبلی ۱۷ رقمی گفته بود؛ اصلاح شد. تولید آن بر اساس سند جداگانه
   «قالب شناسه یکتای حافظه مالیاتی و شماره منحصر به فرد مالیاتی» است و
   کلید حافظه مالیاتی می‌خواهد — gap مستند.
-- **احراز هویت (نسخه دوم):** GET_TOKEN (sync) با packetType GET_TOKEN و
-  `data.username = fiscalId`؛ امضای normalization با RSA2048-SHA256؛ پاسخ
-  JWT + expiresIn؛ سپس Bearer. جریان nonce+JWS نسخه اول جایگزین شده است.
-  HTTP adapter فعلی `getToken()` را ساده‌تر پیاده کرده (بدون packet کامل
-  GET_TOKEN) — **مغایرت ثبت‌شده؛ UNVERIFIED**.
-- **Base URL:** `https://tp.tax.gov.ir/req` با `/api/self-tsp/…` (نسخه دوم).
+- **احراز هویت (نسخه دوم — پیاده‌شده در adapter):** `GET …/nonce?timeToLive`
+  → JWS با header `{alg: RS256, x5c: [cert], sigT, crit: [sigT]}` و payload
+  `{nonce, clientId}`، امضای RS256 با کلید خصوصی — **خود JWS همان Bearer
+  است**. جریان GET_TOKEN/`/req/` نسخه اول منسوخ و حذف شده است.
+  **UNVERIFIED روی سرویس واقعی.**
+- **Base URL (نسخه دوم):** `https://tp.tax.gov.ir/requestsmanager/api/v2` — `GET /nonce`، `GET /server-information`، `POST /normal-enqueue`، `POST /INQUIRY_BY_UID`. (مسیرهای `/req/…` نسخه اول — منسوخ.)
 
 ## ماتریس وضعیت پیاده‌سازی مودیان (Adapter Audit — 2026-10-22)
 
@@ -69,8 +69,9 @@
 مرجع فنی: «دستورالعمل فنی نحوه اتصال به سامانه مودیان» (tax.gov.ir —
 بازتاب: rahrokh.com). موارد به‌کاررفته در adapter:
 
-- Base: `https://tp.tax.gov.ir/req` — ارسال: `…/api/self-tsp/async/normal-enqueue/`
-  استعلام: `…/sync/INQUIRY_BY_UID/` توکن: `…/sync/GET_TOKEN/`
+- Base (نسخه دوم): `https://tp.tax.gov.ir/requestsmanager/api/v2` — ارسال:
+  `POST /normal-enqueue`، استعلام: `POST /INQUIRY_BY_UID`، توکن: JWS از
+  `GET /nonce` (نسخه اول `/req/…`/GET_TOKEN — منسوخ).
 - Packet: `uid` (یکتای کلاینت)، `packetType: INVOICE.V01`، `retry=true` در
   ارسال مجدد پس از FAILED، `data`، `fiscalId`، `dataSignature`.
 - رمزنگاری (در adapter HTTP پیاده، **تأییدنشده روی سرویس واقعی**): نرمال‌سازی
@@ -120,6 +121,22 @@ DRAFT → READY → SENDING (claim اتمیک updateMany) → SUBMITTED → SUCC
 ## متغیرهای محیطی اتصال
 
 ```
+MOADIAN_MODE=mock|sandbox|live       (پیش‌فرض mock)
+MOADIAN_BASE_URL=                    (پیش‌فرض https://tp.tax.gov.ir/requestsmanager/api/v2)
+MOADIAN_FISCAL_ID=                   شناسه یکتای حافظه مالیاتی
+MOADIAN_ECONOMIC_CODE=               کد اقتصادی مودی
+MOADIAN_CLIENT_ID=                   شناسه کلاینت (از Sharjh)
+MOADIAN_PRIVATE_KEY=                 PEM کلید خصوصی (
+ escape)
+MOADIAN_CERTIFICATE=                 PEM گواهی X.509 (
+ escape) — الزامی؛
+                                     کلید عمومی آن باید با PRIVATE_KEY تطبیق کند
+```
+
+سیم‌کشی واقعی این متغیرها فقط در `moadian/adapter-factory.ts` انجام می‌شود
+(`buildMoadianAdapter` — همان مسیری که Nest module مصرف می‌کند). sandbox/live
+بدون همه پنج فیلد با `MoadianConfigError` فوری می‌افتد و **هرگز به mock
+برنمی‌گردد** (adapter-factory.spec.ts).
 MOADIAN_MODE=mock|sandbox|live   (پیش‌فرض mock)
 MOADIAN_BASE_URL=                (پیش‌فرض https://tp.tax.gov.ir/req)
 MOADIAN_FISCAL_ID=               شناسه یکتای حافظه مالیاتی
