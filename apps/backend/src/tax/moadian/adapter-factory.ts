@@ -36,7 +36,16 @@ export function loadMoadianConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
   mode: MoadianMode;
   config?: MoadianLiveConfig;
 } {
-  const mode = (env.MOADIAN_MODE ?? 'mock') as MoadianMode;
+  const rawMode = env.MOADIAN_MODE ?? 'mock';
+  const VALID_MODES: readonly MoadianMode[] = ['mock', 'sandbox', 'live'];
+  // STRICT validation: an invalid/unknown value is a configuration ERROR —
+  // it is never silently interpreted as live/mock
+  if (!VALID_MODES.includes(rawMode as MoadianMode)) {
+    throw new MoadianConfigError(
+      `MOADIAN_MODE has invalid value "${rawMode}" — valid values are: ${VALID_MODES.join(', ')}`,
+    );
+  }
+  const mode = rawMode as MoadianMode;
   if (mode === 'mock') return { mode };
   const fields = {
     fiscalId: env.MOADIAN_FISCAL_ID,

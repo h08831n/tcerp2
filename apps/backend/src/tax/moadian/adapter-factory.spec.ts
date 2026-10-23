@@ -1,13 +1,19 @@
+import { Test } from '@nestjs/testing';
 import { MockMoadianAdapter } from './mock-moadian.adapter';
 import { MoadianHttpAdapter } from './moadian-http.adapter';
+import { MOADIAN_ADAPTER, MoadianAdapter } from './moadian-adapter';
 import { buildMoadianAdapter, loadMoadianConfigFromEnv, MoadianConfigError } from './adapter-factory';
-import { TEST_PRIVATE_PEM, TEST_CERT_PEM } from './test-certs';
+import { MOADIAN_ADAPTER_PROVIDER } from '../tax.module';
+import { TEST_PRIVATE_PEM, TEST_CERT_PEM, OTHER_CERT_PEM } from './test-certs';
 
 /** Regression tests for the REAL provider configuration path — the same
- *  factory the Nest module uses (tax.module.ts → buildMoadianAdapter). */
+ *  factory the Nest module uses (tax.module.ts → MOADIAN_ADAPTER provider →
+ *  buildMoadianAdapter). The provider-level tests compile the actual TaxModule
+ *  through @nestjs/testing and resolve the injected MOADIAN_ADAPTER token. */
 
 const FULL_VALID_ENV: NodeJS.ProcessEnv = {
   MOADIAN_MODE: 'sandbox',
+  MOADIAN_BASE_URL: 'https://tp.tax.gov.ir/requestsmanager/api/v2',
   MOADIAN_FISCAL_ID: 'TESTFISCAL',
   MOADIAN_ECONOMIC_CODE: '411111111111',
   MOADIAN_CLIENT_ID: 'test-client-id',
@@ -40,6 +46,7 @@ describe('Moadian adapter factory (real provider configuration path)', () => {
     expect(adapter).toBeInstanceOf(MoadianHttpAdapter);
     // every field wired through the REAL path (env var names → constructor)
     const http = adapter as MoadianHttpAdapter;
+    expect(http.base).toBe('https://tp.tax.gov.ir/requestsmanager/api/v2');
     expect(http.fiscalId).toBe('TESTFISCAL');
     expect(http.economicCode).toBe('411111111111');
     expect(http.clientId).toBe('test-client-id');
@@ -54,7 +61,6 @@ describe('Moadian adapter factory (real provider configuration path)', () => {
   });
 
   it('missing credentials fail EXPLICITLY with every missing env name', () => {
-    // nothing but the mode → all five required fields missing
     expect(() => buildMoadianAdapter({ MOADIAN_MODE: 'sandbox' })).toThrow(MoadianConfigError);
     try {
       loadMoadianConfigFromEnv({ MOADIAN_MODE: 'sandbox' });
@@ -92,20 +98,86 @@ describe('Moadian adapter factory (real provider configuration path)', () => {
     expect(threw).toBe(true); // no MockMoadianAdapter was returned
   });
 
-  it('cert/key mismatch in env fails loudly through the real path (no fallback)', () => {
-    expect(() =>
-      buildMoadianAdapter({
-        ...FULL_VALID_ENV,
-        // valid parseable cert of a DIFFERENT keypair → mismatch error
-        MOADIAN_CERTIFICATE: TEST_CERT_PEM.replace(/X/g, 'X'), // same cert but key swapped below
-        MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM.replace(/X/g, 'X'),
-      }),
-    ).not.toBeInstanceOf(MockMoadianAdapter); // constructor-level checks cover the rest
+  it('genuine SECOND keypair certificate → MOADIAN_CERT_KEY_MISMATCH, never mock fallback', () => {
+    let threw = false;
+    try {
+      // valid parseable X.509 of a DIFFERENT keypair with our private key
+      buildMoadianAdapter({ ...FULL_VALID_ENV, MOADIAN_CERTIFICATE: OTHER_CERT_PEM });
+    } catch (e) {
+      threw = true;
+      expect((e as Error).message).toContain('MOADIAN_CERT_KEY_MISMATCH');
+      expect(e).not.toBeInstanceOf(MoadianConfigError); // cert-level, not env-level
+    }
+    expect(threw).toBe(true); // loud failure — MockMoadianAdapter never returned
   });
 
   it('PEM escaped newlines are unescaped exactly once (no double-unescape)', () => {
     const { config } = loadMoadianConfigFromEnv(FULL_VALID_ENV);
     expect(config?.privateKeyPem).not.toContain('\\n');
     expect(config?.privateKeyPem).toContain('\n-----END PRIVATE KEY-----');
+  });
+
+  describe('strict MOADIAN_MODE validation', () => {
+    it('invalid non-empty value is rejected with a dedicated error (never treated as live)', () => {
+      for (const bad of ['production', 'LIVE', ' ', 'test', '1']) {
+        expect(() => buildMoadianAdapter({ ...FULL_VALID_ENV, MOADIAN_MODE: bad })).toThrow(
+          MoadianConfigError,
+        );
+        expect(() => loadMoadianConfigFromEnv({ MOADIAN_MODE: bad })).toThrow(/invalid value/);
+      }
+    });
+
+    it('valid modes pass: mock, sandbox, live', () => {
+      expect(loadMoadianConfigFromEnv({}).mode).toBe('mock');
+      expect(loadMoadianConfigFromEnv({ MOADIAN_MODE: 'mock' }).mode).toBe('mock');
+      expect(loadMoadianConfigFromEnv({ ...FULL_VALID_ENV, MOADIAN_MODE: 'sandbox' }).mode).toBe(
+        'sandbox',
+      );
+      expect(loadMoadianConfigFromEnv({ ...FULL_VALID_ENV, MOADIAN_MODE: 'live' }).mode).toBe('live');
+    });
+  });
+});
+
+describe('MOADIAN_ADAPTER NestJS provider (the REAL TaxModule wiring)', () => {
+  const SAVED_ENV = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...SAVED_ENV };
+  });
+
+  async function resolveProvider(env: NodeJS.ProcessEnv): Promise<MoadianAdapter> {
+    process.env = env; // the real provider factory reads process.env at construction
+    const moduleRef = await Test.createTestingModule({
+      providers: [MOADIAN_ADAPTER_PROVIDER],
+    }).compile();
+    return moduleRef.get<MoadianAdapter>(MOADIAN_ADAPTER);
+  }
+
+  it('default env → the injected provider is the MOCK adapter', async () => {
+    const env = { ...SAVED_ENV };
+    delete env.MOADIAN_MODE;
+    const adapter = await resolveProvider(env);
+    expect(adapter).toBeInstanceOf(MockMoadianAdapter);
+  });
+
+  it('sandbox env with valid test credentials → the injected provider is the HTTP adapter with every field', async () => {
+    const adapter = await resolveProvider({ ...FULL_VALID_ENV });
+    expect(adapter).toBeInstanceOf(MoadianHttpAdapter);
+    const http = adapter as MoadianHttpAdapter;
+    expect(http.fiscalId).toBe('TESTFISCAL');
+    expect(http.economicCode).toBe('411111111111');
+    expect(http.clientId).toBe('test-client-id');
+    expect(http.privateKeyPem).toBe(TEST_PRIVATE_PEM);
+    expect(http.certificatePem).toBe(TEST_CERT_PEM);
+  });
+
+  it('sandbox env with missing credentials → provider resolution FAILS (no mock fallback)', async () => {
+    await expect(resolveProvider({ MOADIAN_MODE: 'sandbox' })).rejects.toThrow(MoadianConfigError);
+  });
+
+  it('invalid MOADIAN_MODE → provider resolution FAILS', async () => {
+    await expect(
+      resolveProvider({ ...FULL_VALID_ENV, MOADIAN_MODE: 'production' }),
+    ).rejects.toThrow(/invalid value/);
   });
 });
