@@ -96,13 +96,19 @@
 - حالت mock: تمام گام‌های شبکه‌ای NOT_CONFIGURED — موفقیت mock هرگز اتصال
   واقعی نیست (تست‌شده).
 - حالت live: فقط گام‌های غیرتغییردهنده؛ آزمون کامل sandbox در live مسدود.
-- آزمون کامل sandbox — **state machine پایدار با مدل
-  `MoadianDiagnosticRun`** (migration `20241022100000`): ردیف run با uid و
-  status **قبل از هر ارسال** ثبت می‌شود؛ یکی از این‌ها در هر شرکت/روز (UNIQUE
-  DB). بازیابی: هر run موجود با INQUIRY_BY_UID reconcile می‌شود — PENDING →
-  صبر (بدون ارسال مجدد)، SUCCESS → گزارش نتیجه قبلی، REJECTED → ارسال مجدد
-  با `retry=true` و uid جدید. کرش/timeout/restart هرگز ارسال کورکورانه
-  تولید نمی‌کند. payload آزمایشی **کامل** است (taxid/tins/sstid از env
+- آزمون کامل sandbox — **state machine پایدار دو سطحی** (migrationهای
+  `20241022100000` + `20241022120000`): aggregate روزانه
+  `MoadianDiagnosticRun` (یکتا روی شرکت/روز، fiscalId تغییرناپذیر) +
+  مدل `MoadianDiagnosticAttempt` — **هر تلاش ارسال یک ردیف با uid
+  تغییرناپذیر خودش قبل از submission** ثبت می‌کند. REJECTED (قطعی) → attempt
+  جدید با `retry=true` و uid جدید (تاریخچه حفظ می‌شود)؛ نتیجه نامشخص
+  (timeout/کرش/استعلام خالی) → attempt روی UNKNOWN/SUBMITTED می‌ماند و هر
+  فراخوانی بعدی با INQUIRY_BY_UID روی **همان uid پایدار** reconcile می‌شود —
+  ارسال مجدد کورکورانه هرگز رخ نمی‌دهد.
+- **ادعای اتمیک بین-نمونه‌ای**: claim با UPDATE شرطی روی aggregate
+  (`status IN (PREPARED, REJECTED) → SUBMITTED`) است — در هر لحظه فقط یک
+  نمونه مجاز به ساخت attempt و enqueue؛ بازنده فقط reconcile/گزارش می‌دهد و
+  هرگز ارسال نمی‌کند (p8-18c با دو نمونه سرویس مستقل روی DB مشترک). payload آزمایشی **کامل** است (taxid/tins/sstid از env
   `MOADIAN_SANDBOX_*`)؛ اگر این envها تنظیم نشده باشند نتیجه
   NOT_CONFIGURED با راهنمای اقدام برمی‌گردد — payload ناقص هرگز ارسال
   نمی‌شود. 5005 duplicate = قبلاً پذیرفته‌شده (FAILED نمی‌شود).
@@ -112,7 +118,19 @@
   rate-limit 15 ثانیه + gate تک‌نمونه‌ای؛ timeout شبکه ۱۰ ثانیه با
   AbortSignal؛ TLS verify غیرقابل‌غیرفعال‌سازی؛ هیچ secret/token/کلیدی در
   پاسخ یا لاگ برنمی‌گردد.
-- محدودیت: gate و rate-limit درون-پردازشی‌اند (استقرار تک‌نمونه‌ای)؛ محیط
+- سخت‌سازی مقصد (SSRF): فقط HTTPS/443، مسیر دقیق `/requestsmanager/api/v2`،
+  allowlist میزبان؛ loopback/`.local`/`.internal`، بازه‌های خصوصی IPv4
+  (10/8، 127/8، 172.16/12، 192.168/16، 169.254/16، 0/8) و **هر literal IPv6
+  به هر شکلی** (loopback، link-local fe80::/10، unique-local fc00::/7،
+  IPv4-mapped `::ffff:a.b.c.d`) قبل از allowlist رد می‌شوند. هر چهار
+  فراخوانی HTTP آداپتر با `redirect: 'error'` ساخته می‌شوند — هیچ redirectی
+  دنبال نمی‌شود؛ TLS verify دست‌نخورده است.
+- شواهد چرخه attempt (p8-18a..e): retry دقیقاً یک‌بار پس از رد قطعی با
+  retry=true و uid جدید؛ crash-after-claim با همان uid reconcile و بدون
+  ارسال مجدد؛ دو نمونه مستقل → دقیقاً یک claim/یک enqueue؛ timeout → SUCCESS
+  از استعلام بدون resend؛ UNKNOWN روی استعلام نامشخص مسدود می‌ماند.
+- محدودیت: gate صدور/ارسال فاکتور و rate-limit درون-پردازشی‌اند؛ gate آزمون
+  تشخیصی به UPDATE شرطی DB منتقل شده (چندنمونه‌ای امن)؛ محیط
   sandbox رسمی در دسترس نبود و هیچ درخواست واقعی به tp.tax.gov.ir ارسال یا
   تأیید نشده است — همه نتایج شبکه‌ای از mock/fetch-injected tests است.
 

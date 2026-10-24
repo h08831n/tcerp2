@@ -121,7 +121,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
   }
 
   private async getNonce(): Promise<string> {
-    const res = await this.fetchImpl(`${this.base}/nonce?timeToLive=200`);
+    const res = await this.fetchImpl(`${this.base}/nonce?timeToLive=200`, { redirect: 'error' });
     if (!res.ok) throw new Error(`MOADIAN_NONCE_FAILED:${res.status}`);
     const body = (await res.json()) as { nonce?: string };
     if (!body.nonce) throw new Error('MOADIAN_NONCE_MISSING');
@@ -175,6 +175,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     const token = (await this.getToken()).token;
     const res = await this.fetchImpl(`${this.base}/server-information`, {
       method: 'GET',
+      redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
     });
     if (!res.ok) throw new Error(`MOADIAN_SERVER_INFO_FAILED:${res.status}`);
@@ -249,6 +250,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     };
     const res = await this.fetchImpl(`${this.base}/normal-enqueue`, {
       method: 'POST',
+      redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(envelope),
     });
@@ -261,6 +263,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     const token = (await this.getToken()).token;
     const res = await this.fetchImpl(`${this.base}/INQUIRY_BY_UID`, {
       method: 'POST',
+      redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ uidList: uids, fiscalId: this.fiscalId }),
     });

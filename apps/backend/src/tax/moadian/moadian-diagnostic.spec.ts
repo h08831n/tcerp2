@@ -1,4 +1,5 @@
 import { MockMoadianAdapter } from './mock-moadian.adapter';
+import { FakeMoadianAdapter } from './fake-moadian-fixtures';
 import { TEST_CERT_PEM, TEST_PRIVATE_PEM } from './test-certs';
 import {
   classifyNetworkError,

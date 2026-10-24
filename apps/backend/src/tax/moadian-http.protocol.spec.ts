@@ -78,6 +78,61 @@ describe('MoadianHttpAdapter — نسخه دوم offline protocol tests', () => 
     expect('MOADIAN_CERT_KEY_MISMATCH').toBeTruthy();
   });
 
+  it('redirects are NEVER followed — every adapter request passes redirect: "error"', async () => {
+    const inits: Array<Parameters<typeof fetch>[1]> = [];
+    const urls: string[] = [];
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const probe = new AdapterClass({
+      fiscalId: 'TESTFISCAL',
+      economicCode: '411151234567',
+      clientId: 'test-client',
+      privateKeyPem: TEST_PRIVATE_PEM,
+      certificatePem: TEST_CERT_PEM,
+      fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        inits.push(init);
+        const url = String(input);
+        urls.push(url);
+        if (url.includes('/nonce')) {
+          return new Response(JSON.stringify({ nonce: 'n'.repeat(32) }), { status: 200 }) as never;
+        }
+        if (url.includes('server-information')) {
+          return new Response(
+            JSON.stringify({ result: { publicKeyId: 'k1', publicKey: publicKeyPem } }),
+            { status: 200 },
+          ) as never;
+        }
+        if (url.includes('normal-enqueue')) {
+          return new Response(JSON.stringify({ result: [{ uid: 'r', referenceNumber: 'x' }] }), {
+            status: 200,
+          }) as never;
+        }
+        return new Response(JSON.stringify({ result: [] }), { status: 200 }) as never;
+      }) as typeof fetch,
+    });
+    await probe.getServerInformation();
+    const packet: MoadianPacket = {
+      uid: 'r',
+      packetType: 'INVOICE.V01',
+      retry: false,
+      data: '{}',
+      dataSignature: '',
+      encryptionKeyId: '',
+      symmetricKey: '',
+      iv: '',
+      fiscalId: 'TESTFISCAL',
+    };
+    await probe.enqueue([packet]);
+    await probe.inquiryByUid(['uid-1']);
+    // every official call fetches a fresh nonce first — 8 requests total;
+    // all four endpoint families must have been exercised
+    expect(inits.length).toBe(8);
+    expect(inits.every((i) => i?.redirect === 'error')).toBe(true);
+    expect(urls.some((u) => u.includes('/nonce'))).toBe(true);
+    expect(urls.some((u) => u.includes('server-information'))).toBe(true);
+    expect(urls.some((u) => u.includes('normal-enqueue'))).toBe(true);
+    expect(urls.some((u) => u.includes('INQUIRY_BY_UID'))).toBe(true);
+  });
+
   it('normalization — OFFICIAL Table 1 example: values only, sorted by key', () => {
     // canonical example from دستورالعمل فنی (Table 1):
     // {k2:v1, k4:v2, k3:{k1:v4, k5:v5}} → sorted keys k2, k3.k1, k3.k5, k4

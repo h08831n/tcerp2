@@ -1142,25 +1142,48 @@ model MoadianDiagnosticRun {
   id            String   @id @default(uuid()) @db.Uuid
   companyId     String   @map("company_id") @db.Uuid
   runDay        String   @map("run_day") // UTC yyyy-mm-dd — idempotency day
-  uid           String   @unique @map("uid")
+  // HEAD attempt pointer: status of the newest attempt for fast lookups.
+  status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
   fiscalId      String   @map("fiscal_id")
+  createdBy     String?  @map("created_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  attempts MoadianDiagnosticAttempt[]
+
+  @@unique([companyId, runDay])
+  @@index([companyId, status])
+  @@map("moadian_diagnostic_runs")
+}
+
+/// One send attempt per row: immutable uid (each attempt gets a NEW uid per
+/// the official retry rules — a rejected packet is resubmitted as a new
+/// packet with retry=true), durable result, and the payload snapshot.
+model MoadianDiagnosticAttempt {
+  id            String   @id @default(uuid()) @db.Uuid
+  runId         String   @map("run_id") @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  attempt       Int
+  uid           String   @unique @map("uid")
+  retry         Boolean  @default(false) @map("retry")
   status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
   referenceNumber String? @map("reference_number")
   errorCode     String?  @map("error_code")
   errorDetail   String?  @map("error_detail")
   confirmationReferenceId String? @map("confirmation_reference_id")
   taxResult     String?  @map("tax_result")
+  payloadSnapshot Json  @map("payload_snapshot")
   sentAt        DateTime? @map("sent_at") @db.Timestamptz(6)
   inquiredAt    DateTime? @map("inquired_at") @db.Timestamptz(6)
-  createdBy     String?  @map("created_by") @db.Uuid
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company Company @relation(fields: [companyId], references: [id])
+  run MoadianDiagnosticRun @relation(fields: [runId], references: [id], onDelete: Cascade)
 
-  @@unique([companyId, runDay])
+  @@unique([runId, attempt])
   @@index([companyId, status])
-  @@map("moadian_diagnostic_runs")
+  @@map("moadian_diagnostic_attempts")
 }
 
 // ─────────────── Tax invoice ↔ order allocations (M:N) ───────────────

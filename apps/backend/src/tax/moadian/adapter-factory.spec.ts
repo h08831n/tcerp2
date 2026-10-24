@@ -130,6 +130,16 @@ describe('Moadian adapter factory (real provider configuration path)', () => {
     expect(() => validateMoadianBaseUrl('https://192.168.1.5')).toThrow(/private-network/);
     expect(() => validateMoadianBaseUrl('https://172.16.0.9')).toThrow(/private-network/);
     expect(() => validateMoadianBaseUrl('https://169.254.10.10')).toThrow(/private-network/);
+    // IPv6 literals in ANY form: loopback, link-local, unique-local, IPv4-mapped
+    expect(() => validateMoadianBaseUrl('https://[::1]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    expect(() => validateMoadianBaseUrl('https://[0:0:0:0:0:0:0:1]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    expect(() => validateMoadianBaseUrl('https://[fe80::1]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    expect(() => validateMoadianBaseUrl('https://[fc00::1]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    expect(() => validateMoadianBaseUrl('https://[::ffff:10.0.0.5]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    expect(() => validateMoadianBaseUrl('https://[::ffff:192.168.1.5]/requestsmanager/api/v2')).toThrow(/IPv6/);
+    // IPv4 loopback beyond 127.0.0.1 and the 0/8 "this network" range
+    expect(() => validateMoadianBaseUrl('https://127.0.0.2')).toThrow(/private-network/);
+    expect(() => validateMoadianBaseUrl('https://0.0.0.0')).toThrow(/private-network/);
     // non-allowlisted external host
     expect(() => validateMoadianBaseUrl('https://evil.example.com')).toThrow(/not allowlisted/);
   });

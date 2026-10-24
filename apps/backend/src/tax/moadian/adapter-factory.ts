@@ -54,11 +54,22 @@ export function validateMoadianBaseUrl(baseUrl: string): void {
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   // loopback/private/link-local/IP-literal rejection FIRST (SSRF hardening) —
   // before any allowlist check, so an allowlisted-looking internal name
-  // cannot sneak through via an env exception
-  if (['localhost', '127.0.0.1', '::1'].includes(host) || host.endsWith('.local') || host.endsWith('.internal')) {
+  // cannot sneak through via an env exception. IPv6 literals in ANY form
+  // (loopback ::1, link-local fe80::/10, unique-local fc00::/7, and
+  // IPv4-mapped ::ffff:a.b.c.d) are rejected outright: the official
+  // destination is a hostname, never an address literal.
+  if (['localhost', '127.0.0.1'].includes(host) || host.endsWith('.local') || host.endsWith('.internal')) {
     throw new MoadianConfigError(`MOADIAN_BASE_URL host "${host}" is a loopback/internal destination — rejected`);
   }
-  if (/^(10|192\.168)\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host)) {
+  if (host.includes(':')) {
+    throw new MoadianConfigError(`MOADIAN_BASE_URL host "${host}" is an IPv6 address literal — rejected (SSRF)`);
+  }
+  if (
+    /^(10|127|192\.168)\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^0\./.test(host)
+  ) {
     throw new MoadianConfigError(`MOADIAN_BASE_URL host "${host}" is a private-network address — rejected (SSRF)`);
   }
   const extra = (process.env.MOADIAN_EXTRA_ALLOWED_HOSTS ?? '')
