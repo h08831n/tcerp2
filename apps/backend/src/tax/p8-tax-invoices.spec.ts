@@ -458,21 +458,26 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     async () => {
       const doc = await makeOwnDoc();
       const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
-      fakeAdapter.failEnqueue = true;
-      const res = await service.send(COMPANY, invoice.id, ACTOR);
-      // transport errors are UNKNOWN outcomes: the packet MAY have reached
-      // the authority — never a definitive FAILED
-      expect(res.status).toBe('SUBMITTED');
-      expect(res.awaitingInquiry).toBe(true);
-      expect(res.errorCode).toBe('TRANSPORT');
-      fakeAdapter.failEnqueue = false;
-      const afterFail = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
-      expect(afterFail.status).toBe('SUBMITTED');
-      expect(afterFail.moadianError).toContain('INJECTED'); // sanitized reason kept visible
-      const pendingSub = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
-        where: { invoiceId: invoice.id, status: 'PENDING' },
-      });
-      expect(pendingSub.errorCode).toBe('TRANSPORT');
+      // the failure flag is ALWAYS cleared — even when the send or an
+      // assertion fails (eleventh review: test isolation)
+      try {
+        fakeAdapter.failEnqueue = true;
+        const res = await service.send(COMPANY, invoice.id, ACTOR);
+        // transport errors are UNKNOWN outcomes: the packet MAY have reached
+        // the authority — never a definitive FAILED
+        expect(res.status).toBe('SUBMITTED');
+        expect(res.awaitingInquiry).toBe(true);
+        expect(res.errorCode).toBe('TRANSPORT');
+        const afterFail = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+        expect(afterFail.status).toBe('SUBMITTED');
+        expect(afterFail.moadianError).toContain('INJECTED'); // sanitized reason kept visible
+        const pendingSub = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+          where: { invoiceId: invoice.id, status: 'PENDING' },
+        });
+        expect(pendingSub.errorCode).toBe('TRANSPORT');
+      } finally {
+        fakeAdapter.failEnqueue = false;
+      }
       const enqueuedAfterFailure = fakeAdapter.enqueued.length;
 
       // a re-send while the outcome is unresolved is BLOCKED — no second
@@ -496,9 +501,13 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     async () => {
       const doc = await makeOwnDoc();
       const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
-      fakeAdapter.failEnqueue = true;
-      await service.send(COMPANY, invoice.id, ACTOR);
-      fakeAdapter.failEnqueue = false;
+      // the failure flag is ALWAYS cleared — even when the send fails
+      try {
+        fakeAdapter.failEnqueue = true;
+        await service.send(COMPANY, invoice.id, ACTOR);
+      } finally {
+        fakeAdapter.failEnqueue = false;
+      }
       // the authority definitively REJECTS the transport-pending packet —
       // only this authoritative answer unlocks the official retry
       fakeAdapter.inquiryQueue.push('FAILED');

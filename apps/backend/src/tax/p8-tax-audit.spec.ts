@@ -479,18 +479,23 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         }) as never);
       const enqueuedBefore = fakeAdapter.enqueued.length;
       const inquiredBefore = fakeAdapter.inquired.filter((u) => u === uid).length;
-      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_SEND_IN_PROGRESS');
-      txSpy.mockRestore();
-      // the injected failure hook WAS reached, exactly once, after SUCCESS
-      expect(injectionHits).toBe(1);
-      // the transaction rolled back BOTH writes: submission stays PENDING
-      // (recoverable, durable uid) and the invoice keeps its pre-recovery state
-      const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
-      expect(submission.status).toBe('PENDING');
-      const afterFailure = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
-      expect(afterFailure.status).toBe('SENDING');
-      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // no new uid was minted
-      expect(fakeAdapter.inquired.filter((u) => u === uid).length).toBe(inquiredBefore + 1);
+      // the spy is ALWAYS restored — even when an assertion or the send
+      // itself fails (eleventh review: test isolation)
+      try {
+        await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_SEND_IN_PROGRESS');
+        // the injected failure hook WAS reached, exactly once, after SUCCESS
+        expect(injectionHits).toBe(1);
+        // the transaction rolled back BOTH writes: submission stays PENDING
+        // (recoverable, durable uid) and the invoice keeps its pre-recovery state
+        const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
+        expect(submission.status).toBe('PENDING');
+        const afterFailure = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+        expect(afterFailure.status).toBe('SENDING');
+        expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // no new uid was minted
+        expect(fakeAdapter.inquired.filter((u) => u === uid).length).toBe(inquiredBefore + 1);
+      } finally {
+        txSpy.mockRestore();
+      }
 
       // a subsequent recovery inquiries the SAME persisted uid and converges
       fakeAdapter.inquiryQueue.push('SUCCESS');
@@ -572,13 +577,18 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         }) as never);
       fakeAdapter.inquiryQueue.push('SUCCESS');
       const enqueuedBefore = fakeAdapter.enqueued.length;
-      await expect(service.inquiry(COMPANY, invoice.id)).rejects.toThrow('INJECTED');
-      txSpy.mockRestore();
-      // the injected failure hook WAS reached inside the inquiry transaction
-      expect(injectionHits).toBe(1);
-      // rolled back: the submission remains PENDING with its durable uid
-      const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
-      expect(submission.status).toBe('PENDING');
+      // the spy is ALWAYS restored — even when an assertion or the inquiry
+      // itself fails (eleventh review: test isolation)
+      try {
+        await expect(service.inquiry(COMPANY, invoice.id)).rejects.toThrow('INJECTED');
+        // the injected failure hook WAS reached inside the inquiry transaction
+        expect(injectionHits).toBe(1);
+        // rolled back: the submission remains PENDING with its durable uid
+        const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
+        expect(submission.status).toBe('PENDING');
+      } finally {
+        txSpy.mockRestore();
+      }
       // a later inquiry (no injection) recovers on the SAME uid — no resend
       fakeAdapter.inquiryQueue.push('SUCCESS');
       const recovered = await service.inquiry(COMPANY, invoice.id);
@@ -589,4 +599,5 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       expect(promoted.status).toBe('SUCCESS');
       expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
     },
-  );});
+  );
+});
