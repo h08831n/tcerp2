@@ -442,10 +442,14 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       expect(sent.status).toBe('SUBMITTED');
       const uid = sent.uid!;
       await prisma.salesTaxInvoice.update({ where: { id: invoice.id }, data: { status: 'SENDING' } });
-      fakeAdapter.inquiryQueue.push('PENDING'); // authority still holds packet #1
+      // the FIRST recovery response is an AUTHORITATIVE SUCCESS so that
+      // recoverPending() actually enters the submission+invoice transaction
+      // (a PENDING answer would skip it — vacuous pass, tenth review)
+      fakeAdapter.inquiryQueue.push('SUCCESS');
 
       // inject a deterministic failure in the PARENT invoice update INSIDE
-      // the recovery transaction, after the remote inquiry answered
+      // the recovery transaction, after the remote inquiry answered SUCCESS
+      let injectionHits = 0; // proof the failure hook was actually reached
       const realTransaction = prisma.$transaction.bind(prisma);
       const txSpy = jest
         .spyOn(prisma, '$transaction')
@@ -457,7 +461,10 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
                   return new Proxy(target.salesTaxInvoice, {
                     get(t, p) {
                       if (p === 'update') {
-                        return () => Promise.reject(new Error('INJECTED: invoice update failure'));
+                        return (...args: unknown[]) => {
+                          injectionHits += 1;
+                          return Promise.reject(new Error('INJECTED: invoice update failure'));
+                        };
                       }
                       const v = Reflect.get(t, p, t);
                       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
@@ -474,6 +481,8 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       const inquiredBefore = fakeAdapter.inquired.filter((u) => u === uid).length;
       await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_SEND_IN_PROGRESS');
       txSpy.mockRestore();
+      // the injected failure hook WAS reached, exactly once, after SUCCESS
+      expect(injectionHits).toBe(1);
       // the transaction rolled back BOTH writes: submission stays PENDING
       // (recoverable, durable uid) and the invoice keeps its pre-recovery state
       const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
@@ -534,6 +543,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       expect(sent.status).toBe('SUBMITTED');
       const uid = sent.uid!;
       const realTransaction = prisma.$transaction.bind(prisma);
+      let injectionHits = 0; // proof the failure hook was actually reached
       const txSpy = jest
         .spyOn(prisma, '$transaction')
         .mockImplementationOnce((async (arg: unknown) => {
@@ -544,7 +554,10 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
                   return new Proxy(target.salesTaxInvoice, {
                     get(t, p) {
                       if (p === 'update') {
-                        return () => Promise.reject(new Error('INJECTED: invoice update failure'));
+                        return (...args: unknown[]) => {
+                          injectionHits += 1;
+                          return Promise.reject(new Error('INJECTED: invoice update failure'));
+                        };
                       }
                       const v = Reflect.get(t, p, t);
                       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
@@ -561,6 +574,8 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       const enqueuedBefore = fakeAdapter.enqueued.length;
       await expect(service.inquiry(COMPANY, invoice.id)).rejects.toThrow('INJECTED');
       txSpy.mockRestore();
+      // the injected failure hook WAS reached inside the inquiry transaction
+      expect(injectionHits).toBe(1);
       // rolled back: the submission remains PENDING with its durable uid
       const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
       expect(submission.status).toBe('PENDING');
