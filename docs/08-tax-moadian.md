@@ -12,14 +12,16 @@
   (`SalesTaxInvoiceOrderAllocation` / `Purchase…`)، حالا با FK واقعی.
 - Salesperson به صورتحساب مالیاتی دسترسی ندارد (تست p8-03).
 
-## منبع رسمی و نسخه (Mandatory Protocol Correction — 2026-10-22)
+## منبع رسمی و نسخه (Official Source Retrieved — 2026-10-24)
 
-- مرجع: «دستورالعمل فنی نحوه اتصال به سامانه مودیان» سازمان امور مالیاتی —
-  **نسخه دوم** (بازتاب rahrokh.com، انتشار 1402-01-06؛ بازتاب GitHub
-  BaseMax/moadian-api-example با یادداشت نسخه دوم و تاریخ 2025-05-25).
-  جدول ۷ همان سند فیلدهای header را تعریف می‌کند. PDF رسمی روی
-  intamedia.ir/tax.gov.ir در این محیط مستقیماً قابل دانلود نبود —
-  **محدودیت ثبت‌شده**.
+- مرجع قطعی: «دستورالعمل فنی اتصال به سامانه مودیان» شناسه سند
+  **RC_TICS.IS_v1.6، شهریور ۱۴۰۴** (۴۸ صفحه، دفتر توسعه خوداظهاری و تمکین
+  داوطلبانه) — **دانلود مستقیم از پرتال رسمی**
+  `www.intamedia.ir/Law-of-store-terminals-and-taxpayer-system` (پیوند صفحه
+  «دستورالعمل فنی نحوه اتصال به سامانه مؤدیان1»). سند قدیمی‌تر رسمی
+  RC_TICS.IS_v1.3 (مهر ۱۴۰۲) نیز از همان پرتال در دسترس است. اشکال آینه‌ای
+  ثالث (rahrokh/HPM/BaseMax) فقط برای تاریخچه نگهداری می‌شوند و معادل منبع
+  رسمی نیستند — پروتکل adapter مطابق v1.6 رسمی بازنویسی شد.
 - **inty** (جدول ۷): نوع صورتحساب — 1=نوع اول، 2=نوع دوم، 3=نوع سوم —
   **مستقل از ins** (موضوع). در مدل ما ستون `sales_tax_invoices.inty`
   (migration `20241021110000_phase8_inty`): MAIN→1،
@@ -39,25 +41,35 @@
   **UNVERIFIED روی سرویس واقعی.**
 - **Base URL (نسخه دوم):** `https://tp.tax.gov.ir/requestsmanager/api/v2` — `GET /nonce`، `GET /server-information`، `POST /normal-enqueue`، `POST /INQUIRY_BY_UID`. (مسیرهای `/req/…` نسخه اول — منسوخ.)
 
-## ماتریس وضعیت پیاده‌سازی مودیان (Adapter Audit — 2026-10-22)
+## ماتریس وضعیت پیاده‌سازی مودیان (Official v1.6 Conformance — 2026-10-24)
 
-| بخش پروتکل | وضعیت | شواهد |
+**منبع رسمی بازیابی‌شده مستقیماً**: سند «دستورالعمل فنی اتصال به سامانه مودیان»
+شناسه **RC_TICS.IS_v1.6، شهریور ۱۴۰۴** (۴۸ صفحه) از پرتال رسمی
+`www.intamedia.ir` → «پایانه‌های فروشگاهی و سامانه مودیان». هر سه دامنه رسمی
+(tax.gov.ir / intamedia.ir / my.tax.gov.ir) در این جلسه پس از رفع مسیر شبکه
+قابل‌دسترس شدند. **بازتاب‌های ثالث معادل منبع رسمی نیستند** — اشکال آینه‌ای
+قبلی (normal-enqueue/normalize/XOR-whitening/5005) در سند رسمی وجود ندارند و
+از adapter حذف شدند.
+
+| بخش پروتکل (v1.6) | وضعیت | شواهد |
 |---|---|---|
-| Normalization (Table 1, values-only) | **پیاده‌شده + offline-tested** با نمونه رسمی | `moadian-http.adapter.ts` normalize + p8a Table-1 test |
-| آرایه index form (key.0 در C# appendix در برابر key.E0 در Java) | پیاده: key.0 — **تأییدنشده** (دو appendix دستورالعمل متفاوت‌اند) | docs همین بخش |
-| null/empty → slot خالی بین جداکننده‌ها (### notation) | **پیاده‌شده** و منطبق با نمونه فاکتور رسمی (`0###32652362589632`) | p8a null-slot test |
-| X.509 cert + تطبیق کلید عمومی با کلید خصوصی | **پیاده‌شده + offline-tested** (MOADIAN_CERT_INVALID / KEY_MISMATCH) | moadian-http.protocol.spec |
-| JWS (RS256/x5c/sigT/crit) — نسخه دوم | **پیاده‌شده + offline-tested** (امضا با کلید عمومی verify می‌شود) | moadian-http.protocol.spec |
-| packet crypto: XOR-whitening + AES-256-GCM + RSA-OAEP wrap + dataSignature | **پیاده‌شده + offline-tested** (round-trip کامل بازیابی می‌شود) | p8a preparePacket test |
-| envelope.signature (RSA روی normalized packets) + signatureKeyId | **پیاده‌شده + offline-tested** | p8a envelopeSignature test |
-| nonce endpoint (`/nonce?timeToLive`) | پیاده‌شده — **تأییدنشده** (شبکه‌ای) | adapter getNonce |
-| server-information (`GET …/server-information`, Bearer JWS) | پیاده‌شده — **تأییدنشده** | adapter |
-| normal-enqueue + INQUIRY_BY_UID (POST، Bearer JWS) | پیاده‌شده — **تأییدنشده** | adapter |
-| GET_TOKEN (جریان نسخه اول) | **حذف شد** — نسخه دوم از nonce+JWS استفاده می‌کند | git history |
-| taxid 22 کاراکتری (تولید با کلید حافظه) | **gap** — نیازمند سند «قالب شناسه یکتا» + کلید | docs همین بخش |
-| sstid (کد کالا از GET_SERVICE_STUFF_LIST) | **gap** | docs |
-| payment (اقلام پرداخت pym) | **gap** — ساختار تسویه تعریف نشده | docs |
-| اتصال واقعی sandbox/live | **نشده** — نیازمند اعتبارنامه Sharjh مجاز | — |
+| §5 احراز هویت: nonce TTL 10..200 (پیش‌فرض 30) + JWS RS256/x5c/sigT/crit + payload {nonce, clientId}، توکن تک‌مصرف | **پیاده‌شده + offline-tested — انطباق کامل با سند رسمی** | adapter buildJws/getToken + protocol spec |
+| §6 server-information: `{ serverTime, publicKeys: [{key base64 SPKI, id, algorithm:"RSA", purpose:1}] }` | **پیاده‌شده** (انتخاب کلید purpose=1، wrap به PEM) | adapter getServerInformation + mocks |
+| §7 ارسال: `POST /api/v2/invoice` با `[{ payload: JWE, header: { requestTraceId, fiscalId } }]`؛ پاسخ `{ timestamp, result: [{ uid, packetType, referenceNumber, data }] }` — **uid پاسخ همان requestTraceId ماست** | **پیاده‌شده + round-trip tested** (mock مرجع، JWE را باز و JWS را می‌سنجد) | adapter enqueue + lifecycle mocks |
+| §7.2 امضای صورتحساب: JWS روی JSON خام صورتحساب (بدون normalize — نرمال‌سازی در v1.3+ رسمی وجود ندارد) | **پیاده‌شده + tested** (verify با کلید عمومی گواهی) | protocol spec signInvoiceJws |
+| §7.3 رمزنگاری: JWE {alg: RSA-OAEP-256, enc: A256GCM, kid}، CEK 256bit، IV 96bit، AAD=ASCII(Base64URL(header)) | **پیاده‌شده + round-trip tested** | protocol spec encryptInvoiceJwe |
+| §8 استعلام: `GET /api/v2/inquiry-by-uid?uidList=…&fiscalId=…` (پارامتر تکراری)؛ وضعیت‌ها SUCCESS/FAILED/IN_PROGRESS/NOT_FOUND؛ خطاها در `data.error[]` | **پیاده‌شده** — IN_PROGRESS/NOT_FOUND → PENDING (نامقطی، هرگز resend) | adapter inquiryByUid |
+| payments (آرایه سطح بالای صورتحساب) + inp (الگوی) در header | **پیاده‌شده** (payments ارسال خالی؛ inp=1) — نگاشت واقعی پرداخت gap | p8-10 |
+| requestTraceId یکتا در هر درخواست + تکراری → خطا | پیاده‌شده (uid پایدار ما = requestTraceId) | p8-18/19/20/21 |
+| sign پاسخ SUCCESS (JWS هسته روی {referenceNumber, clientId, taxId, receivedDate}) | ذخیره در taxResult — راستی‌آزمایی امضا: آینده | adapter |
+| taxid (قالب شناسه یکتا + شماره منحصربه‌فرد مالیاتی) | **gap** — سند جداگانه + کلید حافظه مالیاتی | docs |
+| sstid (کد کالا/خدمت) | **gap** — GET_SERVICE_STUFF_LIST + تصمیم داده‌ای | docs |
+| payment (ساختار اقلام پرداخت) | **gap** — تصمیم داده‌ای | docs |
+| اتصال واقعی sandbox/live | **نشده** — نیازمند اعتبارنامه Sharjh مجاز؛ runtime v1.6 UNVERIFIED | — |
+
+**سابق/آینه‌ای (حذف از adapter):** normalize/dataSignature/XOR-whitening/
+envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌ها در
+سند رسمی v1.6 نیستند؛ شاخه 5005 در سرویس‌ها فقط به‌صورت دفاعی باقی است.
 
 **دستگاه زمانی indatim/indati2m: میلی‌ثانیه** (نمونه رسمی 1655620821274 = ۱۳
 رقم ms؛ «طول ۱۴» ظرفیت ذخیره‌سازی است). indatim=صدور (issueDate روزانه →
@@ -175,10 +187,10 @@
 
 ## ماتریس شکاف قطعی (Final Gap Closure — 2026-10-24)
 
-تلاش مستقیم برای دریافت سند رسمی در این جلسه: `tax.gov.ir`، `intamedia.ir` و
-`my.tax.gov.ir` همگی از این محیط با خطای SSL (`WRONG_VERSION_NUMBER`)
-غیرقابل‌دسترس بودند — **منبع رسمی از این محیط قابل بازیابی نیست** و بازتاب‌های
-ثالث (rahrokh، HPM، BaseMax) **معادل منبع رسمی تلقی نمی‌شوند**. طبقه‌بندی هر
+وضعیت دسترسی (به‌روزرسانی همین جلسه): دامنه‌های رسمی ابتدا با خطای SSL
+غیرقابل‌دسترس بودند و سپس با تغییر مسیر شبکه **باز شدند** و سند رسمی v1.6
+مستقیماً بازیابی شد. بازتاب‌های ثالث (rahrokh، HPM، BaseMax)
+**معادل منبع رسمی تلقی نمی‌شوند**. طبقه‌بندی هر
 حوزه در چهار رده: «پیاده‌سازی تأییدشده» (تست‌شده)، «پشتوانه مستند آینه‌ای»
 (غيرمعادل رسمی)، «نیازمند Sandbox مجاز»، «تصمیم کسب‌وکار/اعتبارنامه ناموجود».
 

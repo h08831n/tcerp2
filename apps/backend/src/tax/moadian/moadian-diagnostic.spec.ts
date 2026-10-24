@@ -145,11 +145,15 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
         }) as never;
       }
       if (url.includes('server-information')) {
-        // requires the Bearer JWS header — a valid one was built locally
+        // requires the Bearer JWS header — a valid one was built locally.
+        // official RC_TICS.IS_v1.6 §6 shape: { serverTime, publicKeys: [...] }
         const auth = (init as RequestInit | undefined)?.headers as Record<string, string>;
         expect(auth.Authorization).toMatch(/^Bearer /);
         return new Response(
-          JSON.stringify({ result: { publicKeyId: 'key-1', publicKey: 'pub' } }),
+          JSON.stringify({
+            serverTime: 1684055518885,
+            publicKeys: [{ key: 'pub', id: 'key-1', algorithm: 'RSA', purpose: 1 }],
+          }),
           { status: 200 },
         ) as never;
       }
@@ -180,10 +184,17 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
         return new Response(JSON.stringify({ nonce: 'n'.repeat(32) }), { status: 200 }) as never;
       }
       return new Response(
-        JSON.stringify({ result: { publicKeyId: 'k', publicKey: 'p' } }),
+        JSON.stringify({
+          serverTime: 1684055518885,
+          publicKeys: [{ key: 'p', id: 'k', algorithm: 'RSA', purpose: 1 }],
+        }),
         { status: 200 },
       ) as never;
     }).runConnectionDiagnostics();
+    // official v1.6 wire: submission is POST /invoice (never called by the
+    // basic diagnostic); the legacy mirror endpoint normal-enqueue must not
+    // appear either
     expect(urls.some((u) => u.includes('normal-enqueue'))).toBe(false);
+    expect(urls.some((u) => u.includes('/invoice'))).toBe(false);
   });
 });

@@ -812,6 +812,9 @@ export class TaxInvoiceService {
       header: {
         inno: invoice.number,
         inty: invoice.inty,
+        // official RC_TICS.IS_v1.6 §7 example carries `inp` (الگوی صورتحساب)
+        // in the header — 1 = the default pattern
+        inp: 1,
         ins,
         ...(invoice.subject !== 'MAIN' && invoice.relatedTaxid
           ? { irtaxid: invoice.relatedTaxid }
@@ -840,7 +843,10 @@ export class TaxInvoiceService {
         vam: l.vam.toString(),
         tsstam: l.tsstam.toString(),
       })),
-      payment: [],
+      // official RC_TICS.IS_v1.6 §7 example: the payments array is TOP-LEVEL
+      // and named `payments` (our submission sends it empty — payment
+      // mapping is a documented gap pending a data decision)
+      payments: [],
     };
   }
 

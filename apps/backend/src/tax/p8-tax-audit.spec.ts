@@ -231,6 +231,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     const payload = JSON.parse(packet.data) as {
       header: Record<string, string>;
       body: Array<Record<string, string>>;
+      payments: Array<Record<string, string>>;
     };
     expect(payload.header.inno).toBe(invoice.number);
     expect(payload.header.inty).toBe(1); // MAIN → type 1
@@ -267,6 +268,11 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(payload.body[0].vra).toBe('9');
     expect(payload.body[0].vam).toBe('220.0995');
     expect(payload.body[0].tsstam).toBe('220.0995');
+    // official RC_TICS.IS_v1.6 §7: the top-level payments array is named
+    // `payments` and `inp` (الگوی) is a header field
+    expect(Array.isArray(payload.payments)).toBe(true);
+    expect(payload.payments).toHaveLength(0); // payment mapping: documented gap
+    expect(payload.header.inp).toBe(1);
     // internal consistency: Σ line vam == tvam; prdis − dis == tadis
     const sumVam = payload.body.reduce((s: Prisma.Decimal, b) => s.plus(b.vam), new Prisma.Decimal(0));
     expect(sumVam.toString()).toBe(payload.header.tvam);

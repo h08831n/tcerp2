@@ -96,17 +96,25 @@ describe('MoadianHttpAdapter — نسخه دوم offline protocol tests', () => 
           return new Response(JSON.stringify({ nonce: 'n'.repeat(32) }), { status: 200 }) as never;
         }
         if (url.includes('server-information')) {
+          const spki = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+          const key = spki
+            .replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----/g, '')
+            .replace(/[\r\n]+/g, '');
           return new Response(
-            JSON.stringify({ result: { publicKeyId: 'k1', publicKey: publicKeyPem } }),
+            JSON.stringify({
+              serverTime: 1684055518885,
+              publicKeys: [{ key, id: 'k1', algorithm: 'RSA', purpose: 1 }],
+            }),
             { status: 200 },
           ) as never;
         }
-        if (url.includes('normal-enqueue')) {
-          return new Response(JSON.stringify({ result: [{ uid: 'r', referenceNumber: 'x' }] }), {
-            status: 200,
-          }) as never;
+        if (url.includes('/invoice')) {
+          return new Response(
+            JSON.stringify({ timestamp: 1684054900556, result: [{ uid: 'r', packetType: null, referenceNumber: 'x', data: null }] }),
+            { status: 200 },
+          ) as never;
         }
-        return new Response(JSON.stringify({ result: [] }), { status: 200 }) as never;
+        return new Response(JSON.stringify([]), { status: 200 }) as never;
       }) as typeof fetch,
     });
     await probe.getServerInformation();
@@ -129,104 +137,60 @@ describe('MoadianHttpAdapter — نسخه دوم offline protocol tests', () => 
     expect(inits.every((i) => i?.redirect === 'error')).toBe(true);
     expect(urls.some((u) => u.includes('/nonce'))).toBe(true);
     expect(urls.some((u) => u.includes('server-information'))).toBe(true);
-    expect(urls.some((u) => u.includes('normal-enqueue'))).toBe(true);
-    expect(urls.some((u) => u.includes('INQUIRY_BY_UID'))).toBe(true);
+    expect(urls.some((u) => u.includes('/invoice'))).toBe(true);
+    expect(urls.some((u) => u.includes('inquiry-by-uid'))).toBe(true);
   });
 
-  it('normalization — OFFICIAL Table 1 example: values only, sorted by key', () => {
-    // canonical example from دستورالعمل فنی (Table 1):
-    // {k2:v1, k4:v2, k3:{k1:v4, k5:v5}} → sorted keys k2, k3.k1, k3.k5, k4
-    // → output string 'v1#v4#v5#v2' (KEYS ARE NOT IN THE STRING)
-    expect(AdapterClass.normalize({ k2: 'v1', k4: 'v2', k3: { k1: 'v4', k5: 'v5' } })).toBe('v1#v4#v5#v2');
+  it('signInvoiceJws — official §7.2: RS256 over {header,invoiceJSON}; x5c/sigT/crit present; verifiable', () => {
+    const invoice = { header: { inty: 1, ins: 1, inp: 1 }, body: [{ am: '20' }], payments: [] };
+    const jws = AdapterClass.signInvoiceJws(JSON.stringify(invoice), TEST_PRIVATE_PEM, TEST_CERT_PEM);
+    const [h, p, sig] = jws.split('.');
+    const header = JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
+    expect(header.alg).toBe('RS256');
+    expect(header.crit).toEqual(['sigT']);
+    expect(header.sigT).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(Array.isArray(header.x5c)).toBe(true);
+    expect(Buffer.from(p, 'base64url').toString('utf8')).toBe(JSON.stringify(invoice));
+    // signature verifies with the certificate's public key (the authority
+    // validates exactly this way)
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${h}.${p}`);
+    const cert = new crypto.X509Certificate(TEST_CERT_PEM);
+    expect(verifier.verify(cert.publicKey, Buffer.from(sig, 'base64url'))).toBe(true);
   });
 
-  it('normalization: null/empty → EMPTY SLOT between separators; # escaped as ##', () => {
-    // doc: "null یا "" با ### مشخص می‌گردد" — an empty field occupies an
-    // empty position: values [x, null, y] render x##y (two separators around
-    // the empty slot); the official invoice sample fragment
-    // 0###32652362589632 = two consecutive empty slots between values.
-    expect(AdapterClass.normalize({ a: 'x', b: null, c: 'y' })).toBe('x##y');
-    expect(AdapterClass.normalize({ a: '0', b: null, c: null, d: '32652362589632' })).toBe(
-      '0###32652362589632',
-    ); // matches the official invoice sample fragment exactly
-    // '#' inside a value → '##'
-    expect(AdapterClass.normalize({ a: 'x#y' })).toBe('x##y');
-  });
-
-  it('normalization: arrays keep element order (C# appendix: key.0.field)', () => {
-    const normalized = AdapterClass.normalize({ header: { inty: 1 }, body: [{ am: 5 }, { am: 7 }] });
-    // sorted: body.0.am, body.1.am, header.inty → values 5#7#1
-    expect(normalized).toBe('5#7#1');
-  });
-
-  it('preparePacket: encrypt → unwrap → decrypt round-trip recovers the invoice; dataSignature verifies', () => {
-    const invoice = { header: { inty: 1, ins: 1 }, body: [{ am: '20', vam: '220.0995' }] };
-    const packet: MoadianPacket = {
-      uid: 'test-uid',
-      packetType: 'INVOICE.V01',
-      retry: false,
-      data: JSON.stringify(invoice),
-      encryptionKeyId: '',
-      symmetricKey: '',
-      iv: '',
-      fiscalId: 'TESTFISCAL',
-      dataSignature: '',
-    };
-    // org keypair = the generated one (simulates the authority's public key)
-    const orgPublic = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-    const prepared = AdapterClass.preparePacket(packet, orgPublic, PRIVATE_PEM);
-    expect(prepared.data).not.toBe(packet.data); // encrypted
-    expect(prepared.dataSignature).toBeTruthy();
-    expect(prepared.symmetricKey).toBeTruthy();
-    expect(prepared.iv).toBeTruthy();
-
-    // authority-side recovery: unwrap AES key+IV, AES-256-GCM decrypt
-    // (XOR-whiten + authTag), then verify dataSignature over the normalized
-    // invoice
-    const wrapped = Buffer.from(prepared.symmetricKey, 'base64');
-    const decrypted = crypto.privateDecrypt(
+  it('encryptInvoiceJwe — official §7.3: RSA-OAEP-256 + A256GCM, compact JWE decrypts back to the signed JWS', () => {
+    const jws = AdapterClass.signInvoiceJws('{"header":{"inty":1},"body":[],"payments":[]}', TEST_PRIVATE_PEM, TEST_CERT_PEM);
+    // server keypair = the generated pair (simulates the authority key from
+    // server-information, whose `key` field is the base64 SPKI)
+    const serverPublicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const jwe = AdapterClass.encryptInvoiceJwe(jws, serverPublicPem, 'server-key-id');
+    const parts = jwe.split('.');
+    expect(parts).toHaveLength(5); // compact JWE serialization
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    expect(header.alg).toBe('RSA-OAEP-256');
+    expect(header.enc).toBe('A256GCM');
+    expect(header.kid).toBe('server-key-id');
+    // authority-side recovery: unwrap the CEK, A256GCM-decrypt with the
+    // AAD = ASCII(Base64URL(header))
+    const cek = crypto.privateDecrypt(
       { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-      wrapped,
+      Buffer.from(parts[1], 'base64url'),
     );
-    const aesKey = decrypted.subarray(0, 32);
-    const iv = decrypted.subarray(32);
-    const blob = Buffer.from(prepared.data, 'base64');
-    const authTag = blob.subarray(blob.length - 16);
-    const ciphertext = blob.subarray(0, blob.length - 16);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
-    decipher.setAuthTag(authTag);
-    const whitened = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    const plain = Buffer.alloc(whitened.length);
-    for (let offset = 0; offset < whitened.length; offset += 32) {
-      for (let i = 0; i < 32 && offset + i < whitened.length; i += 1) {
-        plain[offset + i] = whitened[offset + i] ^ aesKey[i];
-      }
-    }
-    expect(JSON.parse(plain.toString('utf8'))).toEqual(invoice);
-    const verifier = crypto.createVerify('RSA-SHA256');
-    verifier.update(AdapterClass.normalize(invoice));
-    expect(verifier.verify(publicKey, Buffer.from(prepared.dataSignature, 'base64'))).toBe(true);
+    expect(cek).toHaveLength(32);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', cek, Buffer.from(parts[2], 'base64url'), {
+      authTagLength: 16,
+    });
+    decipher.setAAD(Buffer.from(parts[0], 'ascii'));
+    decipher.setAuthTag(Buffer.from(parts[4], 'base64url'));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(parts[3], 'base64url')),
+      decipher.final(),
+      // final() already includes the auth-tag check — a tampered JWE throws
+    ]);
+    expect(plain.toString('utf8')).toBe(jws);
   });
 
-  it('envelopeSignature: RSA-SHA256 over the normalized packets JSON (verifiable)', () => {
-    const packets: MoadianPacket[] = [
-      {
-        uid: 'u1',
-        packetType: 'INVOICE.V01',
-        retry: false,
-        data: 'encrypted-blob',
-        encryptionKeyId: 'key1',
-        symmetricKey: 'wrapped',
-        iv: 'iv',
-        fiscalId: 'TESTFISCAL',
-        dataSignature: 'dsig',
-      },
-    ];
-    const signature = AdapterClass.envelopeSignature(packets, PRIVATE_PEM);
-    const verifier = crypto.createVerify('RSA-SHA256');
-    verifier.update(AdapterClass.normalize({ packets }));
-    expect(verifier.verify(publicKey, Buffer.from(signature, 'base64'))).toBe(true);
-  });
 });
 
 describe('X.509 certificate validation (real self-signed certs)', () => {

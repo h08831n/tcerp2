@@ -9,33 +9,36 @@ import {
 } from './moadian-adapter';
 
 /**
- * HTTP adapter for the real Moadian Tax API — CURRENT applicable protocol:
- * «دستورالعمل فنی نحوه اتصال به سامانه مودیان» **نسخه دوم** (tax.gov.ir;
- * mirrored BaseMax/moadian-api-example, README dated 2025-05-25):
- *   base:    https://tp.tax.gov.ir/requestsmanager/api/v2
- *   nonce:   GET  …/nonce?timeToLive={10..200}        → { nonce, expDate }
- *   JWS:     RS256 over base64url(header).base64url(payload) where
- *            header = { alg: RS256, x5c: [cert], sigT: ISO-8601, crit: [sigT] }
- *            payload = { nonce, clientId }
- *   server info: GET …/server-information  (Bearer <JWS>) → org public key
- *   NOTE: the older نسخه اول flow (`…/req/…`, GET_TOKEN packet) is
- *   SUPERSEDED — see docs/08 for the version discrepancy record.
+ * HTTP adapter for the real Moadian Tax API — OFFICIAL current protocol:
+ * «دستورالعمل فنی اتصال به سامانه مودیان» شناسه سند RC_TICS.IS_v1.6
+ * (شهریور ۱۴۰۴) — retrieved directly from the official portal
+ * (www.intamedia.ir → پایانه‌های فروشگاهی و سامانه مودیان). Third-party
+ * mirrors (rahrokh/HPM/BaseMax) are NOT equivalent sources and the older
+ * mirror-era shapes (normal-enqueue packets, normalize/dataSignature,
+ * XOR-whitening) do NOT exist in the official document.
  *
- * Crypto per the official instruction:
- *  - normalization: flattened key=value pairs, keys sorted alphabetically,
- *    pairs joined with '#'; '#' inside values → '##'; null/empty → '###'
- *    placeholder; arrays flattened with index (body.0.field) — the exact
- *    official array-index sample is UNVERIFIED (flagged in docs/08)
- *  - dataSignature: RSA2048-SHA256 over the normalized invoice string
- *  - data: XOR-whitened with the AES key in 256-bit blocks, then AES-256-GCM
- *  - key material: AES key + IV wrapped with RSA-OAEP-SHA256 (org public key)
- *  - envelope signature: RSA2048-SHA256 over the normalized packets JSON
+ *   base:      https://tp.tax.gov.ir/requestsmanager/api/v2
+ *   auth:      GET  …/nonce?timeToLive={10..200,default 30} → {nonce,expDate};
+ *              JWS (RS256, x5c=[cert], sigT ISO-8601, crit=[sigT]) over
+ *              {nonce, clientId} = single-use Bearer token per request (§5)
+ *   server:    GET  …/server-information → { serverTime, publicKeys:
+ *              [{ key: base64 SPKI, id, algorithm: "RSA", purpose: 1 }] } (§6)
+ *   submit:    POST …/invoice  body=[{ payload: JWE,
+ *              header: { requestTraceId, fiscalId } }] (§7);
+ *              response { timestamp, result: [{ uid, packetType,
+ *              referenceNumber, data }] } — the response uid echoes OUR
+ *              requestTraceId (§7/§8: «uid … همان requestTraceId»)
+ *   invoice:   JSON {header, body, payments[]} → signed as compact JWS (§7.2)
+ *              → encrypted as compact JWE {alg: RSA-OAEP-256, enc: A256GCM,
+ *              kid} with AAD=ASCII(Base64URL(header)) (§7.3)
+ *   inquiry:   GET  …/inquiry-by-uid?uidList=…&fiscalId=… → array of
+ *              { uid, status: SUCCESS|FAILED|IN_PROGRESS|NOT_FOUND,
+ *              data: { error[], warning, success }, sign } (§8.2)
  *
- * ⚠️ UNVERIFIED against the live service: real operation requires the
- * taxpayer's Sharjh credentials (private key + X.509 certificate + clientId +
- * fiscalId) supplied at runtime — never stored in this repository. The
- * XOR-whitening and key-wrap concatenation order follow the instruction text
- * and are UNVERIFIED.
+ * ⚠️ Runtime UNVERIFIED against the live service: real operation requires
+ * the taxpayer's Sharjh credentials (private key + X.509 certificate +
+ * clientId + fiscalId) supplied at runtime — never stored in this repository.
+ * All wire shapes here follow the official v1.6 document text.
  */
 @Injectable()
 export class MoadianHttpAdapter implements MoadianAdapter {
@@ -96,8 +99,8 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     }
   }
 
-  /** نسخه دوم auth: GET nonce → build JWS (RS256, x5c cert, sigT, crit) →
-   *  the JWS itself is the Bearer credential for subsequent calls. */
+  /** Official §5 auth: GET nonce → build JWS (RS256, x5c cert, sigT, crit) →
+   *  the JWS itself is the single-use Bearer credential for one request. */
   buildJws(nonce: string, sigT = new Date().toISOString()): string {
     const b64url = (input: Buffer | string) =>
       Buffer.from(input).toString('base64url');
@@ -128,49 +131,17 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     return body.nonce;
   }
 
-  /** Official normalization (signature section of the instruction, verified
-   *  against the canonical Table 1 example): flatten with dotted paths
-   *  (arrays as key.0.field — per the C# appendix; the Java appendix uses
-   *  key.E0), sort pairs by key alphabetically, then output the VALUES ONLY
-   *  joined with '#'. '#' inside values → '##'. null/undefined/'' render as
-   *  an EMPTY slot (the doc's ### notation describes the empty position, not
-   *  literal characters). Table 1: {k2:v1, k4:v2, k3:{k1:v4, k5:v5}} →
-   *  'v1#v4#v5#v2'. Array index form (key.0 vs key.E0) is UNVERIFIED against
-   *  a live response — the two appendices of the instruction differ. */
-  static normalize(payload: Record<string, unknown>): string {
-    const pairs: Array<[string, string]> = [];
-    const walk = (prefix: string, value: unknown) => {
-      const key = prefix.startsWith('.') ? prefix.slice(1) : prefix;
-      if (Array.isArray(value)) {
-        value.forEach((v, i) => walk(`${prefix}.${i}`, v));
-      } else if (typeof value === 'object' && value !== null) {
-        for (const [k, v] of Object.entries(value)) walk(`${prefix}.${k}`, v);
-      } else {
-        const rendered =
-          value === null || value === undefined || value === ''
-            ? ''
-            : String(value).replace(/#/g, '##');
-        pairs.push([key, rendered]);
-      }
-    };
-    walk('', payload);
-    pairs.sort(([a], [b]) => a.localeCompare(b));
-    return pairs.map(([, v]) => v).join('#');
-  }
-
-  signNormalized(normalized: string, privateKeyPem = this.privateKeyPem): string {
-    const signer = crypto.createSign('RSA-SHA256');
-    signer.update(normalized);
-    return signer.sign(privateKeyPem, 'base64');
-  }
-
-  /** نسخه دوم: Bearer credential = the JWS built from a fresh nonce. */
+  /** Official §5 auth: Bearer credential = the JWS built from a fresh nonce
+   *  (single-use per request — a fresh nonce is fetched for every call). */
   async getToken(): Promise<MoadianToken> {
     const nonce = await this.getNonce();
     const jws = this.buildJws(nonce);
-    return { token: jws, expiresInSeconds: 200 }; // nonce TTL 10..200s
+    return { token: jws, expiresInSeconds: 200 }; // nonce TTL 10..200s (§5.1.1)
   }
 
+  /** Official §6 server information: { serverTime, publicKeys: [{ key
+   *  (base64 SPKI), id, algorithm, purpose }] } — purpose 1 = encryption
+   *  key. The base64 SPKI is wrapped into a PEM for node crypto use. */
   async getServerInformation(): Promise<{ publicKeyId: string; publicKeyPem: string }> {
     const token = (await this.getToken()).token;
     const res = await this.fetchImpl(`${this.base}/server-information`, {
@@ -179,96 +150,133 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
     });
     if (!res.ok) throw new Error(`MOADIAN_SERVER_INFO_FAILED:${res.status}`);
-    const body = (await res.json()) as { result: { publicKeyId: string; publicKey: string } };
-    return { publicKeyId: body.result.publicKeyId, publicKeyPem: body.result.publicKey };
-  }
-
-  /** Official packet crypto: XOR-whiten the JSON with the AES key in
-   *  256-bit blocks, AES-256-GCM encrypt, wrap (AES key ‖ IV) with
-   *  RSA-OAEP-SHA256 under the org public key, and RSA-sign the normalized
-   *  invoice. UNVERIFIED end-to-end (needs live server information). */
-  static preparePacket(
-    packet: MoadianPacket,
-    orgPublicKeyPem: string,
-    signerPrivateKeyPem: string,
-  ): MoadianPacket {
-    const invoice = JSON.parse(packet.data) as Record<string, unknown>;
-    const normalized = MoadianHttpAdapter.normalize(invoice);
-    const dataSignature = (() => {
-      const signer = crypto.createSign('RSA-SHA256');
-      signer.update(normalized);
-      return signer.sign(signerPrivateKeyPem, 'base64');
-    })();
-
-    const aesKey = crypto.randomBytes(32); // AES-256
-    const iv = crypto.randomBytes(12);
-    // XOR whitening per the instruction: XOR the JSON bytes with the AES key
-    // in 256-bit (32-byte) blocks
-    const plain = Buffer.from(packet.data, 'utf8');
-    const whitened = Buffer.alloc(plain.length);
-    for (let offset = 0; offset < plain.length; offset += 32) {
-      for (let i = 0; i < 32 && offset + i < plain.length; i += 1) {
-        whitened[offset + i] = plain[offset + i] ^ aesKey[i];
-      }
-    }
-    const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-    const encrypted = Buffer.concat([cipher.update(whitened), cipher.final(), cipher.getAuthTag()]);
-    // wrap (AES key ‖ IV) with RSA-OAEP-SHA256 (org public key)
-    const wrapped = crypto.publicEncrypt(
-      { key: orgPublicKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-      Buffer.concat([aesKey, iv]),
-    );
-
-    return {
-      ...packet,
-      data: encrypted.toString('base64'),
-      dataSignature,
-      symmetricKey: wrapped.toString('base64'),
-      iv: iv.toString('base64'),
+    const body = (await res.json()) as {
+      serverTime?: number;
+      publicKeys?: Array<{ key?: string; id?: string; algorithm?: string; purpose?: number }>;
     };
+    const keys = body.publicKeys ?? [];
+    const encryption = keys.find((k) => k.purpose === 1) ?? keys[0];
+    if (!encryption?.key || !encryption.id) throw new Error('MOADIAN_SERVER_INFO_SCHEMA');
+    const pem = `-----BEGIN PUBLIC KEY-----\n${(encryption.key.match(/.{1,64}/g) ?? []).join('\n')}\n-----END PUBLIC KEY-----`;
+    return { publicKeyId: encryption.id, publicKeyPem: pem };
   }
 
-  /** envelope.signature = RSA2048-SHA256 over the normalized packets JSON. */
-  static envelopeSignature(packets: MoadianPacket[], privateKeyPem: string): string {
-    const normalized = MoadianHttpAdapter.normalize({ packets });
+  /** Official §7.2: sign the invoice JSON as a compact JWS — header
+   *  {alg: RS256, x5c: [cert], sigT: ISO-8601, crit: [sigT]}, payload =
+   *  the invoice JSON (utf8 → Base64URL), RSASSA-PKCS1-v1_5 SHA-256. */
+  static signInvoiceJws(
+    invoiceJson: string,
+    privateKeyPem: string,
+    certificatePem: string,
+    sigT = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  ): string {
+    const headerB64 = Buffer.from(
+      JSON.stringify({
+        alg: 'RS256',
+        x5c: [
+          certificatePem
+            .replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----/g, '')
+            .replace(/[\r\n]+/g, '')
+            .trim(),
+        ],
+        sigT,
+        crit: ['sigT'],
+      }),
+    ).toString('base64url');
+    const payloadB64 = Buffer.from(invoiceJson, 'utf8').toString('base64url');
+    const signingInput = `${headerB64}.${payloadB64}`;
     const signer = crypto.createSign('RSA-SHA256');
-    signer.update(normalized);
-    return signer.sign(privateKeyPem, 'base64');
+    signer.update(signingInput);
+    return `${signingInput}.${signer.sign(privateKeyPem, 'base64url')}`;
   }
 
+  /** Official §7.3: encrypt the signed JWS into a compact JWE — protected
+   *  header {alg: RSA-OAEP-256, enc: A256GCM, kid}, fresh 256-bit CEK
+   *  wrapped with RSA-OAEP-256 under the server's 4096-bit public key,
+   *  fresh 96-bit IV, AAD = ASCII(Base64URL(header)). */
+  static encryptInvoiceJwe(signedJws: string, serverPublicKeyPem: string, keyId: string): string {
+    const headerB64 = Buffer.from(
+      JSON.stringify({ alg: 'RSA-OAEP-256', enc: 'A256GCM', kid: keyId }),
+    ).toString('base64url');
+    const cek = crypto.randomBytes(32);
+    const encryptedKey = crypto.publicEncrypt(
+      { key: serverPublicKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+      cek,
+    );
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', cek, iv, { authTagLength: 16 });
+    cipher.setAAD(Buffer.from(headerB64, 'ascii'));
+    const ciphertext = Buffer.concat([cipher.update(signedJws, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return [
+      headerB64,
+      encryptedKey.toString('base64url'),
+      iv.toString('base64url'),
+      ciphertext.toString('base64url'),
+      tag.toString('base64url'),
+    ].join('.');
+  }
+
+  /** Official §7: submit invoices — each packet's invoice JSON is signed
+   *  (JWS) then encrypted (JWE) and sent as
+   *  { payload, header: { requestTraceId, fiscalId } }; the response echoes
+   *  OUR requestTraceId back as `uid` (§7/§8). The official response has NO
+   *  errorCode field — content errors surface at INQUIRY time (§8). */
   async enqueue(packets: MoadianPacket[]): Promise<MoadianAsyncResponse[]> {
-    if (packets.length > 100) throw new Error('MOADIAN_PACKET_LIMIT: max 100 packets per enqueue (official 5006)');
+    if (packets.length > 100) throw new Error('MOADIAN_PACKET_LIMIT: max 100 invoices per request');
     const token = (await this.getToken()).token;
     const org = await this.getServerInformation();
-    const prepared = packets.map((p) =>
-      MoadianHttpAdapter.preparePacket(p, org.publicKeyPem, this.privateKeyPem),
-    );
-    const envelope = {
-      packets: prepared,
-      signature: MoadianHttpAdapter.envelopeSignature(prepared, this.privateKeyPem),
-      signatureKeyId: org.publicKeyId,
-    };
-    const res = await this.fetchImpl(`${this.base}/normal-enqueue`, {
+    const envelope = packets.map((p) => {
+      const signed = MoadianHttpAdapter.signInvoiceJws(p.data, this.privateKeyPem, this.certificatePem);
+      const payload = MoadianHttpAdapter.encryptInvoiceJwe(signed, org.publicKeyPem, org.publicKeyId);
+      return { payload, header: { requestTraceId: p.uid, fiscalId: p.fiscalId || this.fiscalId } };
+    });
+    const res = await this.fetchImpl(`${this.base}/invoice`, {
       method: 'POST',
       redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(envelope),
     });
-    if (!res.ok) throw new Error(`MOADIAN_ENQUEUE_FAILED:${res.status}`);
-    const body = (await res.json()) as { result: MoadianAsyncResponse[] };
-    return body.result ?? [];
+    if (!res.ok) throw new Error(`MOADIAN_INVOICE_FAILED:${res.status}`);
+    const body = (await res.json()) as { result?: Array<{ uid?: string; referenceNumber?: string }> };
+    return (body.result ?? []).map((r) => ({ uid: r.uid ?? '', referenceNumber: r.referenceNumber ?? '' }));
   }
 
+  /** Official §8.2: GET /inquiry-by-uid with REPEATED uidList query params
+   *  + fiscalId. Statuses SUCCESS | FAILED | IN_PROGRESS | NOT_FOUND;
+   *  IN_PROGRESS and NOT_FOUND are INCONCLUSIVE for our state machines and
+   *  map to PENDING (never blind-resend on an inconclusive answer). */
   async inquiryByUid(uids: string[]): Promise<MoadianInquiryResult[]> {
     const token = (await this.getToken()).token;
-    const res = await this.fetchImpl(`${this.base}/INQUIRY_BY_UID`, {
-      method: 'POST',
+    const params = new URLSearchParams();
+    for (const uid of uids) params.append('uidList', uid);
+    params.append('fiscalId', this.fiscalId);
+    const res = await this.fetchImpl(`${this.base}/inquiry-by-uid?${params.toString()}`, {
+      method: 'GET',
       redirect: 'error',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uidList: uids, fiscalId: this.fiscalId }),
+      headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
     });
     if (!res.ok) throw new Error(`MOADIAN_INQUIRY_FAILED:${res.status}`);
-    const body = (await res.json()) as { result: MoadianInquiryResult[] };
-    return body.result ?? [];
+    const body = (await res.json()) as Array<{
+      uid?: string;
+      status?: string;
+      referenceNumber?: string;
+      data?: { error?: Array<{ code?: string; message?: string }>; warning?: unknown[]; success?: boolean };
+      sign?: string;
+    }>;
+    return (Array.isArray(body) ? body : []).map((r) => ({
+      uid: r.uid ?? '',
+      status:
+        r.status === 'SUCCESS'
+          ? ('SUCCESS' as const)
+          : r.status === 'FAILED'
+            ? ('FAILED' as const)
+            : ('PENDING' as const),
+      referenceNumber: r.referenceNumber ?? undefined,
+      errorCode: r.data?.error?.[0]?.code ?? undefined,
+      errorDetail: r.data?.error?.[0]?.message ?? undefined,
+      confirmationReferenceId: r.status === 'SUCCESS' ? r.referenceNumber ?? undefined : undefined,
+      taxResult: r.sign ?? undefined,
+    }));
   }
 }

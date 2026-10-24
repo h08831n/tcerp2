@@ -1,4 +1,4 @@
-import { createPublicKey } from "crypto";
+import * as crypto from "crypto";
 import { PrismaClient } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AuditService } from "../../audit/audit.service";
@@ -13,11 +13,15 @@ const DB_URL = process.env.DATABASE_URL;
 
 if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 
-// the mock authority's org key must be a REAL RSA public key: the adapter
-// wraps the packet AES key with RSA-OAEP under it before enqueue
-const ORG_PUBLIC_PEM = createPublicKey(TEST_PRIVATE_PEM)
+// the mock authority's org key must be a REAL RSA keypair: the adapter
+// encrypts the invoice JWE with the SERVER public key (official §7.3) and
+// this mock decrypts with the SERVER private key to prove the round-trip
+const ORG_KEY_B64_SPKI = crypto.createPublicKey(TEST_PRIVATE_PEM)
   .export({ type: "spki", format: "pem" })
-  .toString();
+  .toString()
+  .replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----/g, "")
+  .replace(/[\r\n]+/g, "")
+  .trim();
 
 const COMPANY_IDS: string[] = [];
 let prismaService: PrismaService;
@@ -28,6 +32,23 @@ let inquiryFailureKind: "timeout" | "error" = "error";
 let inquiryEmptyResponse = false;
 const enqueuedUids: string[] = [];
 
+/** official RC_TICS.IS_v1.6 §7.3 authority-side recovery: unwrap the JWE
+ *  (RSA-OAEP-256 CEK + A256GCM, AAD = ASCII(Base64URL(header))) and return
+ *  the inner compact JWS — proves the adapter's crypto round-trip. */
+function decryptInvoiceJwe(jwe: string): string {
+  const [h, ek, iv, ct, tag] = jwe.split(".");
+  const cek = crypto.privateDecrypt(
+    { key: TEST_PRIVATE_PEM, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+    Buffer.from(ek, "base64url"),
+  );
+  const decipher = crypto.createDecipheriv("aes-256-gcm", cek, Buffer.from(iv, "base64url"), {
+    authTagLength: 16,
+  });
+  decipher.setAAD(Buffer.from(h, "ascii"));
+  decipher.setAuthTag(Buffer.from(tag, "base64url"));
+  return Buffer.concat([decipher.update(Buffer.from(ct, "base64url")), decipher.final()]).toString("utf8");
+}
+
 function makeFetch(): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = String(input);
@@ -35,22 +56,40 @@ function makeFetch(): typeof fetch {
       return new Response(JSON.stringify({ nonce: "n".repeat(32) }), { status: 200 }) as never;
     }
     if (url.includes("server-information")) {
+      // official §6 shape: { serverTime, publicKeys: [{ key (base64 SPKI), id, algorithm, purpose }] }
       return new Response(
-        JSON.stringify({ result: { publicKeyId: "org-key-1", publicKey: ORG_PUBLIC_PEM } }),
+        JSON.stringify({
+          serverTime: 1684055518885,
+          publicKeys: [{ key: ORG_KEY_B64_SPKI, id: "org-key-1", algorithm: "RSA", purpose: 1 }],
+        }),
         { status: 200 },
       ) as never;
     }
-    if (url.includes("normal-enqueue")) {
-      const body = JSON.parse(String((init as RequestInit).body ?? "{}")) as {
-        packets: Array<{ uid: string }>;
-      };
-      enqueuedUids.push(...body.packets.map((p) => p.uid));
+    if (url.includes("/invoice")) {
+      // official §7: body [{ payload: JWE, header: { requestTraceId, fiscalId } }]
+      const body = JSON.parse(String((init as RequestInit).body ?? "[]")) as Array<{
+        payload: string;
+        header: { requestTraceId: string; fiscalId: string };
+      }>;
+      for (const item of body) {
+        const signedJws = decryptInvoiceJwe(item.payload); // throws if crypto is broken
+        if (!signedJws.includes(".")) throw new Error("mock: payload is not a JWS");
+        enqueuedUids.push(item.header.requestTraceId); // §8: uid === requestTraceId
+      }
       return new Response(
-        JSON.stringify({ result: body.packets.map((p) => ({ uid: p.uid, referenceNumber: "ref" })) }),
+        JSON.stringify({
+          timestamp: 1684054900556,
+          result: body.map((item) => ({
+            uid: item.header.requestTraceId,
+            packetType: null,
+            referenceNumber: "ref-" + item.header.requestTraceId.slice(0, 8),
+            data: null,
+          })),
+        }),
         { status: 200 },
       ) as never;
     }
-    if (url.includes("INQUIRY_BY_UID")) {
+    if (url.includes("inquiry-by-uid")) {
       if (inquiryFailures > 0) {
         inquiryFailures -= 1;
         if (inquiryFailureKind === "timeout") {
@@ -58,18 +97,35 @@ function makeFetch(): typeof fetch {
         }
         throw new Error("inquiry transport failure");
       }
-      const body = JSON.parse(String((init as RequestInit).body ?? "{}")) as { uidList: string[] };
+      // official §8.2: GET with REPEATED uidList query params + fiscalId
+      const query = new URL(url).searchParams;
+      const uids = query.getAll("uidList");
       if (inquiryEmptyResponse) {
-        return new Response(JSON.stringify({ result: [] }), { status: 200 }) as never;
+        return new Response(JSON.stringify([]), { status: 200 }) as never;
       }
-      const results = body.uidList.map((uid) => {
+      const results = uids.map((uid) => {
         const next = inquiryScript.shift() ?? "SUCCESS";
-        if (next === "PENDING") return { uid, status: "PENDING" };
+        if (next === "PENDING")
+          return { uid, status: "IN_PROGRESS", data: { error: [], warning: [], success: false }, packetType: "receive_invoice_confirm", fiscalId: query.get("fiscalId"), sign: "" };
         if (next === "FAILED")
-          return { uid, status: "FAILED", errorCode: "CONTENT", errorDetail: "Duplicate tax id" };
-        return { uid, status: "SUCCESS", confirmationReferenceId: "conf", taxResult: "fake" };
+          return {
+            uid,
+            status: "FAILED",
+            data: { error: [{ code: "012802", message: "مقدار وارد شده مجاز نیست", errorType: "ERROR" }], warning: [], success: false },
+            packetType: "receive_invoice_confirm",
+            fiscalId: query.get("fiscalId"),
+            sign: "",
+          };
+        return {
+          uid,
+          status: "SUCCESS",
+          data: { error: [], warning: [], success: true },
+          packetType: "receive_invoice_confirm",
+          fiscalId: query.get("fiscalId"),
+          sign: "fake-core-signature",
+        };
       });
-      return new Response(JSON.stringify({ result: results }), { status: 200 }) as never;
+      return new Response(JSON.stringify(results), { status: 200 }) as never;
     }
     return new Response("not found", { status: 404 }) as never;
   }) as typeof fetch;
