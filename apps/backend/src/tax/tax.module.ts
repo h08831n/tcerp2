@@ -3,6 +3,8 @@ import { TaxController } from './tax.controller';
 import { TaxAllocationService, TaxDefinitionService } from './tax.service';
 import { TaxInvoiceService } from './tax-invoice.service';
 import { TaxInvoiceController } from './tax-invoice.controller';
+import { TaxDiagnosticController } from './tax-diagnostic.controller';
+import { MoadianDiagnosticService } from './moadian/moadian-diagnostic.service';
 import { MOADIAN_ADAPTER } from './moadian/moadian-adapter';
 import { buildMoadianAdapter } from './moadian/adapter-factory';
 import { SequencesModule } from '../sequences/sequences.module';
@@ -20,11 +22,12 @@ export const MOADIAN_ADAPTER_PROVIDER = {
  *  no silent mock fallback). docs/08. */
 @Module({
   imports: [SequencesModule],
-  controllers: [TaxController, TaxInvoiceController],
+  controllers: [TaxController, TaxInvoiceController, TaxDiagnosticController],
   providers: [
     TaxDefinitionService,
     TaxAllocationService,
     TaxInvoiceService,
+    MoadianDiagnosticService,
     MOADIAN_ADAPTER_PROVIDER,
   ],
   exports: [TaxDefinitionService, TaxAllocationService, TaxInvoiceService],

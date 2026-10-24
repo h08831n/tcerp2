@@ -34,7 +34,7 @@ export interface MoadianLiveConfig {
 
 export function loadMoadianConfigFromEnv(env: NodeJS.ProcessEnv = process.env): {
   mode: MoadianMode;
-  config?: MoadianLiveConfig;
+  config?: Omit<MoadianLiveConfig, 'fetchImpl'>;
 } {
   const rawMode = env.MOADIAN_MODE ?? 'mock';
   const VALID_MODES: readonly MoadianMode[] = ['mock', 'sandbox', 'live'];
@@ -79,8 +79,11 @@ export function loadMoadianConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-export function buildMoadianAdapter(env: NodeJS.ProcessEnv = process.env): MoadianAdapter {
+export function buildMoadianAdapter(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl?: typeof fetch,
+): MoadianAdapter {
   const { mode, config } = loadMoadianConfigFromEnv(env);
   if (mode === 'mock') return new MockMoadianAdapter();
-  return new MoadianHttpAdapter(config!);
+  return new MoadianHttpAdapter({ ...config!, fetchImpl });
 }

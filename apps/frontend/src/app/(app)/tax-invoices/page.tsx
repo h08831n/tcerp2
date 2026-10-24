@@ -7,6 +7,7 @@ import { JalaliDateInput } from "@/components/ui/jalali-date-input";
 import { Modal } from "@/components/ui/modal";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { EntitySelector, type EntityOption } from "@/components/ui/entity-selector";
+import { MoadianDiagnosticsPanel } from "@/components/tax/moadian-diagnostics-panel";
 import { faDigits, faMoneyExact, jalali } from "@/lib/format";
 import {
   TAX_INVOICE_STATUS_CLASSES,
@@ -187,6 +188,8 @@ export default function TaxInvoicesPage() {
           {notice}
         </div>
       )}
+
+      <MoadianDiagnosticsPanel />
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>

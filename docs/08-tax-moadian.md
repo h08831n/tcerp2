@@ -86,6 +86,29 @@
 است؛ sandbox/live فقط با env اجرا می‌شوند و بدون اعتبارنامه با خطای صریح
 می‌افتند. **هیچ ارسال واقعی تأییدنشده ادعا نشده است.**
 
+## تشخیص اتصال (Test Moadian Connection) — Phase 8 hardening
+
+- Endpointهای admin-only (`settings.edit` **و** `tax.submit` — هر دو الزامی):
+  `GET /tax/diagnostics/connection` و `POST /tax/diagnostics/sandbox-full-test`.
+- ترتیب گام‌های تشخیص: configuration → network (DNS/TLS/HTTP طبقه‌بندی
+  می‌شود) → nonce → authentication (JWS محلی) → server_information →
+  read-only. شکست هر گام، گام‌های وابسته را SKIPPED می‌کند.
+- حالت mock: تمام گام‌های شبکه‌ای NOT_CONFIGURED — موفقیت mock هرگز اتصال
+  واقعی نیست (تست‌شده).
+- حالت live: فقط گام‌های غیرتغییردهنده؛ آزمون کامل sandbox در live مسدود.
+- آزمون کامل sandbox: نیازمند MOADIAN_MODE=sandbox + fiscalId؛ packet
+  آزمایشی با uid پایدار روزانه (بدون ارسال تکراری با timeout/restart)؛
+  5005 = قبلاً پذیرفته‌شده؛ پاسخ PENDING → «بعداً استعلام بگیرید».
+- رکورد diagnostic history جدا از تراکنش‌های کسب‌وکار نگهداری نمی‌شود؛ فقط
+  audit (بدون هیچ secret) ثبت می‌شود و نتایج به UI برمی‌گردد.
+- امنیت: هر دو endpoint با زنجیره guard سراسری + requireCompanyId +
+  rate-limit 15 ثانیه + gate تک‌نمونه‌ای؛ timeout شبکه ۱۰ ثانیه با
+  AbortSignal؛ TLS verify غیرقابل‌غیرفعال‌سازی؛ هیچ secret/token/کلیدی در
+  پاسخ یا لاگ برنمی‌گردد.
+- محدودیت: gate و rate-limit درون-پردازشی‌اند (استقرار تک‌نمونه‌ای)؛ محیط
+  sandbox رسمی در دسترس نبود و هیچ درخواست واقعی به tp.tax.gov.ir ارسال یا
+  تأیید نشده است — همه نتایج شبکه‌ای از mock/fetch-injected tests است.
+
 ## چرخه وضعیت و idempotency
 
 ```

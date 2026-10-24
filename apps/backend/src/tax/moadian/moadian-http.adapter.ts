@@ -46,6 +46,8 @@ export class MoadianHttpAdapter implements MoadianAdapter {
   readonly clientId: string;
   readonly privateKeyPem: string;
   readonly certificatePem: string;
+  /** injectable for deterministic offline tests (default: global fetch) */
+  readonly fetchImpl: typeof fetch;
 
   constructor(config: {
     baseUrl?: string;
@@ -54,6 +56,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     privateKeyPem?: string;
     clientId?: string;
     certificatePem?: string;
+    fetchImpl?: typeof fetch;
   }) {
     this.base = config.baseUrl ?? 'https://tp.tax.gov.ir/requestsmanager/api/v2';
     this.fiscalId = config.fiscalId ?? '';
@@ -61,6 +64,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     this.clientId = config.clientId ?? '';
     this.privateKeyPem = config.privateKeyPem ?? '';
     this.certificatePem = config.certificatePem ?? '';
+    this.fetchImpl = config.fetchImpl ?? fetch;
     const missing = [
       ['fiscalId', this.fiscalId],
       ['economicCode', this.economicCode],
@@ -117,7 +121,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
   }
 
   private async getNonce(): Promise<string> {
-    const res = await fetch(`${this.base}/nonce?timeToLive=200`);
+    const res = await this.fetchImpl(`${this.base}/nonce?timeToLive=200`);
     if (!res.ok) throw new Error(`MOADIAN_NONCE_FAILED:${res.status}`);
     const body = (await res.json()) as { nonce?: string };
     if (!body.nonce) throw new Error('MOADIAN_NONCE_MISSING');
@@ -169,7 +173,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
 
   async getServerInformation(): Promise<{ publicKeyId: string; publicKeyPem: string }> {
     const token = (await this.getToken()).token;
-    const res = await fetch(`${this.base}/server-information`, {
+    const res = await this.fetchImpl(`${this.base}/server-information`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
     });
@@ -243,7 +247,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       signature: MoadianHttpAdapter.envelopeSignature(prepared, this.privateKeyPem),
       signatureKeyId: org.publicKeyId,
     };
-    const res = await fetch(`${this.base}/normal-enqueue`, {
+    const res = await this.fetchImpl(`${this.base}/normal-enqueue`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(envelope),
@@ -255,7 +259,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
 
   async inquiryByUid(uids: string[]): Promise<MoadianInquiryResult[]> {
     const token = (await this.getToken()).token;
-    const res = await fetch(`${this.base}/INQUIRY_BY_UID`, {
+    const res = await this.fetchImpl(`${this.base}/INQUIRY_BY_UID`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ uidList: uids, fiscalId: this.fiscalId }),
