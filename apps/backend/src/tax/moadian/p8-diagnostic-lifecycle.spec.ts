@@ -599,4 +599,111 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
       expect(enqueuedUids.filter((u) => u === "sandbox-rej-explicit-1")).toHaveLength(0);
       expect(enqueuedUids.filter((u) => u === attempts[1].uid)).toHaveLength(1);
     },
-  );});
+  );
+
+  // sixth review #1 — a persisted SUCCESS is never retried; ANY non-SUCCESS
+  // authority response for an accepted uid is a contradiction, checked
+  // BEFORE the inconclusive branch; transport failure stays an inquiry
+  // failure; nothing is enqueued or created in any of these cases
+  async function seedAcceptedHead(uid: string): Promise<void> {
+    const run = await prisma.moadianDiagnosticRun.create({
+      data: { companyId: COMPANY_IDS[COMPANY_IDS.length - 1], runDay: today(), fiscalId: "F-TEST", status: "SUCCESS" },
+    });
+    await prisma.moadianDiagnosticAttempt.create({
+      data: {
+        runId: run.id,
+        companyId: COMPANY_IDS[COMPANY_IDS.length - 1],
+        attempt: 1,
+        uid,
+        retry: false,
+        status: "SUCCESS",
+        referenceNumber: "ref-accepted",
+        confirmationReferenceId: "conf-accepted",
+        payloadSnapshot: {},
+      },
+    });
+  }
+
+  itif("p8-21a accepted uid + inquiry PENDING -> SANDBOX_RECONCILE_CONTRADICTION, no resend", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedAcceptedHead("sandbox-acc-pending-1");
+    inquiryScript = ["PENDING"];
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.report.overall).toBe("FAIL");
+    expect(res.errorCode).toBe("SANDBOX_RECONCILE_CONTRADICTION");
+    expect(res.submission?.uid).toBe("sandbox-acc-pending-1");
+    expect(res.submission?.status).toBe("SUCCESS"); // consistent with attempt/aggregate
+    expect(enqueuedUids.length).toBe(enqueuedBefore); // zero enqueue
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-acc-pending-1" },
+    });
+    expect(attempt.status).toBe("SUCCESS"); // never overwritten by PENDING
+    const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+    expect(runRow.status).toBe("SUCCESS"); // aggregate consistent
+  });
+
+  itif("p8-21b accepted uid + empty inquiry response -> SANDBOX_RECONCILE_CONTRADICTION", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedAcceptedHead("sandbox-acc-empty-1");
+    inquiryEmptyResponse = true;
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.errorCode).toBe("SANDBOX_RECONCILE_CONTRADICTION"); // NOT silently inconclusive
+    expect(res.submission?.status).toBe("SUCCESS");
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-acc-empty-1" },
+    });
+    expect(attempt.status).toBe("SUCCESS");
+  });
+
+  itif("p8-21c accepted uid + explicit FAILED -> SANDBOX_RECONCILE_CONTRADICTION, attempt kept SUCCESS", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedAcceptedHead("sandbox-acc-failed-1");
+    inquiryScript = ["FAILED"];
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.errorCode).toBe("SANDBOX_RECONCILE_CONTRADICTION");
+    expect(res.submission?.status).toBe("SUCCESS");
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-acc-failed-1" },
+    });
+    expect(attempt.status).toBe("SUCCESS"); // a reported acceptance is never overwritten/retried
+    const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+    expect(runRow.status).toBe("SUCCESS");
+  });
+
+  itif("p8-21d accepted uid + inquiry transport failure -> inquiry failure, NOT a contradiction", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedAcceptedHead("sandbox-acc-transport-1");
+    inquiryFailures = 1;
+    inquiryFailureKind = "error";
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.report.overall).toBe("FAIL");
+    // classification: the step is an INQUIRY failure — the authority said
+    // nothing, so no contradiction is claimed
+    const reconcileStep = res.report.steps.find((s) => s.step === "sandbox_reconcile");
+    expect(reconcileStep?.errorCode).toBe("SANDBOX_INQUIRY_FAILED");
+    expect(res.report.steps.some((s) => s.errorCode === "SANDBOX_RECONCILE_CONTRADICTION")).toBe(false);
+    expect(res.submission?.status).toBe("SUCCESS"); // unchanged, consistent
+    expect(enqueuedUids.length).toBe(enqueuedBefore); // zero enqueue
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-acc-transport-1" },
+    });
+    expect(attempt.status).toBe("SUCCESS");
+  });});

@@ -309,6 +309,11 @@ export class MoadianDiagnosticService {
    *   - Retry is unlocked ONLY by a fresh, explicit, authoritative rejection
    *     for the exact persisted uid — PENDING/empty/failed inquiries never
    *     unlock it, even after a persisted REJECTED (fifth review #1).
+   *   - A persisted SUCCESS is never retried; ANY non-SUCCESS authority
+   *     response (explicit, PENDING, or empty) for an accepted uid is a
+   *     SANDBOX_RECONCILE_CONTRADICTION, checked BEFORE the inconclusive
+   *     branch so it can never be silently bypassed; a transport failure is
+   *     an inquiry failure, not a contradiction (sixth review #1).
    *   - Claim losers report WITHOUT mutating the aggregate (report-only);
    *     their SANDBOX_CLAIM_* codes are contention reports, never
    *     persistence failures (fifth review #2).
@@ -467,24 +472,65 @@ export class MoadianDiagnosticService {
         const { code, message } = classifyNetworkError(error);
         // reconcile inquiry failed — the attempt stays EXACTLY as it was;
         // an unknown transport outcome never unlocks a retry (fifth
-        // review #1), even when the persisted status is REJECTED
+        // review #1) and is an INQUIRY failure, never an authoritative
+        // contradiction (sixth review #1). Stable taxonomy code; the
+        // network classification stays in the message.
         steps.push(
           this.step(
             'sandbox_reconcile',
             'FAIL',
             startedAt,
-            `استعلام نتیجه قبلی ناموفق بود (${message}) — بدون تغییر و بدون ارسال مجدد؛ بعداً دوباره تلاش کنید.`,
-            code || 'SANDBOX_INQUIRY_FAILED',
+            `استعلام نتیجه قبلی ناموفق بود (${code}: ${message}) — بدون تغییر و بدون ارسال مجدد؛ بعداً دوباره تلاش کنید.`,
+            'SANDBOX_INQUIRY_FAILED',
           ),
         );
         return await sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `reconcile inquiry failed: ${code}`);
       }
       const result = results[0];
+      // POLICY ORDER (sixth review #1): the SUCCESS-contradiction guard runs
+      // BEFORE the inconclusive branch — a recorded acceptance must never be
+      // silently downgraded to a routine "inconclusive" report.
+      if (head.status === 'SUCCESS') {
+        // A persisted SUCCESS is NEVER automatically retried. ANY non-SUCCESS
+        // authority response for this exact uid — an explicit FAILED/other
+        // status, a PENDING, or an empty response — contradicts the recorded
+        // acceptance and surfaces as SANDBOX_RECONCILE_CONTRADICTION; it can
+        // never unlock retry. Only a fresh SUCCESS re-confirms it.
+        if (!result || result.status !== 'SUCCESS') {
+          const shape = !result ? 'empty response' : `authority status: ${result.status}`;
+          steps.push(
+            this.step(
+              'sandbox_reconcile',
+              'FAIL',
+              startedAt,
+              'پاسخ سامانه با تأیید ثبت‌شدهٔ قبلی در تناقض است — بدون ارسال مجدد و بدون بازنویسی وضعیت؛ بررسی عملیاتی لازم است.',
+              'SANDBOX_RECONCILE_CONTRADICTION',
+              'شناسه پیگیری را با سامانه مؤدیان تطبیق دهید؛ تا رفع تناقض هیچ ارسال جدیدی انجام نمی‌شود.',
+            ),
+          );
+          return await sandboxResult('FAIL', head.uid, 'SUCCESS', head.referenceNumber, `contradiction for accepted uid: ${shape}`, {
+            errorCode: 'SANDBOX_RECONCILE_CONTRADICTION',
+          });
+        }
+        // fresh authoritative re-confirmation of the recorded acceptance —
+        // report WITHOUT enqueueing
+        head = await this.prisma.moadianDiagnosticAttempt.update({
+          where: { id: head.id },
+          data: {
+            confirmationReferenceId: result.confirmationReferenceId || head.confirmationReferenceId,
+            taxResult: result.taxResult || head.taxResult,
+            inquiredAt: new Date(),
+          },
+        });
+        steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'ارسال قبلی در مودیان دوباره تأیید شد — بدون ارسال مجدد.'));
+        return await sandboxResult('PASS', head.uid, 'SUCCESS', head.referenceNumber, 'تأیید قبلی بازیابی شد.');
+      }
       if (!result || result.status === 'PENDING') {
-        // INCONCLUSIVE inquiry (empty response or still pending): the head
-        // status — including a persisted REJECTED — is NEVER treated as
-        // retry permission. Retry requires a FRESH, explicit, authoritative
-        // rejection for this exact uid (fifth review #1).
+        // INCONCLUSIVE inquiry (empty response or still pending) for a
+        // NON-accepted uid: the head status — including a persisted REJECTED
+        // — is NEVER treated as retry permission. Retry requires a FRESH,
+        // explicit, authoritative rejection for this exact uid (fifth
+        // review #1).
         steps.push(
           this.step(
             'sandbox_reconcile',
@@ -496,20 +542,6 @@ export class MoadianDiagnosticService {
           ),
         );
         return await sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `inconclusive outcome: ${head.status}`);
-      }
-      if (head.status === 'SUCCESS' && result.status !== 'SUCCESS') {
-        // contradiction: a previously accepted uid is now reported otherwise —
-        // a reported acceptance is never auto-retried; escalate to operator
-        steps.push(
-          this.step(
-            'sandbox_reconcile',
-            'FAIL',
-            startedAt,
-            'تناقض میان تأیید قبلی و پاسخ فعلی سامانه — بدون تغییر و بدون ارسال مجدد؛ بررسی عملیاتی لازم است.',
-            'SANDBOX_RECONCILE_CONTRADICTION',
-          ),
-        );
-        return await sandboxResult('FAIL', head.uid, 'SUCCESS', head.referenceNumber, `contradictory inquiry result: ${result.status}`);
       }
       if (result.status !== 'SUCCESS' && result.status !== 'FAILED') {
         // authoritative non-final answer — persist honest UNKNOWN
