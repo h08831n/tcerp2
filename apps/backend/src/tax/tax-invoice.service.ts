@@ -298,7 +298,17 @@ export class TaxInvoiceService {
    *  resend. Returns the resolved invoice status:
    *  'SUBMITTED' (still pending at the authority — caller waits),
    *  'SUCCESS', or 'FAILED' (safe to retry). Newer attempt outcomes always
-   *  win over older ones — stale responses never overwrite newer state. */
+   *  win over older ones — stale responses never overwrite newer state.
+   *
+   *  RECOVERY CONSISTENCY (ninth review): every submission+invoice state
+   *  transition is ONE database transaction — a partial write (submission
+   *  terminal while the invoice stays stale) can never be persisted. A
+   *  database failure during recovery is INCONCLUSIVE ('SUBMITTED' → the
+   *  caller waits; it must NEVER be read as safe-to-retry). With NO PENDING
+   *  submission, the latest persisted attempt is reconciled against the
+   *  parent invoice: an accepted (SUCCESS) attempt repairs the invoice and
+   *  NEVER unlocks a new send; only an AUTHORITATIVE FAILED attempt unlocks
+   *  the official retry. */
   private async recoverPending(
     companyId: string,
     invoiceId: string,
@@ -307,52 +317,131 @@ export class TaxInvoiceService {
       where: { invoiceId, companyId, status: 'PENDING' },
       orderBy: { attempt: 'desc' },
     });
-    if (pending.length === 0) return 'FAILED'; // nothing at the authority → safe retry
-    const results = await this.adapter.inquiryByUid(pending.map((s) => s.uid));
-    const byUid = new Map(results.map((r) => [r.uid, r]));
-    for (const submission of pending) {
-      const result = byUid.get(submission.uid);
-      if (!result || result.status === 'PENDING') continue;
-      await this.prisma.salesTaxInvoiceSubmission.update({
-        where: { id: submission.id },
-        data: {
-          status: result.status,
-          errorCode: result.errorCode || null,
-          errorDetail: result.errorDetail || null,
-          confirmationReferenceId: result.confirmationReferenceId || null,
-          taxResult: result.taxResult || null,
-          inquiredAt: new Date(),
-        },
-      });
+    if (pending.length > 0) {
+      const results = await this.adapter.inquiryByUid(pending.map((s) => s.uid));
+      const byUid = new Map(results.map((r) => [r.uid, r]));
+      const latest = pending[0]; // newest attempt (attempt desc)
+      const latestResult = byUid.get(latest.uid);
+      for (const submission of pending) {
+        const result = byUid.get(submission.uid);
+        if (!result || result.status === 'PENDING') continue;
+        const isLatest = submission.id === latest.id;
+        try {
+          // submission + (for the newest attempt) invoice in ONE transaction:
+          // either both persist or neither does
+          await this.prisma.$transaction(async (tx) => {
+            await tx.salesTaxInvoiceSubmission.update({
+              where: { id: submission.id },
+              data: {
+                status: result.status,
+                errorCode: result.errorCode || null,
+                errorDetail: result.errorDetail || null,
+                confirmationReferenceId: result.confirmationReferenceId || null,
+                taxResult: result.taxResult || null,
+                inquiredAt: new Date(),
+              },
+            });
+            if (isLatest && result.status === 'SUCCESS') {
+              await tx.salesTaxInvoice.update({
+                where: { id: invoiceId },
+                data: {
+                  status: 'SUCCESS',
+                  moadianStatus: 'SUCCESS',
+                  moadianError: null,
+                  confirmationReferenceId: result.confirmationReferenceId || null,
+                  taxResult: result.taxResult || null,
+                },
+              });
+            } else if (isLatest && result.status === 'FAILED') {
+              await tx.salesTaxInvoice.update({
+                where: { id: invoiceId },
+                data: {
+                  status: 'FAILED',
+                  moadianStatus: 'FAILED',
+                  moadianError: `${result.errorCode ?? ''}: ${result.errorDetail ?? ''}`,
+                },
+              });
+            }
+          });
+        } catch {
+          // local persistence failed AFTER the remote answer: the transaction
+          // rolled back BOTH writes, the submission stays PENDING with its
+          // durable uid — an INCONCLUSIVE state. The caller waits; retrying
+          // over an unknown outcome is forbidden.
+          return 'SUBMITTED';
+        }
+      }
+      if (latestResult?.status === 'SUCCESS') return 'SUCCESS';
+      if (latestResult?.status === 'FAILED') return 'FAILED';
+      return 'SUBMITTED';
     }
-    const latest = pending[0]; // newest attempt (attempt desc)
-    const latestResult = byUid.get(latest.uid);
-    let resolved: 'SUBMITTED' | 'SUCCESS' | 'FAILED' = 'SUBMITTED';
-    if (latestResult?.status === 'SUCCESS') {
-      await this.prisma.salesTaxInvoice.update({
-        where: { id: invoiceId },
-        data: {
-          status: 'SUCCESS',
-          moadianStatus: 'SUCCESS',
-          moadianError: null,
-          confirmationReferenceId: latestResult.confirmationReferenceId || null,
-          taxResult: latestResult.taxResult || null,
-        },
-      });
-      resolved = 'SUCCESS';
-    } else if (latestResult?.status === 'FAILED') {
-      await this.prisma.salesTaxInvoice.update({
-        where: { id: invoiceId },
-        data: {
-          status: 'FAILED',
-          moadianStatus: 'FAILED',
-          moadianError: `${latestResult.errorCode ?? ''}: ${latestResult.errorDetail ?? ''}`,
-        },
-      });
-      resolved = 'FAILED';
+
+    // NO PENDING submission: an empty query is NOT proof that retry is safe
+    // (a partially-persisted SUCCESS would otherwise unlock a duplicate).
+    // Reconcile the latest persisted attempt's terminal state with the
+    // parent invoice (ninth review #2).
+    const invoiceRow = await this.prisma.salesTaxInvoice.findUniqueOrThrow({
+      where: { id: invoiceId },
+      select: { status: true, confirmationReferenceId: true, taxResult: true },
+    });
+    const latestAny = await this.prisma.salesTaxInvoiceSubmission.findFirst({
+      where: { invoiceId, companyId },
+      orderBy: { attempt: 'desc' },
+    });
+    if (!latestAny) {
+      // genuinely nothing was ever sent — no uid exists. A stale SENDING
+      // status can only come from a crashed claim before any packet existed:
+      // restore READY so the next send is a normal (retry=false) first attempt.
+      if (invoiceRow.status === 'SENDING') {
+        await this.prisma.salesTaxInvoice
+          .update({ where: { id: invoiceId }, data: { status: 'READY' } })
+          .catch(() => undefined);
+      }
+      return 'FAILED';
     }
-    // older attempts update only their own rows — never the invoice status
-    return resolved;
+    if (latestAny.status === 'SUCCESS') {
+      // an ACCEPTED attempt exists — repair any stale invoice status and
+      // NEVER unlock a new send over an accepted uid
+      if (invoiceRow.status !== 'SUCCESS') {
+        try {
+          await this.prisma.salesTaxInvoice.update({
+            where: { id: invoiceId },
+            data: {
+              status: 'SUCCESS',
+              moadianStatus: 'SUCCESS',
+              moadianError: null,
+              confirmationReferenceId: latestAny.confirmationReferenceId || invoiceRow.confirmationReferenceId || null,
+              taxResult: latestAny.taxResult || invoiceRow.taxResult || null,
+            },
+          });
+        } catch {
+          return 'SUBMITTED'; // repair failed → inconclusive; never retry over an accepted uid
+        }
+      }
+      return 'SUCCESS';
+    }
+    if (latestAny.status === 'FAILED') {
+      // an AUTHORITATIVE rejection is recorded — repair a stale in-flight
+      // invoice status so the official retry can proceed
+      if (invoiceRow.status === 'SENDING' || invoiceRow.status === 'SUBMITTED') {
+        try {
+          await this.prisma.salesTaxInvoice.update({
+            where: { id: invoiceId },
+            data: {
+              status: 'FAILED',
+              moadianStatus: 'FAILED',
+              moadianError: latestAny.errorCode
+                ? `${latestAny.errorCode}: ${latestAny.errorDetail ?? ''}`
+                : latestAny.errorDetail ?? null,
+            },
+          });
+        } catch {
+          return 'SUBMITTED'; // repair failed → inconclusive, wait
+        }
+      }
+      return 'FAILED';
+    }
+    return 'SUBMITTED'; // PENDING latest (defensive) → wait
   }
 
   /** Atomic claim: only one concurrent caller can move READY→SENDING.
@@ -390,8 +479,15 @@ export class TaxInvoiceService {
         // late success recovered from the authority — report it, never resend
         return { status: 'SUCCESS' as const, recoveredLateSuccess: true };
       }
-      // recovered FAILED → invoice status updated; continue to official retry
-      authoritativeFailure = true;
+      // recovered FAILED — the retry flag depends on WHAT failed: a FAILED
+      // row is an authoritative rejection (retry=true); a READY row means
+      // nothing was ever sent (crashed claim before any uid existed) and the
+      // next send is a normal first attempt
+      const row = await this.prisma.salesTaxInvoice.findUniqueOrThrow({
+        where: { id: invoiceId },
+        select: { status: true },
+      });
+      authoritativeFailure = row.status === 'FAILED';
     }
     // strict sendable gate: a SUBMITTED invoice always goes through
     // inquiry() first (p8-04 contract) — send() can never bypass the
@@ -421,6 +517,26 @@ export class TaxInvoiceService {
       }
       // prior attempt is definitively FAILED → fall through to a safe retry
       authoritativeFailure = true;
+    } else if (invoice.status === 'FAILED') {
+      // NO PENDING attempt: an empty PENDING query is not proof that retry is
+      // safe (ninth review #2) — a torn partial write may have persisted an
+      // ACCEPTED attempt while the invoice shows FAILED. Verify the latest
+      // persisted attempt before minting a new uid.
+      const hasHistory = await this.prisma.salesTaxInvoiceSubmission.count({
+        where: { invoiceId, companyId },
+      });
+      if (hasHistory > 0) {
+        const verified = await this.recoverPending(companyId, invoiceId);
+        if (verified === 'SUCCESS') {
+          return { status: 'SUCCESS' as const, recoveredLateSuccess: true };
+        }
+        if (verified === 'SUBMITTED') {
+          return { status: 'SUBMITTED' as const, awaitingInquiry: true };
+        }
+        // verified FAILED: the authority definitively rejected the latest
+        // attempt — official retry proceeds
+        authoritativeFailure = true;
+      }
     }
     const isRetry = authoritativeFailure || invoice.status === 'FAILED';
     // atomic claim (like the loading allocation pattern): READY/FAILED → SENDING
@@ -570,37 +686,56 @@ export class TaxInvoiceService {
     for (const submission of pending) {
       const result = byUid.get(submission.uid);
       if (!result || result.status === 'PENDING') continue;
-      await this.prisma.salesTaxInvoiceSubmission.update({
-        where: { id: submission.id },
-        data: {
-          status: result.status,
-          errorCode: result.errorCode || null,
-          errorDetail: result.errorDetail || null,
-          confirmationReferenceId: result.confirmationReferenceId || null,
-          taxResult: result.taxResult || null,
-          inquiredAt: new Date(),
-        },
-      });
-      if (submission.id !== latest.id) continue; // stale attempt: row only
-      if (result.status === 'SUCCESS') {
-        await this.prisma.salesTaxInvoice.update({
-          where: { id: invoiceId },
+      if (submission.id !== latest.id) {
+        // stale attempt: its own row only — never the invoice status
+        await this.prisma.salesTaxInvoiceSubmission.update({
+          where: { id: submission.id },
           data: {
-            status: 'SUCCESS',
-            moadianStatus: 'SUCCESS',
-            moadianError: null,
+            status: result.status,
+            errorCode: result.errorCode || null,
+            errorDetail: result.errorDetail || null,
             confirmationReferenceId: result.confirmationReferenceId || null,
             taxResult: result.taxResult || null,
+            inquiredAt: new Date(),
           },
         });
-        finalStatus = 'SUCCESS';
-      } else {
-        await this.prisma.salesTaxInvoice.update({
-          where: { id: invoiceId },
-          data: { status: 'FAILED', moadianStatus: 'FAILED', moadianError: `${result.errorCode}: ${result.errorDetail ?? ''}` },
-        });
-        finalStatus = 'FAILED';
+        continue;
       }
+      // newest attempt: submission + invoice in ONE transaction — a failure
+      // after the remote answer rolls back BOTH writes and leaves the
+      // submission PENDING (recoverable, same uid) instead of a torn state
+      // that could later be misread as safe-to-retry (ninth review #3)
+      await this.prisma.$transaction(async (tx) => {
+        await tx.salesTaxInvoiceSubmission.update({
+          where: { id: submission.id },
+          data: {
+            status: result.status,
+            errorCode: result.errorCode || null,
+            errorDetail: result.errorDetail || null,
+            confirmationReferenceId: result.confirmationReferenceId || null,
+            taxResult: result.taxResult || null,
+            inquiredAt: new Date(),
+          },
+        });
+        if (result.status === 'SUCCESS') {
+          await tx.salesTaxInvoice.update({
+            where: { id: invoiceId },
+            data: {
+              status: 'SUCCESS',
+              moadianStatus: 'SUCCESS',
+              moadianError: null,
+              confirmationReferenceId: result.confirmationReferenceId || null,
+              taxResult: result.taxResult || null,
+            },
+          });
+        } else {
+          await tx.salesTaxInvoice.update({
+            where: { id: invoiceId },
+            data: { status: 'FAILED', moadianStatus: 'FAILED', moadianError: `${result.errorCode}: ${result.errorDetail ?? ''}` },
+          });
+        }
+      });
+      finalStatus = result.status;
     }
     return { status: finalStatus ?? 'PENDING' };
   }

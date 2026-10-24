@@ -18,6 +18,7 @@ const ACTOR = { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' };
 class FakeMoadianAdapter {
   failEnqueue = false;
   inquiryQueue: Array<'PENDING' | 'SUCCESS' | 'FAILED'> = [];
+  inquired: string[] = [];
   enqueued: Array<{ uid: string; retry: boolean }> = [];
 
   async getToken() {
@@ -29,6 +30,7 @@ class FakeMoadianAdapter {
     return packets.map((p) => ({ uid: p.uid, referenceNumber: `ref-${p.uid.slice(0, 8)}` }));
   }
   async inquiryByUid(uids: string[]) {
+    this.inquired.push(...uids);
     return uids.map((uid) => {
       const next = this.inquiryQueue.shift() ?? 'SUCCESS';
       if (next === 'PENDING') return { uid, status: 'PENDING' as const };
@@ -425,4 +427,151 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     });
     expect(lines.reduce((s, l) => s.plus(l.quantity), new Prisma.Decimal(0)).toString()).toBe('10');
   });
-});
+
+
+  // ninth review — recovery consistency: submission+invoice transitions are
+  // ONE transaction, a DB failure after the remote answer is INCONCLUSIVE
+  // (never safe-to-retry), and a persisted SUCCESS attempt never unlocks a
+  // new send
+  itif(
+    'p8-17a invoice-update failure after remote SUCCESS rolls back the transaction; same uid re-inquired, no new uid/enqueue',
+    async () => {
+      const { doc } = await makeDoc('9');
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const sent = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(sent.status).toBe('SUBMITTED');
+      const uid = sent.uid!;
+      await prisma.salesTaxInvoice.update({ where: { id: invoice.id }, data: { status: 'SENDING' } });
+      fakeAdapter.inquiryQueue.push('PENDING'); // authority still holds packet #1
+
+      // inject a deterministic failure in the PARENT invoice update INSIDE
+      // the recovery transaction, after the remote inquiry answered
+      const realTransaction = prisma.$transaction.bind(prisma);
+      const txSpy = jest
+        .spyOn(prisma, '$transaction')
+        .mockImplementationOnce((async (arg: unknown) => {
+          return realTransaction(async (tx: Prisma.TransactionClient) => {
+            const failingTx = new Proxy(tx, {
+              get(target, prop) {
+                if (prop === 'salesTaxInvoice') {
+                  return new Proxy(target.salesTaxInvoice, {
+                    get(t, p) {
+                      if (p === 'update') {
+                        return () => Promise.reject(new Error('INJECTED: invoice update failure'));
+                      }
+                      const v = Reflect.get(t, p, t);
+                      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+                    },
+                  });
+                }
+                return Reflect.get(target, prop);
+              },
+            });
+            return (arg as (tx: Prisma.TransactionClient) => unknown)(failingTx);
+          });
+        }) as never);
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      const inquiredBefore = fakeAdapter.inquired.filter((u) => u === uid).length;
+      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_SEND_IN_PROGRESS');
+      txSpy.mockRestore();
+      // the transaction rolled back BOTH writes: submission stays PENDING
+      // (recoverable, durable uid) and the invoice keeps its pre-recovery state
+      const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
+      expect(submission.status).toBe('PENDING');
+      const afterFailure = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(afterFailure.status).toBe('SENDING');
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // no new uid was minted
+      expect(fakeAdapter.inquired.filter((u) => u === uid).length).toBe(inquiredBefore + 1);
+
+      // a subsequent recovery inquiries the SAME persisted uid and converges
+      fakeAdapter.inquiryQueue.push('SUCCESS');
+      const retried = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(retried.status).toBe('SUCCESS');
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // STILL no enqueue
+      expect(fakeAdapter.inquired.filter((u) => u === uid).length).toBe(inquiredBefore + 2); // same uid
+      const promoted = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(promoted.status).toBe('SUCCESS');
+      expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
+    },
+  );
+
+  itif(
+    'p8-17b persisted SUCCESS attempt is never misclassified as safe-to-retry (torn partial write repaired)',
+    async () => {
+      const { doc } = await makeDoc('7');
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const sent = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(sent.status).toBe('SUBMITTED');
+      // simulate the torn state the defect produced: submission terminal
+      // SUCCESS, parent invoice stale FAILED (worst case — sendable!)
+      await prisma.salesTaxInvoiceSubmission.update({
+        where: { uid: sent.uid! },
+        data: { status: 'SUCCESS', confirmationReferenceId: 'conf-torn' },
+      });
+      await prisma.salesTaxInvoice.update({
+        where: { id: invoice.id },
+        data: { status: 'FAILED', moadianStatus: 'FAILED', moadianError: 'stale' },
+      });
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      const res = await service.send(COMPANY, invoice.id, ACTOR);
+      // the accepted attempt is detected: retry is REJECTED, success reported
+      expect(res.status).toBe('SUCCESS');
+      expect(res.recoveredLateSuccess).toBe(true);
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // NO new uid, NO duplicate
+      const repaired = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(repaired.status).toBe('SUCCESS');
+      expect(repaired.confirmationReferenceId).toBe('conf-torn'); // from the persisted accepted attempt
+      expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
+    },
+  );
+
+  itif(
+    'p8-17c inquiry() has the same atomic protection: parent-update failure rolls back, submission stays recoverable',
+    async () => {
+      const { doc } = await makeDoc('5');
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const sent = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(sent.status).toBe('SUBMITTED');
+      const uid = sent.uid!;
+      const realTransaction = prisma.$transaction.bind(prisma);
+      const txSpy = jest
+        .spyOn(prisma, '$transaction')
+        .mockImplementationOnce((async (arg: unknown) => {
+          return realTransaction(async (tx: Prisma.TransactionClient) => {
+            const failingTx = new Proxy(tx, {
+              get(target, prop) {
+                if (prop === 'salesTaxInvoice') {
+                  return new Proxy(target.salesTaxInvoice, {
+                    get(t, p) {
+                      if (p === 'update') {
+                        return () => Promise.reject(new Error('INJECTED: invoice update failure'));
+                      }
+                      const v = Reflect.get(t, p, t);
+                      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+                    },
+                  });
+                }
+                return Reflect.get(target, prop);
+              },
+            });
+            return (arg as (tx: Prisma.TransactionClient) => unknown)(failingTx);
+          });
+        }) as never);
+      fakeAdapter.inquiryQueue.push('SUCCESS');
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      await expect(service.inquiry(COMPANY, invoice.id)).rejects.toThrow('INJECTED');
+      txSpy.mockRestore();
+      // rolled back: the submission remains PENDING with its durable uid
+      const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({ where: { uid } });
+      expect(submission.status).toBe('PENDING');
+      // a later inquiry (no injection) recovers on the SAME uid — no resend
+      fakeAdapter.inquiryQueue.push('SUCCESS');
+      const recovered = await service.inquiry(COMPANY, invoice.id);
+      expect(recovered.status).toBe('SUCCESS');
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+      expect(fakeAdapter.inquired.filter((u) => u === uid).length).toBe(2); // same uid both times
+      const promoted = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(promoted.status).toBe('SUCCESS');
+      expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
+    },
+  );});
