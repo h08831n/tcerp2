@@ -694,16 +694,26 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
     const enqueuedBefore = enqueuedUids.length;
     const res = await svc.runSandboxFullTest(companyId);
     expect(res.report.overall).toBe("FAIL");
-    // classification: the step is an INQUIRY failure — the authority said
-    // nothing, so no contradiction is claimed
+    // seventh review #1: the TOP-LEVEL API result carries the stable
+    // SANDBOX_INQUIRY_FAILED classification, agreeing with the step
     const reconcileStep = res.report.steps.find((s) => s.step === "sandbox_reconcile");
+    expect(res.errorCode).toBe("SANDBOX_INQUIRY_FAILED");
     expect(reconcileStep?.errorCode).toBe("SANDBOX_INQUIRY_FAILED");
+    expect(res.errorCode).toBe(reconcileStep?.errorCode); // API response and step agree
+    // sanitized network classification appears in the step details
+    expect(reconcileStep?.message).toContain("NETWORK_ERROR");
+    // the authority said nothing, so no contradiction is claimed anywhere
     expect(res.report.steps.some((s) => s.errorCode === "SANDBOX_RECONCILE_CONTRADICTION")).toBe(false);
-    expect(res.submission?.status).toBe("SUCCESS"); // unchanged, consistent
-    expect(enqueuedUids.length).toBe(enqueuedBefore); // zero enqueue
+    // persisted states unchanged: same uid, attempt and aggregate stay SUCCESS
+    expect(res.submission?.uid).toBe("sandbox-acc-transport-1");
+    expect(res.submission?.status).toBe("SUCCESS");
+    expect(enqueuedUids.length).toBe(enqueuedBefore); // zero enqueue, zero retry
     expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
     const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
       where: { companyId, uid: "sandbox-acc-transport-1" },
     });
     expect(attempt.status).toBe("SUCCESS");
+    expect(attempt.uid).toBe("sandbox-acc-transport-1");
+    const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+    expect(runRow.status).toBe("SUCCESS"); // aggregate unchanged
   });});

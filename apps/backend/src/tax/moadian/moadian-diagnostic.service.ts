@@ -484,7 +484,20 @@ export class MoadianDiagnosticService {
             'SANDBOX_INQUIRY_FAILED',
           ),
         );
-        return await sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `reconcile inquiry failed: ${code}`);
+        return await sandboxResult(
+          'FAIL',
+          head.uid,
+          head.status,
+          head.referenceNumber,
+          // sanitized network classification in the details (stable enum code
+          // + fixed message from classifyNetworkError — never raw bodies)
+          `reconcile inquiry failed: ${code}: ${message}`,
+          // seventh review #1: the API result carries the SAME stable
+          // classification the step records — a transport failure is an
+          // inquiry failure, never an authoritative rejection or a
+          // SANDBOX_RECONCILE_CONTRADICTION
+          { errorCode: 'SANDBOX_INQUIRY_FAILED' },
+        );
       }
       const result = results[0];
       // POLICY ORDER (sixth review #1): the SUCCESS-contradiction guard runs
