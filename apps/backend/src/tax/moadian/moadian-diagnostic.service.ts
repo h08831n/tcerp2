@@ -373,7 +373,12 @@ export class MoadianDiagnosticService {
         return {
           report: { mode: base.mode, overall: 'FAIL' as const, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
           submission: { uid, status, referenceNumber, detail },
-          errorCode: opts.errorCode ?? 'SANDBOX_AGGREGATE_SYNC_FAILED',
+          // ERROR PRECEDENCE (eighth review #1): a genuine aggregate
+          // persistence failure ALWAYS wins the top-level errorCode — a
+          // caller-supplied classification (e.g. SANDBOX_INQUIRY_FAILED)
+          // never masks it. The original inquiry classification stays
+          // visible in its own sanitized step above.
+          errorCode: 'SANDBOX_AGGREGATE_SYNC_FAILED',
         };
       }
       return {

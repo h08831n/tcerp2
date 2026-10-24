@@ -1,0 +1,52 @@
+  itif(
+    "p8-22 combined failure: inquiry transport failure + aggregate sync failure -> SANDBOX_AGGREGATE_SYNC_FAILED wins, both classifications reported",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      await seedAcceptedHead("sandbox-acc-syncfail-1");
+      inquiryFailures = 1; // transport failure on the reconcile inquiry
+      inquiryFailureKind = "error";
+      // deterministic aggregate persistence failure
+      const updateSpy = jest
+        .spyOn(prisma.moadianDiagnosticRun, "update")
+        .mockRejectedValue(new Error("db down"));
+      try {
+        const enqueuedBefore = enqueuedUids.length;
+        const res = await svc.runSandboxFullTest(companyId);
+        expect(res.report.overall).toBe("FAIL");
+        // eighth review #1: a genuine aggregate persistence failure ALWAYS
+        // wins the top-level errorCode — the caller's SANDBOX_INQUIRY_FAILED
+        // must not mask it
+        expect(res.errorCode).toBe("SANDBOX_AGGREGATE_SYNC_FAILED");
+        // the report identifies BOTH failures, each with its own step:
+        // the original inquiry classification (sanitized) and the persistence failure
+        const inquiryStep = res.report.steps.find((s) => s.errorCode === "SANDBOX_INQUIRY_FAILED");
+        const persistenceStep = res.report.steps.find((s) => s.errorCode === "SANDBOX_AGGREGATE_SYNC_FAILED");
+        expect(inquiryStep).toBeDefined();
+        expect(persistenceStep).toBeDefined();
+        expect(inquiryStep?.message).toContain("NETWORK_ERROR"); // sanitized classification
+        expect(persistenceStep?.step).toBe("sandbox_persistence");
+        // no secrets in any diagnostic detail
+        for (const s of res.report.steps) {
+          expect(s.message).not.toContain("PRIVATE KEY");
+          expect(s.message).not.toContain("BEGIN CERTIFICATE");
+        }
+        // persisted states unchanged: same uid, attempt and aggregate stay SUCCESS
+        expect(res.submission?.uid).toBe("sandbox-acc-syncfail-1");
+        expect(res.submission?.status).toBe("SUCCESS");
+        expect(enqueuedUids.length).toBe(enqueuedBefore); // zero retry, zero enqueue
+        expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+        const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+          where: { companyId, uid: "sandbox-acc-syncfail-1" },
+        });
+        expect(attempt.status).toBe("SUCCESS");
+        expect(attempt.uid).toBe("sandbox-acc-syncfail-1");
+        // the aggregate could not be updated — it stays honestly at SUCCESS
+        const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+        expect(runRow.status).toBe("SUCCESS");
+      } finally {
+        updateSpy.mockRestore();
+      }
+    },
+  );
