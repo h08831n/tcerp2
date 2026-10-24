@@ -2,7 +2,8 @@ import { Test } from '@nestjs/testing';
 import { MockMoadianAdapter } from './mock-moadian.adapter';
 import { MoadianHttpAdapter } from './moadian-http.adapter';
 import { MOADIAN_ADAPTER, MoadianAdapter } from './moadian-adapter';
-import { buildMoadianAdapter, loadMoadianConfigFromEnv, MoadianConfigError } from './adapter-factory';
+import { buildMoadianAdapter, loadMoadianConfigFromEnv, validateMoadianBaseUrl, MoadianConfigError } from './adapter-factory';
+import { OTHER_PRIVATE_PEM } from './test-certs';
 import { MOADIAN_ADAPTER_PROVIDER } from '../tax.module';
 import { TEST_PRIVATE_PEM, TEST_CERT_PEM, OTHER_CERT_PEM } from './test-certs';
 
@@ -109,6 +110,38 @@ describe('Moadian adapter factory (real provider configuration path)', () => {
       expect(e).not.toBeInstanceOf(MoadianConfigError); // cert-level, not env-level
     }
     expect(threw).toBe(true); // loud failure — MockMoadianAdapter never returned
+  });
+
+  it('destination allowlist: malicious/malformed/private/redirect URLs rejected (SSRF)', () => {
+    // malformed
+    expect(() => validateMoadianBaseUrl('not a url')).toThrow(/malformed/);
+    // wrong scheme
+    expect(() => validateMoadianBaseUrl('http://tp.tax.gov.ir')).toThrow(/HTTPS/);
+    // wrong port
+    expect(() => validateMoadianBaseUrl('https://tp.tax.gov.ir:8443')).toThrow(/not allowlisted/);
+    // path-carrying base (paths belong to the adapter)
+    expect(() => validateMoadianBaseUrl('https://tp.tax.gov.ir/api/v2')).toThrow(/path .* is not allowlisted/);
+    // loopback/internal
+    expect(() => validateMoadianBaseUrl('https://localhost')).toThrow(/loopback/);
+    expect(() => validateMoadianBaseUrl('https://127.0.0.1')).toThrow(/loopback/);
+    expect(() => validateMoadianBaseUrl('https://moad.internal')).toThrow(/loopback/);
+    // private ranges
+    expect(() => validateMoadianBaseUrl('https://10.0.0.5')).toThrow(/private-network/);
+    expect(() => validateMoadianBaseUrl('https://192.168.1.5')).toThrow(/private-network/);
+    expect(() => validateMoadianBaseUrl('https://172.16.0.9')).toThrow(/private-network/);
+    expect(() => validateMoadianBaseUrl('https://169.254.10.10')).toThrow(/private-network/);
+    // non-allowlisted external host
+    expect(() => validateMoadianBaseUrl('https://evil.example.com')).toThrow(/not allowlisted/);
+  });
+
+  it('destination allowlist: official host passes and extra hosts via explicit env exception', () => {
+    expect(() => validateMoadianBaseUrl('https://tp.tax.gov.ir/requestsmanager/api/v2')).not.toThrow();
+    expect(() => validateMoadianBaseUrl('https://tp.tax.gov.ir/')).toThrow(/not allowlisted/);
+    const saved = process.env.MOADIAN_EXTRA_ALLOWED_HOSTS;
+    process.env.MOADIAN_EXTRA_ALLOWED_HOSTS = 'sandbox2.tax.gov.ir';
+    expect(() => validateMoadianBaseUrl('https://sandbox2.tax.gov.ir/requestsmanager/api/v2')).not.toThrow();
+    if (saved === undefined) delete process.env.MOADIAN_EXTRA_ALLOWED_HOSTS;
+    else process.env.MOADIAN_EXTRA_ALLOWED_HOSTS = saved;
   });
 
   it('PEM escaped newlines are unescaped exactly once (no double-unescape)', () => {

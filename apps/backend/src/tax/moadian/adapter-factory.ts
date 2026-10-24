@@ -32,6 +32,60 @@ export interface MoadianLiveConfig {
   certificatePem: string;
 }
 
+/** Destination allowlist (docs/08 security): only the official Moadian
+ *  requestsmanager host over HTTPS is permitted by default; an explicit,
+ *  tightly controlled deployment exception may add hosts via
+ *  MOADIAN_EXTRA_ALLOWED_HOSTS (comma-separated exact hostnames). Loopback,
+ *  private, link-local and arbitrary internal hosts are always rejected. */
+const MOADIAN_ALLOWED_HOSTS = ['tp.tax.gov.ir'];
+
+export function validateMoadianBaseUrl(baseUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new MoadianConfigError('MOADIAN_BASE_URL is malformed: not a valid URL');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new MoadianConfigError(
+      `MOADIAN_BASE_URL must use HTTPS (got ${parsed.protocol}) — plaintext or custom schemes are rejected`,
+    );
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // loopback/private/link-local/IP-literal rejection FIRST (SSRF hardening) —
+  // before any allowlist check, so an allowlisted-looking internal name
+  // cannot sneak through via an env exception
+  if (['localhost', '127.0.0.1', '::1'].includes(host) || host.endsWith('.local') || host.endsWith('.internal')) {
+    throw new MoadianConfigError(`MOADIAN_BASE_URL host "${host}" is a loopback/internal destination — rejected`);
+  }
+  if (/^(10|192\.168)\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host)) {
+    throw new MoadianConfigError(`MOADIAN_BASE_URL host "${host}" is a private-network address — rejected (SSRF)`);
+  }
+  const extra = (process.env.MOADIAN_EXTRA_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  const allowed = [...MOADIAN_ALLOWED_HOSTS, ...extra];
+  if (!allowed.includes(host)) {
+    throw new MoadianConfigError(
+      `MOADIAN_BASE_URL host "${host}" is not allowlisted — permitted: ${allowed.join(', ')}`,
+    );
+  }
+  const port = parsed.port || '443';
+  if (port !== '443') {
+    throw new MoadianConfigError(`MOADIAN_BASE_URL port ${port} is not allowlisted — only 443 (HTTPS)`);
+  }
+  // the official v2 base path is /requestsmanager/api/v2 — the adapter appends
+  // endpoint paths; anything else is rejected
+  const path = parsed.pathname.replace(/\/$/, '');
+  const allowedPath = '/requestsmanager/api/v2';
+  if (path !== allowedPath) {
+    throw new MoadianConfigError(
+      `MOADIAN_BASE_URL path "${path || '/'}" is not allowlisted — expected "${allowedPath}"`,
+    );
+  }
+}
+
 export function loadMoadianConfigFromEnv(env: NodeJS.ProcessEnv = process.env): {
   mode: MoadianMode;
   config?: Omit<MoadianLiveConfig, 'fetchImpl'>;
@@ -70,10 +124,12 @@ export function loadMoadianConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
     privateKeyPem: string;
     certificatePem: string;
   };
+  const baseUrl = env.MOADIAN_BASE_URL || 'https://tp.tax.gov.ir/requestsmanager/api/v2';
+  validateMoadianBaseUrl(baseUrl);
   return {
     mode,
     config: {
-      baseUrl: env.MOADIAN_BASE_URL || undefined,
+      baseUrl,
       ...present,
     },
   };

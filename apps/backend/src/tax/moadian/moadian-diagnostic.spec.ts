@@ -54,7 +54,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://nonexistent.invalid',
     };
     const report = await makeService(async () => {
       throw Object.assign(new Error('getaddrinfo failed'), { cause: { code: 'ENOTFOUND' } });
@@ -74,7 +73,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://moad-test.local',
     };
     const report = await makeService(async () => {
       throw Object.assign(new Error('cert expired'), { cause: { code: 'CERT_HAS_EXPIRED' } });
@@ -90,7 +88,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://moad-test.local',
     };
     const report = await makeService(async () => {
       throw Object.assign(new Error('The operation was aborted'), { cause: { code: 'ETIMEDOUT' } });
@@ -106,7 +103,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://moad-test.local',
     };
     const report = await makeService(async (input) => {
       const url = String(input);
@@ -139,7 +135,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://moad-test.local',
     };
     const report = await makeService(async (input, init) => {
       const url = String(input);
@@ -176,7 +171,6 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       MOADIAN_CLIENT_ID: 'C',
       MOADIAN_PRIVATE_KEY: TEST_PRIVATE_PEM,
       MOADIAN_CERTIFICATE: TEST_CERT_PEM,
-      MOADIAN_BASE_URL: 'https://moad-test.local',
     };
     const urls: string[] = [];
     const report = await makeService(async (input) => {
