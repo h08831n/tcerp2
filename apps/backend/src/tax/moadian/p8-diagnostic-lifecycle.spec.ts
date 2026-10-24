@@ -23,6 +23,8 @@ const COMPANY_IDS: string[] = [];
 let prismaService: PrismaService;
 let prisma: PrismaClient;
 let inquiryScript: Array<"PENDING" | "SUCCESS" | "FAILED"> = [];
+let inquiryFailures = 0;
+let inquiryFailureKind: "timeout" | "error" = "error";
 const enqueuedUids: string[] = [];
 
 function makeFetch(): typeof fetch {
@@ -48,6 +50,13 @@ function makeFetch(): typeof fetch {
       ) as never;
     }
     if (url.includes("INQUIRY_BY_UID")) {
+      if (inquiryFailures > 0) {
+        inquiryFailures -= 1;
+        if (inquiryFailureKind === "timeout") {
+          throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+        }
+        throw new Error("inquiry transport failure");
+      }
       const body = JSON.parse(String((init as RequestInit).body ?? "{}")) as { uidList: string[] };
       const results = body.uidList.map((uid) => {
         const next = inquiryScript.shift() ?? "SUCCESS";
@@ -264,4 +273,207 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
     });
     expect(attempt.status).toBe("UNKNOWN");
   });
-});
+
+  itif(
+    "p8-19a legacy claim-without-attempt crash window -> recovered safely, nothing resent",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      // fourth review #1 regression: aggregate claimed (SUBMITTED) but the
+      // attempt identity was never persisted. Attempt creation precedes
+      // enqueue in every code version, so nothing was ever sent — recovery
+      // starts attempt 1 with a fresh uid instead of getting stuck claimless.
+      await prisma.moadianDiagnosticRun.create({
+        data: { companyId, runDay: today(), fiscalId: "F-TEST", status: "SUBMITTED" },
+      });
+      const enqueuedBefore = enqueuedUids.length;
+      const res = await svc.runSandboxFullTest(companyId);
+      expect(res.submission?.status).toBe("SUCCESS");
+      const attempts = await prisma.moadianDiagnosticAttempt.findMany({ where: { companyId } });
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].attempt).toBe(1);
+      expect(attempts[0].status).toBe("SUCCESS");
+      expect(enqueuedUids.length).toBe(enqueuedBefore + 1);
+      expect(enqueuedUids.filter((u) => u === attempts[0].uid)).toHaveLength(1);
+    },
+  );
+
+  itif(
+    "p8-19b expired-lease PREPARED attempt -> resumed with the SAME uid and frozen packet",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      const run = await prisma.moadianDiagnosticRun.create({
+        data: { companyId, runDay: today(), fiscalId: "F-TEST", status: "SUBMITTED" },
+      });
+      // crash after claim+attempt, before enqueue — lease long expired
+      await prisma.moadianDiagnosticAttempt.create({
+        data: {
+          runId: run.id,
+          companyId,
+          attempt: 1,
+          uid: "sandbox-resume-uid-1",
+          retry: false,
+          status: "PREPARED",
+          createdAt: new Date(Date.now() - 10 * 60 * 1000),
+          payloadSnapshot: {
+            packets: [
+              {
+                uid: "sandbox-resume-uid-1",
+                packetType: "INVOICE.V01",
+                retry: false,
+                data: "{}",
+                dataSignature: "",
+                encryptionKeyId: "",
+                symmetricKey: "",
+                iv: "",
+                fiscalId: "F-TEST",
+              },
+            ],
+          },
+        },
+      });
+      const enqueuedBefore = enqueuedUids.length;
+      const res = await svc.runSandboxFullTest(companyId);
+      expect(res.submission?.uid).toBe("sandbox-resume-uid-1");
+      expect(res.submission?.status).toBe("SUCCESS");
+      const attempts = await prisma.moadianDiagnosticAttempt.findMany({ where: { companyId } });
+      expect(attempts).toHaveLength(1); // NO new attempt/uid was created
+      expect(enqueuedUids.length).toBe(enqueuedBefore + 1); // resumed exactly once
+      expect(enqueuedUids.filter((u) => u === "sandbox-resume-uid-1")).toHaveLength(1);
+    },
+  );
+
+  itif("p8-19c fresh-lease PREPARED attempt -> other instances back off (no enqueue)", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    const run = await prisma.moadianDiagnosticRun.create({
+      data: { companyId, runDay: today(), fiscalId: "F-TEST", status: "SUBMITTED" },
+    });
+    await prisma.moadianDiagnosticAttempt.create({
+      data: {
+        runId: run.id,
+        companyId,
+        attempt: 1,
+        uid: "sandbox-inprogress-uid-1",
+        retry: false,
+        status: "PREPARED",
+        payloadSnapshot: {},
+      },
+    });
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(res.submission?.status).toBe("PREPARED");
+    expect(res.errorCode).toBe("SANDBOX_CLAIM_IN_PROGRESS");
+    const attempts = await prisma.moadianDiagnosticAttempt.findMany({ where: { companyId } });
+    expect(attempts).toHaveLength(1);
+  });
+
+  itif(
+    "p8-19d aggregate sync failure -> result downgraded to FAIL, attempt state stays truthful",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      const updateSpy = jest
+        .spyOn(prisma.moadianDiagnosticRun, "update")
+        .mockRejectedValueOnce(new Error("db down"));
+      try {
+        const res = await svc.runSandboxFullTest(companyId);
+        expect(res.report.overall).toBe("FAIL");
+        expect(res.errorCode).toBe("SANDBOX_AGGREGATE_SYNC_FAILED");
+        expect(res.submission?.status).toBe("SUCCESS"); // the attempt DID succeed
+        const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+          where: { companyId },
+        });
+        expect(attempt.status).toBe("SUCCESS");
+        // the aggregate itself was NOT updated — honest, never falsely final
+        const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+        expect(runRow.status).not.toBe("SUCCESS");
+      } finally {
+        updateSpy.mockRestore();
+      }
+    },
+  );
+
+  itif(
+    "p8-19e inquiry timeout -> UNKNOWN persisted; restart reconciles later SUCCESS without resend",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      inquiryFailures = 1;
+      inquiryFailureKind = "timeout";
+      const res1 = await svc.runSandboxFullTest(companyId);
+      expect(res1.report.overall).toBe("FAIL");
+      expect(res1.submission?.status).toBe("UNKNOWN");
+      const uid = res1.submission!.uid;
+      const attempt1 = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+        where: { companyId, uid },
+      });
+      expect(attempt1.status).toBe("UNKNOWN"); // persisted BEFORE returning
+      expect(attempt1.errorCode).toBe("SANDBOX_INQUIRY_UNKNOWN");
+      const enqueuedAfterFirst = enqueuedUids.length;
+      // restart: a NEW service instance reconciles the persisted uid
+      inquiryFailures = 0;
+      inquiryScript = ["SUCCESS"];
+      const svc2 = makeService();
+      const res2 = await svc2.runSandboxFullTest(companyId);
+      expect(res2.submission?.uid).toBe(uid);
+      expect(res2.submission?.status).toBe("SUCCESS");
+      expect(enqueuedUids.length).toBe(enqueuedAfterFirst); // NO resend
+      expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    },
+  );
+
+  itif("p8-19f reconcile inquiry failure -> attempt unchanged, nothing resent", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    const run = await prisma.moadianDiagnosticRun.create({
+      data: { companyId, runDay: today(), fiscalId: "F-TEST", status: "SUBMITTED" },
+    });
+    await prisma.moadianDiagnosticAttempt.create({
+      data: {
+        runId: run.id,
+        companyId,
+        attempt: 1,
+        uid: "sandbox-reconcile-fail-1",
+        retry: false,
+        status: "SUBMITTED",
+        payloadSnapshot: {},
+      },
+    });
+    inquiryFailures = 1;
+    inquiryFailureKind = "error";
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(res.report.overall).toBe("FAIL");
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-reconcile-fail-1" },
+    });
+    expect(attempt.status).toBe("SUBMITTED"); // EXACTLY as before — untouched
+  });
+
+  itif(
+    "p8-19g aggregate in-flight with NO attempt row -> blocked (SANDBOX_ATTEMPT_IDENTITY_LOST)",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      await prisma.moadianDiagnosticRun.create({
+        data: { companyId, runDay: today(), fiscalId: "F-TEST", status: "PENDING" },
+      });
+      const enqueuedBefore = enqueuedUids.length;
+      const res = await svc.runSandboxFullTest(companyId);
+      expect(res.submission).toBeNull();
+      expect(res.errorCode).toBe("SANDBOX_ATTEMPT_IDENTITY_LOST");
+      expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(0);
+      expect(enqueuedUids.length).toBe(enqueuedBefore);
+    },
+  );});

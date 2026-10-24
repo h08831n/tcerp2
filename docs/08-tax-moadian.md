@@ -96,22 +96,44 @@
 - حالت mock: تمام گام‌های شبکه‌ای NOT_CONFIGURED — موفقیت mock هرگز اتصال
   واقعی نیست (تست‌شده).
 - حالت live: فقط گام‌های غیرتغییردهنده؛ آزمون کامل sandbox در live مسدود.
-- آزمون کامل sandbox — **state machine پایدار دو سطحی** (migrationهای
-  `20241022100000` + `20241022120000`): aggregate روزانه
+- آزمون کامل sandbox — **state machine پایدار crash-safe دو سطحی**
+  (migrationهای `20241022100000` + `20241022120000`): aggregate روزانه
   `MoadianDiagnosticRun` (یکتا روی شرکت/روز، fiscalId تغییرناپذیر) +
-  مدل `MoadianDiagnosticAttempt` — **هر تلاش ارسال یک ردیف با uid
-  تغییرناپذیر خودش قبل از submission** ثبت می‌کند. REJECTED (قطعی) → attempt
-  جدید با `retry=true` و uid جدید (تاریخچه حفظ می‌شود)؛ نتیجه نامشخص
-  (timeout/کرش/استعلام خالی) → attempt روی UNKNOWN/SUBMITTED می‌ماند و هر
-  فراخوانی بعدی با INQUIRY_BY_UID روی **همان uid پایدار** reconcile می‌شود —
-  ارسال مجدد کورکورانه هرگز رخ نمی‌دهد.
-- **ادعای اتمیک بین-نمونه‌ای**: claim با UPDATE شرطی روی aggregate
-  (`status IN (PREPARED, REJECTED) → SUBMITTED`) است — در هر لحظه فقط یک
-  نمونه مجاز به ساخت attempt و enqueue؛ بازنده فقط reconcile/گزارش می‌دهد و
-  هرگز ارسال نمی‌کند (p8-18c با دو نمونه سرویس مستقل روی DB مشترک). payload آزمایشی **کامل** است (taxid/tins/sstid از env
+  مدل `MoadianDiagnosticAttempt` — **claim و هویت attempt (uid تغییرناپذیر +
+  payload منجمد) در یک تراکنش کوتاه DB ثبت می‌شوند**؛ uid همیشه قبل از هر
+  فراخوانی خارجی وجود دارد و هیچ تراکنشی روی درخواست HTTP نگه داشته نمی‌شود.
+  توالی‌سازی claimants با `SELECT ... FOR UPDATE` روی ردیف aggregate؛
+  constraintهای unique(runId, attempt) و unique(uid) پشتیبان سطح DB هستند.
+- **بازیابی بدون resend کورکورانه**: attempt PREPARED (claim ثبت شده، enqueue
+  قطعاً تکمیل نشده) با مهلت ۱۲۰ثانیه‌ای از createdAt — نمونه‌های دیگر تا
+  انقضای مهلت عقب می‌کشند (p8-19c)؛ پس از انقضا با **همان uid و محتوای
+  منجمد** از payload_snapshot ادامه می‌یابد — ارسال با همان uid در مرجع
+  idempotent است (رفتار مستند 5005 duplicate.request.uid، شواهد p8-14؛ این
+  همگرایی روی sandbox واقعی تأیید نشده است). aggregate claimed بدون ردیف
+  attempt (پنجره کرش قدیمی) → هیچ چیزی هرگز ارسال نشده و attempt 1 با uid
+  تازه آغاز می‌شود (p8-19a)؛ aggregate در جریان/نهایی بدون ردیف attempt
+  (هویت گم‌شده) → کاملاً مسدود با `SANDBOX_ATTEMPT_IDENTITY_LOST` (p8-19g).
+  REJECTED قطعی → attempt جدید با `retry=true` و uid جدید؛ نتیجه نامشخص →
+  reconcile با INQUIRY_BY_UID روی همان uid پایدار — **وضعیت UNKNOWN پیش از
+  بازگشت persisted می‌شود** (p8-19e/f).
+- **همگام‌سازی aggregate awaited است**: نتیجه نهایی فقط پس از ثبت وضعیت
+  aggregate برگردانده می‌شود؛ شکست ثبت، overall را به FAIL با
+  `SANDBOX_AGGREGATE_SYNC_FAILED` تنزل می‌دهد — موفقیت روی وضعیت گم‌شده
+  گزارش نمی‌شود (p8-19d؛ سازگاری result/aggregate/attempt تست شده).
+- **migration داده‌محور**: `20241022120000` هر ردیف run قدیمی (uid/مرجع/
+  خطا/تأیید/نتیجه مالیاتی/timestamps) را **قبل از DROP ستون‌ها** به یک ردیف
+  attempt معادل کپی می‌کند — تاریخچه تشخیصی حفظ می‌شود. شواهد بازپخش: ۶ ردیف
+  legacy (هر ۶ وضعیت) با تطبیق کامل ۱۴ فیلدی و شمارش ۶=۶ روی tcerp_test.
+  payload_snapshot مدل قدیمی وجود نداشت → snapshot خالی با anchor=uid. ادعای بین-نمونه‌ای با دو نمونه سرویس مستقل روی DB مشترک تست شده است
+  (p8-18c). payload آزمایشی **کامل** است (taxid/tins/sstid از env
   `MOADIAN_SANDBOX_*`)؛ اگر این envها تنظیم نشده باشند نتیجه
   NOT_CONFIGURED با راهنمای اقدام برمی‌گردد — payload ناقص هرگز ارسال
   نمی‌شود. 5005 duplicate = قبلاً پذیرفته‌شده (FAILED نمی‌شود).
+- **جدا‌سازی ادعاها از شواهد**: رفتار 5005 duplicate و شکل endpointها از
+  مستند رسمی نسخه دوم پیاده‌سازی شده اما **هیچ‌کدام از این رفتارها روی
+  sandbox/live واقعی تأیید نشده‌اند** — همه شواهد runtime از تست‌های
+  fetch-injected/mock روی tcerp_test است. تماس با سرویس واقعی بدون
+  اعتبارنامه sandbox مجاز و بدون authorization ممنوع است.
 - رکورد diagnostic history جدا از تراکنش‌های کسب‌وکار نگهداری نمی‌شود؛ فقط
   audit (بدون هیچ secret) ثبت می‌شود و نتایج به UI برمی‌گردد.
 - امنیت: هر دو endpoint با زنجیره guard سراسری + requireCompanyId +

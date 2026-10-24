@@ -1,0 +1,19 @@
+         uid          | status_ok | ref_ok | err_ok | errd_ok | conf_ok | taxres_ok | sent_ok | inq_ok | created_ok | updated_ok | attempt_no_ok | retry_ok | snapshot_placeholder_ok 
+----------------------+-----------+--------+--------+---------+---------+-----------+---------+--------+------------+------------+---------------+----------+-------------------------
+ legacy-uid-PENDING   | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+ legacy-uid-PREPARED  | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+ legacy-uid-REJECTED  | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+ legacy-uid-SUBMITTED | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+ legacy-uid-SUCCESS   | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+ legacy-uid-UNKNOWN   | t         | t      | t      | t       | t       | t         | t       | t      | t          | t          | t             | t        | t
+(6 rows)
+
+ legacy_runs | migrated_attempts 
+-------------+-------------------
+           6 |                 6
+(1 row)
+
+ column_name 
+-------------
+(0 rows)
+

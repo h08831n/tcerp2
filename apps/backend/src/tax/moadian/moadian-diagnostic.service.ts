@@ -274,18 +274,43 @@ export class MoadianDiagnosticService {
     return this.finish(mode, baseUrl, steps, 'PASS');
   }
 
-  /** Full SANDBOX test — durable, cross-instance-safe attempt state machine.
+  /** Full SANDBOX test — durable, crash-safe, cross-instance-safe attempt
+   *  state machine (fourth-review redesign).
    *
-   *  Run aggregate: one `MoadianDiagnosticRun` per company per UTC day —
-   *  created ATOMICALLY (unique constraint + P2002 re-find). Its fiscalId is
+   *  Aggregate: one MoadianDiagnosticRun per (companyId, runDay), created
+   *  ATOMICALLY (unique constraint + P2002 re-find). Its fiscalId is
    *  immutable: a later configuration change is rejected, never overwritten.
    *
-   *  Attempt claim (cross-instance): the run status is claimed via a
-   *  conditional UPDATE (PREPARED/REJECTED -> SUBMITTED). Only the instance
-   *  whose UPDATE affected the row creates the attempt and enqueues; every
-   *  other instance reconciles and reports. UNKNOWN discipline: an
-   *  empty/failed inquiry NEVER resends — the head attempt stays
-   *  SUBMITTED/UNKNOWN and a later call inquires the SAME persisted uid.
+   *  CRASH-SAFE CLAIM: the aggregate claim and the attempt identity
+   *  (immutable uid + frozen payload snapshot) are persisted in ONE SHORT
+   *  database transaction — the claim never exists without its attempt uid,
+   *  and the uid always exists BEFORE any external HTTP call. No transaction
+   *  is held across enqueue. Concurrency: claimants serialize on
+   *  SELECT ... FOR UPDATE of the aggregate row; unique(runId, attempt) and
+   *  unique(uid) backstop at the constraint level.
+   *
+   *  Recovery discipline (never a blind resend):
+   *   - PREPARED attempt (claim tx committed, enqueue provably never
+   *     completed) younger than the 120s lease -> other instances back off.
+   *   - PREPARED attempt with an EXPIRED lease -> resumed with the SAME uid
+   *     and the FROZEN packet from payload_snapshot. Same-uid submission is
+   *     idempotent at the authority (documented 5005 duplicate.request.uid),
+   *     so even a packet left in flight by a crash cannot create a second
+   *     submission.
+   *   - Aggregate claimed but NO attempt row (legacy crash window between
+   *     the old claim and create): attempt creation precedes enqueue in
+   *     every code version, so nothing was ever sent — attempt 1 is started
+   *     with a fresh uid. Aggregate in-flight/final WITHOUT an attempt row
+   *     (identity lost) blocks everything: nothing is created or enqueued.
+   *   - SUBMITTED/PENDING/UNKNOWN attempts are reconcile-only via
+   *     INQUIRY_BY_UID on the exact persisted uid; an empty/inconclusive
+   *     inquiry NEVER triggers a resend. UNKNOWN is PERSISTED before
+   *     returning (fourth review #4).
+   *
+   *  Aggregate sync is AWAITED (fourth review #3): the result is returned
+   *  only after the aggregate reflects the attempt's final state; a failed
+   *  sync downgrades the overall verdict to FAIL with an explicit error
+   *  code instead of reporting success over lost state.
    *
    *  Sandbox identity prerequisites: MOADIAN_SANDBOX_TAXID/TINS/SSTID must
    *  be configured — an incomplete payload is NEVER sent (NOT_CONFIGURED). */
@@ -299,18 +324,41 @@ export class MoadianDiagnosticService {
     steps.push(...base.steps);
 
     let run: { id: string; fiscalId: string } | null = null;
-    const sandboxResult = (
+    const sandboxResult = async (
       overall: 'PASS' | 'FAIL' | 'NOT_CONFIGURED',
       uid: string,
       status: string,
       referenceNumber: string | null,
       detail: string,
+      persistenceErrorCode: string | null = null,
     ) => {
-      // the aggregate mirrors the head attempt's final state
+      let aggregateSyncFailed = false;
       if (run) {
-        void this.prisma.moadianDiagnosticRun
-          .update({ where: { id: run.id }, data: { status: status as MoadianDiagnosticRunStatus } })
-          .catch(() => undefined);
+        try {
+          await this.prisma.moadianDiagnosticRun.update({
+            where: { id: run.id },
+            data: { status: status as MoadianDiagnosticRunStatus },
+          });
+        } catch {
+          aggregateSyncFailed = true;
+        }
+      }
+      const errorCode = persistenceErrorCode ?? (aggregateSyncFailed ? 'SANDBOX_AGGREGATE_SYNC_FAILED' : null);
+      if (errorCode) {
+        steps.push(
+          this.step(
+            'sandbox_persistence',
+            'FAIL',
+            Date.now(),
+            'ثبت وضعیت پایدار کامل نشد — نتیجه قابل اتکا نیست؛ با اتمام عملیات، دوباره تلاش کنید.',
+            errorCode,
+          ),
+        );
+        return {
+          report: { mode: base.mode, overall: 'FAIL' as const, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
+          submission: { uid, status, referenceNumber, detail },
+          errorCode,
+        };
       }
       return {
         report: { mode: base.mode, overall, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
@@ -390,15 +438,35 @@ export class MoadianDiagnosticService {
       return notConfigured('fiscalId changed — prior run identity preserved', 'SANDBOX_RUN_IDENTITY_CHANGED');
     }
 
-    // reconcile the HEAD attempt by its EXACT persisted uid — an empty or
-    // inconclusive inquiry NEVER triggers a resend
+    // Reconcile the HEAD attempt by its EXACT persisted uid. A PREPARED
+    // attempt is skipped here: its enqueue provably never completed (the
+    // claim transaction precedes any external call) — it is resumed by the
+    // claim transaction below with the SAME uid and FROZEN packet. An
+    // empty/inconclusive inquiry NEVER triggers a resend.
     let startedAt = Date.now();
     let head = await this.prisma.moadianDiagnosticAttempt.findFirst({
       where: { runId: run.id, companyId },
       orderBy: { attempt: 'desc' },
     });
-    if (head) {
-      const results = await adapter.inquiryByUid([head.uid]);
+    if (head && head.status !== 'PREPARED') {
+      let results: Awaited<ReturnType<MoadianAdapter['inquiryByUid']>>;
+      try {
+        results = await adapter.inquiryByUid([head.uid]);
+      } catch (error) {
+        const { code, message } = classifyNetworkError(error);
+        // reconcile inquiry failed — the attempt stays EXACTLY as it was;
+        // nothing is resent and nothing is overwritten
+        steps.push(
+          this.step(
+            'sandbox_reconcile',
+            'FAIL',
+            startedAt,
+            `استعلام نتیجه قبلی ناموفق بود (${message}) — بدون تغییر و بدون ارسال مجدد؛ بعداً دوباره تلاش کنید.`,
+            code || 'SANDBOX_INQUIRY_FAILED',
+          ),
+        );
+        return await sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `reconcile inquiry failed: ${code}`);
+      }
       const result = results[0];
       if (result && result.status !== 'PENDING') {
         head = await this.prisma.moadianDiagnosticAttempt.update({
@@ -426,7 +494,7 @@ export class MoadianDiagnosticService {
       // authoritative final states -> report WITHOUT enqueueing
       if (head.status === 'SUCCESS') {
         steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'ارسال قبلی در مودیان تأیید شده است — بدون ارسال مجدد.'));
-        return sandboxResult('PASS', head.uid, 'SUCCESS', head.referenceNumber, 'تأیید قبلی بازیابی شد.');
+        return await sandboxResult('PASS', head.uid, 'SUCCESS', head.referenceNumber, 'تأیید قبلی بازیابی شد.');
       }
       if (head.status === 'PENDING' || head.status === 'UNKNOWN' || head.status === 'SUBMITTED') {
         steps.push(
@@ -439,32 +507,108 @@ export class MoadianDiagnosticService {
             'پیش از هر ارسال مجدد، شماره پیگیری را با سامانه مؤدیان تطبیق دهید.',
           ),
         );
-        return sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `inconclusive outcome: ${head.status}`);
+        return await sandboxResult('FAIL', head.uid, head.status, head.referenceNumber, `inconclusive outcome: ${head.status}`);
       }
       // REJECTED (authoritative) -> official retry with a NEW uid + retry=true
       steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'رد نهایی ثبت شده — ارسال مجدد با retry=true و uid جدید مجاز است.'));
     }
 
-    // CROSS-INSTANCE CLAIM: a conditional UPDATE on the aggregate admits
-    // exactly ONE instance to create the next attempt and enqueue; every
-    // loser reconciles/reports WITHOUT enqueueing (no duplicate submission).
+    // CRASH-SAFE CLAIM: one short transaction serializes claimants on the
+    // aggregate row (SELECT ... FOR UPDATE) and persists claim + attempt
+    // identity atomically. Outcomes:
+    //   created       -> this instance owns the enqueue (fresh or retry)
+    //   recover       -> expired-lease PREPARED attempt resumed with ITS uid
+    //   in-progress   -> a live claimant holds a fresh PREPARED attempt
+    //   lost          -> another instance claimed; reconcile-only
+    //   identity-lost -> aggregate in-flight/final with NO attempt row:
+    //                    whether something was sent is unknowable — block
     startedAt = Date.now();
-    const claim = await this.prisma.moadianDiagnosticRun.updateMany({
-      where: { id: run.id, status: { in: ['PREPARED', 'REJECTED'] } },
-      data: { status: 'SUBMITTED' },
-    });
-    if (claim.count === 0) {
-      const claimedElsewhere = await this.prisma.moadianDiagnosticAttempt.findFirst({
+    const LEASE_MS = 120_000;
+    const claim = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "moadian_diagnostic_runs" WHERE id = ${run.id}::uuid FOR UPDATE`;
+      const txHead = await tx.moadianDiagnosticAttempt.findFirst({
         where: { runId: run.id, companyId },
         orderBy: { attempt: 'desc' },
       });
-      if (claimedElsewhere) {
-        return sandboxResult(
+      if (txHead && txHead.status === 'PREPARED') {
+        const ageMs = Date.now() - txHead.createdAt.getTime();
+        if (ageMs < LEASE_MS) return { kind: 'in-progress' as const, head: txHead };
+        return { kind: 'recover' as const, head: txHead };
+      }
+      if (txHead && txHead.status !== 'REJECTED') {
+        return { kind: 'lost' as const, head: txHead };
+      }
+      if (!txHead) {
+        const aggregate = await tx.moadianDiagnosticRun.findUniqueOrThrow({
+          where: { id: run.id },
+          select: { status: true },
+        });
+        if (['PENDING', 'SUCCESS', 'UNKNOWN'].includes(aggregate.status)) {
+          return { kind: 'identity-lost' as const };
+        }
+        if (aggregate.status !== 'SUBMITTED') {
+          const claimed = await tx.moadianDiagnosticRun.updateMany({
+            where: { id: run.id, status: { in: ['PREPARED', 'REJECTED'] } },
+            data: { status: 'SUBMITTED' },
+          });
+          if (claimed.count === 0) return { kind: 'lost' as const, head: null };
+        }
+        // SUBMITTED with no attempt row = crash between the claim and the
+        // attempt creation (legacy window). Attempt creation precedes enqueue
+        // in every code version, so nothing was ever sent — starting attempt
+        // 1 with a fresh uid is NOT a resubmission.
+      } else {
+        const claimed = await tx.moadianDiagnosticRun.updateMany({
+          where: { id: run.id, status: { in: ['PREPARED', 'REJECTED'] } },
+          data: { status: 'SUBMITTED' },
+        });
+        if (claimed.count === 0) return { kind: 'lost' as const, head: txHead };
+      }
+      const attemptNo = (txHead?.attempt ?? 0) + 1;
+      const isRetry = attemptNo > 1; // official retry=true on resubmission
+      const uid = 'sandbox-' + crypto.randomUUID(); // NEW uid per attempt
+      const packet = this.buildSyntheticSandboxPacket(
+        uid,
+        isRetry,
+        config.fiscalId,
+        sandboxTins,
+        sandboxTaxid,
+        sandboxSstid,
+      );
+      // durable attempt row BEFORE submission — uid/attempt immutable
+      const attemptRow = await tx.moadianDiagnosticAttempt.create({
+        data: {
+          runId: run.id,
+          companyId,
+          attempt: attemptNo,
+          uid,
+          retry: isRetry,
+          status: 'PREPARED', // enqueue happens only AFTER this tx commits
+          payloadSnapshot: { packets: [packet] } as unknown as Prisma.InputJsonValue,
+          sentAt: new Date(),
+        },
+      });
+      return { kind: 'created' as const, attemptRow, packet };
+    });
+
+    if (claim.kind === 'identity-lost') {
+      return notConfigured(
+        'وضعیت aggregate بیانگر نتیجه در جریان/نهایی است اما ردیف attempt (شناسه uid) یافت نشد — برای پیشگیری از ارسال مضاعف، هیچ ارسال یا رکورد جدیدی ساخته نمی‌شود؛ بررسی عملیاتی لازم است.',
+        'SANDBOX_ATTEMPT_IDENTITY_LOST',
+      );
+    }
+    if (claim.kind === 'in-progress' || claim.kind === 'lost') {
+      const headRow = claim.head;
+      if (headRow) {
+        return await sandboxResult(
           'FAIL',
-          claimedElsewhere.uid,
-          claimedElsewhere.status,
-          claimedElsewhere.referenceNumber,
-          'نمونه دیگری ادعای ارسال را کرده است — بدون ارسال مجدد؛ استعلام بعدی نتیجه را قطعی می‌کند.',
+          headRow.uid,
+          headRow.status,
+          headRow.referenceNumber,
+          claim.kind === 'in-progress'
+            ? 'نمونه دیگری ادعای ارسال را کرده و attempt تازه آن در جریان است — بدون ارسال مجدد؛ پس از انقضای مهلت، فراخوانی بعدی بازیابی می‌کند.'
+            : 'نمونه دیگری ادعای ارسال را کرده است — بدون ارسال مجدد؛ استعلام بعدی نتیجه را قطعی می‌کند.',
+          claim.kind === 'in-progress' ? 'SANDBOX_CLAIM_IN_PROGRESS' : 'SANDBOX_CLAIM_LOST',
         );
       }
       return notConfigured(
@@ -473,42 +617,41 @@ export class MoadianDiagnosticService {
       );
     }
 
-    const attempt = (head?.attempt ?? 0) + 1;
-    const isRetry = attempt > 1; // official retry=true on resubmission
-    const uid = 'sandbox-' + crypto.randomUUID(); // NEW uid per attempt
-    const syntheticInvoice = this.buildSyntheticSandboxInvoice(config.fiscalId, sandboxTins, sandboxTaxid, sandboxSstid);
-    const packet: MoadianPacket = {
-      uid,
-      packetType: 'INVOICE.V01',
-      retry: isRetry,
-      data: JSON.stringify(syntheticInvoice),
-      encryptionKeyId: '',
-      symmetricKey: '',
-      iv: '',
-      fiscalId: config.fiscalId,
-      dataSignature: '',
-    };
-    // durable attempt row BEFORE submission — uid/attempt immutable
-    const attemptRow = await this.prisma.moadianDiagnosticAttempt.create({
-      data: {
-        runId: run.id,
-        companyId,
-        attempt,
-        uid,
-        retry: isRetry,
-        status: 'SUBMITTED', // claimed atomically at creation (single INSERT)
-        payloadSnapshot: { packets: [packet] } as unknown as Prisma.InputJsonValue,
-        sentAt: new Date(),
-      },
-    });
-    steps.push(
-      this.step(
-        'sandbox_claim',
-        'PASS',
-        startedAt,
-        `attempt ${attempt} ثبت شد — این نمونه مجاز به ارسال است (claim اتمیک در INSERT).`,
-      ),
-    );
+    const attemptRow = claim.kind === 'recover' ? claim.head : claim.attemptRow;
+    // the packet is rebuilt from the FROZEN payload snapshot — identical uid
+    // and content on both the fresh and the resumed path
+    let packet: MoadianPacket;
+    if (claim.kind === 'recover') {
+      const snapshot = attemptRow.payloadSnapshot as { packets?: MoadianPacket[] } | null;
+      packet =
+        snapshot?.packets?.[0] ??
+        this.buildSyntheticSandboxPacket(
+          attemptRow.uid,
+          attemptRow.attempt > 1,
+          config.fiscalId,
+          sandboxTins,
+          sandboxTaxid,
+          sandboxSstid,
+        );
+      steps.push(
+        this.step(
+          'sandbox_claim',
+          'PASS',
+          startedAt,
+          `attempt ${attemptRow.attempt} ناتمام مانده بود — با همان uid پایدار و محتوای منجمد ادامه می‌یابد (ارسال مضاعف با 5005 جمع می‌شود).`,
+        ),
+      );
+    } else {
+      packet = claim.packet;
+      steps.push(
+        this.step(
+          'sandbox_claim',
+          'PASS',
+          startedAt,
+          `attempt ${attemptRow.attempt} و uid آن به‌صورت اتمیک با claim ثبت شد — این نمونه مجاز به ارسال است.`,
+        ),
+      );
+    }
 
     startedAt = Date.now();
     try {
@@ -516,25 +659,28 @@ export class MoadianDiagnosticService {
       const response = responses[0];
       if (response?.errorCode === '5005') {
         // official duplicate.request.uid — the authority already has THIS uid
-        head = await this.prisma.moadianDiagnosticAttempt.update({
-          where: { id: attemptRow.id },
+        await this.prisma.moadianDiagnosticAttempt.updateMany({
+          where: { id: attemptRow.id, status: 'PREPARED' },
           data: { status: 'PENDING', referenceNumber: response.referenceNumber || null },
         });
+        head = await this.prisma.moadianDiagnosticAttempt.findUniqueOrThrow({ where: { id: attemptRow.id } });
         steps.push(this.step('sandbox_enqueue', 'PASS', startedAt, 'این uid قبلاً دریافت شده است (duplicate) — استعلام ادامه می‌یابد.'));
       } else if (response?.errorCode) {
-        head = await this.prisma.moadianDiagnosticAttempt.update({
-          where: { id: attemptRow.id },
+        await this.prisma.moadianDiagnosticAttempt.updateMany({
+          where: { id: attemptRow.id, status: 'PREPARED' },
           data: { status: 'REJECTED', errorCode: response.errorCode, errorDetail: response.errorDetail ?? null },
         });
+        head = await this.prisma.moadianDiagnosticAttempt.findUniqueOrThrow({ where: { id: attemptRow.id } });
         steps.push(
           this.step('sandbox_enqueue', 'FAIL', startedAt, `ارسال sandbox ناموفق: ${response.errorCode} ${response.errorDetail ?? ''}`, response.errorCode),
         );
-        return sandboxResult('FAIL', uid, 'REJECTED', null, `enqueue: ${response.errorCode}`);
+        return await sandboxResult('FAIL', attemptRow.uid, 'REJECTED', null, `enqueue: ${response.errorCode}`);
       } else {
-        head = await this.prisma.moadianDiagnosticAttempt.update({
-          where: { id: attemptRow.id },
+        await this.prisma.moadianDiagnosticAttempt.updateMany({
+          where: { id: attemptRow.id, status: 'PREPARED' },
           data: { status: 'PENDING', referenceNumber: response?.referenceNumber ?? null, sentAt: new Date() },
         });
+        head = await this.prisma.moadianDiagnosticAttempt.findUniqueOrThrow({ where: { id: attemptRow.id } });
         steps.push(
           this.step('sandbox_enqueue', 'PASS', startedAt, `packet به sandbox ارسال شد (referenceNumber: ${response?.referenceNumber ?? '—'}).`),
         );
@@ -542,28 +688,47 @@ export class MoadianDiagnosticService {
     } catch (error) {
       const { code, message } = classifyNetworkError(error);
       // UNKNOWN outcome: the packet may have reached the authority — the
-      // attempt stays UNKNOWN with its durable uid; a later call inquires it
-      // and NEVER resends blindly
-      head = await this.prisma.moadianDiagnosticAttempt.update({
-        where: { id: attemptRow.id },
-        data: { status: 'UNKNOWN', errorCode: 'SANDBOX_UNKNOWN_OUTCOME', errorDetail: message },
-      });
+      // attempt stays with its durable uid; a later call inquires it and
+      // NEVER resends blindly. The UNKNOWN state is persisted (awaited)
+      // BEFORE returning; if even that fails, the attempt row from the claim
+      // transaction still preserves the uid for recovery.
+      let persistError: string | null = null;
+      try {
+        await this.prisma.moadianDiagnosticAttempt.updateMany({
+          where: { id: attemptRow.id, status: 'PREPARED' },
+          data: { status: 'UNKNOWN', errorCode: 'SANDBOX_UNKNOWN_OUTCOME', errorDetail: message },
+        });
+      } catch {
+        persistError = 'SANDBOX_ATTEMPT_PERSIST_FAILED';
+      }
+      head = await this.prisma.moadianDiagnosticAttempt
+        .findUniqueOrThrow({ where: { id: attemptRow.id } })
+        .catch(() => null);
       steps.push(
         this.step(
           'sandbox_enqueue',
           'FAIL',
           startedAt,
-          `نتیجه ارسال نامشخص است (${message}) — attempt با uid پایدار حفظ شد؛ ارسال مجدد ممنوع تا تطبیق.`,
-          'SANDBOX_UNKNOWN_OUTCOME',
+          persistError
+            ? `نتیجه ارسال نامشخص است (${message}) و ثبت وضعیت UNKNOWN نیز ناموفق بود — attempt با uid پایدار از ردیف claim حفظ شده؛ ارسال مجدد ممنوع تا تطبیق.`
+            : `نتیجه ارسال نامشخص است (${message}) — attempt با uid پایدار حفظ شد؛ ارسال مجدد ممنوع تا تطبیق.`,
+          persistError ?? 'SANDBOX_UNKNOWN_OUTCOME',
         ),
       );
-      return sandboxResult('FAIL', uid, 'UNKNOWN', null, `timeout/unknown: ${code} — reconcile via INQUIRY_BY_UID.`);
+      return await sandboxResult(
+        'FAIL',
+        attemptRow.uid,
+        head?.status ?? 'UNKNOWN',
+        null,
+        `timeout/unknown: ${code} — reconcile via INQUIRY_BY_UID.`,
+        persistError,
+      );
     }
 
     // inquiry the just-submitted attempt uid
     startedAt = Date.now();
     try {
-      const inquiry = await adapter.inquiryByUid([uid]);
+      const inquiry = await adapter.inquiryByUid([attemptRow.uid]);
       const result = inquiry[0];
       head = await this.prisma.moadianDiagnosticAttempt.findUniqueOrThrow({ where: { id: attemptRow.id } });
       if (!result || result.status === 'PENDING') {
@@ -571,7 +736,7 @@ export class MoadianDiagnosticService {
           where: { id: attemptRow.id },
           data: { status: 'PENDING', inquiredAt: new Date() },
         });
-        return sandboxResult('NOT_CONFIGURED', uid, 'PENDING', head.referenceNumber, 'مودیان هنوز در حال بررسی است — بعداً استعلام بگیرید.');
+        return await sandboxResult('NOT_CONFIGURED', attemptRow.uid, 'PENDING', head.referenceNumber, 'مودیان هنوز در حال بررسی است — بعداً استعلام بگیرید.');
       }
       if (result.status === 'SUCCESS') {
         head = await this.prisma.moadianDiagnosticAttempt.update({
@@ -584,7 +749,7 @@ export class MoadianDiagnosticService {
           },
         });
         steps.push(this.step('sandbox_inquiry', 'PASS', startedAt, `صورتحساب آزمایشی تأیید شد (${result.confirmationReferenceId ?? '—'}).`));
-        return sandboxResult('PASS', uid, 'SUCCESS', head.referenceNumber, 'آزمون کامل sandbox موفق بود.');
+        return await sandboxResult('PASS', attemptRow.uid, 'SUCCESS', head.referenceNumber, 'آزمون کامل sandbox موفق بود.');
       }
       head = await this.prisma.moadianDiagnosticAttempt.update({
         where: { id: attemptRow.id },
@@ -598,11 +763,56 @@ export class MoadianDiagnosticService {
       steps.push(
         this.step('sandbox_inquiry', 'FAIL', startedAt, `مودیان packet آزمایشی را رد کرد: ${result.errorCode ?? ''} ${result.errorDetail ?? ''}`, result.errorCode ?? null),
       );
-      return sandboxResult('FAIL', uid, 'REJECTED', head.referenceNumber, `sandbox rejected: ${result.errorDetail ?? ''}`);
+      return await sandboxResult('FAIL', attemptRow.uid, 'REJECTED', head.referenceNumber, `sandbox rejected: ${result.errorDetail ?? ''}`);
     } catch (error) {
       const { code, message } = classifyNetworkError(error);
-      return sandboxResult('FAIL', uid, 'UNKNOWN', null, `استعلام ناموفق: ${message} (${code}) — بعداً استعلام بگیرید.`);
+      // fourth review #4: persist the uncertain outcome BEFORE returning —
+      // the attempt keeps its immutable uid and stays blocked for resend
+      let persistError: string | null = null;
+      try {
+        await this.prisma.moadianDiagnosticAttempt.update({
+          where: { id: attemptRow.id },
+          data: { status: 'UNKNOWN', errorCode: 'SANDBOX_INQUIRY_UNKNOWN', errorDetail: message, inquiredAt: new Date() },
+        });
+      } catch {
+        persistError = 'SANDBOX_ATTEMPT_PERSIST_FAILED';
+      }
+      steps.push(
+        this.step(
+          'sandbox_inquiry',
+          'FAIL',
+          startedAt,
+          persistError
+            ? `استعلام ناموفق بود (${message}) و ثبت UNKNOWN نیز ناموفق بود — ردیف attempt از مرحله claim با uid پایدار باقی است؛ ارسال مجدد ممنوع تا تطبیق.`
+            : `استعلام ناموفق بود (${message}) — وضعیت UNKNOWN ثبت شد؛ ارسال مجدد ممنوع تا تطبیق.`,
+          persistError ?? 'SANDBOX_INQUIRY_UNKNOWN',
+        ),
+      );
+      return await sandboxResult('FAIL', attemptRow.uid, 'UNKNOWN', null, `استعلام ناموفق: ${message} (${code}) — بعداً استعلام بگیرید.`, persistError);
     }
+  }
+  /** sandbox packet wrapper — the SAME packet identity that is persisted in
+   *  payload_snapshot and rebuilt from it on recovery: identical uid and
+   *  content, so a resumed submission cannot diverge from the claimed one. */
+  private buildSyntheticSandboxPacket(
+    uid: string,
+    isRetry: boolean,
+    fiscalId: string,
+    buyerTins: string,
+    taxid: string,
+    sstid: string,
+  ): MoadianPacket {
+    return {
+      uid,
+      packetType: 'INVOICE.V01',
+      retry: isRetry,
+      data: JSON.stringify(this.buildSyntheticSandboxInvoice(fiscalId, buyerTins, taxid, sstid)),
+      encryptionKeyId: '',
+      symmetricKey: '',
+      iv: '',
+      fiscalId,
+      dataSignature: '',
+    };
   }
 
   /** synthetic sandbox invoice — complete per the official template: header
