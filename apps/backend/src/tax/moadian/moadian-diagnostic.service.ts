@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as crypto from 'node:crypto';
 import { MoadianPacket } from './moadian-adapter';
+import { PrismaService } from '../../prisma/prisma.service';
 import { MoadianConfigError, buildMoadianAdapter, loadMoadianConfigFromEnv } from './adapter-factory';
 import { MoadianAdapter } from './moadian-adapter';
 
@@ -72,11 +73,15 @@ export function classifyNetworkError(error: unknown): { code: string; message: s
 @Injectable()
 export class MoadianDiagnosticService {
   private readonly logger = new Logger('MoadianDiagnostic');
+
   private running = false; // in-process concurrency guard
   /** injectable for deterministic offline tests (defaults to global fetch) */
   private readonly fetchImpl: typeof fetch;
 
-  constructor(fetchImpl?: typeof fetch) {
+  constructor(
+    private readonly prisma: PrismaService,
+    fetchImpl?: typeof fetch,
+  ) {
     this.fetchImpl = fetchImpl ?? fetch;
   }
 
@@ -201,18 +206,24 @@ export class MoadianDiagnosticService {
       return this.finish(mode, baseUrl, steps, 'FAIL');
     }
 
-    // 4. authentication = successful JWS-authenticated server call happens in
-    // step 5; a locally built JWS alone is NOT authentication success.
+    // 4. LOCAL credential/JWS construction — reported separately from REMOTE
+    // authentication (which is only proven by step 5's authenticated call)
     startedAt = Date.now();
     if (!nonce) {
-      steps.push(this.step('authentication', 'SKIPPED', startedAt, 'وابسته به nonce.'));
+      steps.push(this.step('jws_local_construction', 'SKIPPED', startedAt, 'وابسته به nonce.'));
       return this.finish(mode, baseUrl, steps, 'FAIL');
     }
     steps.push(
-      this.step('authentication', 'PASS', startedAt, 'JWS با گواهی و کلید خصوصی ساخته شد — تأیید نهایی در گام server-information.'),
+      this.step(
+        'jws_local_construction',
+        'PASS',
+        startedAt,
+        'JWS محلی با گواهی و کلید خصوصی ساخته شد — این به‌تنهایی احراز هویت ریموت نیست.',
+      ),
     );
 
-    // 5. server information (authenticated, read-only, schema validated)
+    // 5. server information — the FIRST authenticated remote call: success
+    // here is the actual REMOTE AUTHENTICATION proof
     startedAt = Date.now();
     try {
       const info = await (adapter as MoadianAdapter).getServerInformation();
@@ -221,10 +232,10 @@ export class MoadianDiagnosticService {
       }
       steps.push(
         this.step(
-          'server_information',
+          'remote_authentication',
           'PASS',
           startedAt,
-          `اطلاعات سرور و کلید عمومی دریافت شد (keyId: ${info.publicKeyId}).`,
+          `درخواست احراز‌شده موفق بود — اطلاعات سرور و کلید عمومی دریافت شد (keyId: ${info.publicKeyId}).`,
         ),
       );
     } catch (error) {
@@ -262,35 +273,40 @@ export class MoadianDiagnosticService {
     return this.finish(mode, baseUrl, steps, 'PASS');
   }
 
-  /** Full SANDBOX test — submits a synthetic test packet and inquiries it.
-   *  BLOCKED unless MOADIAN_MODE=sandbox; BLOCKED in live mode; NEVER runs
-   *  in mock (returns NOT_CONFIGURED, never a simulated success). Uses a
-   *  stable idempotency uid (HMAC of date+fiscalId) so retries/timeouts/
-   *  restarts cannot create duplicate test submissions; before resending it
-   *  inquires the previous uid. */
-  async runSandboxFullTest(): Promise<
-    DiagnosticReport & { submission: { uid: string; status: string; referenceNumber?: string | null; detail: string } | null; errorCode?: string | null }
-  > {
+  /** Full SANDBOX test — durable state machine.
+   *  BLOCKED unless MOADIAN_MODE=sandbox with fiscalId; BLOCKED in live;
+   *  NOT_CONFIGURED in mock. Requires valid test credentials AND complete
+   *  sandbox configuration (taxid/tins/sstid mapping) — returns
+   *  NOT_CONFIGURED with actionable guidance otherwise.
+   *  Durable recovery: the run row is persisted BEFORE submission; any
+   *  timeout/restart/unknown outcome reconciles via INQUIRY_BY_UID — never a
+   *  blind resend. One run per company per UTC day (DB-unique). */
+  async runSandboxFullTest(companyId: string): Promise<{
+    report: DiagnosticReport;
+    submission: { uid: string; status: string; referenceNumber?: string | null; detail: string } | null;
+    errorCode?: string | null;
+  }> {
     const steps: DiagnosticStep[] = [];
-    let startedAt = Date.now();
     const base = await this.runConnectionDiagnostics();
     steps.push(...base.steps);
-    const fail = (message: string, code: string | null = null) =>
-      ({ ...this.finish(base.mode, base.baseUrl, steps, 'FAIL'), submission: null, detail: message, errorCode: code });
-    void fail;
-    const notConfigured = (message: string) => ({
-      ...this.finish(base.mode, base.baseUrl, steps, 'NOT_CONFIGURED'),
-      submission: null,
-      detail: message,
-      errorCode: null,
-    });
+
     const sandboxResult = (
       overall: 'PASS' | 'FAIL' | 'NOT_CONFIGURED',
       uid: string,
       status: string,
       referenceNumber: string | null,
       detail: string,
-    ) => ({ ...this.finish(base.mode, base.baseUrl, steps, overall), submission: { uid, status, referenceNumber, detail } });
+    ) => ({
+      report: { mode: base.mode, overall, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
+      submission: { uid, status, referenceNumber, detail },
+      errorCode: null,
+    });
+    const notConfigured = (message: string, code: string | null = null) => ({
+      report: { mode: base.mode, overall: 'NOT_CONFIGURED' as const, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
+      submission: null,
+      errorCode: code,
+      detail: message,
+    });
 
     if (base.mode === 'mock') {
       return notConfigured(
@@ -305,95 +321,230 @@ export class MoadianDiagnosticService {
     if (base.overall !== 'PASS') {
       return notConfigured('ابتدا تست اتصال باید موفق شود؛ سپس آزمون کامل sandbox در دسترس است.');
     }
-    // sandbox credentials must include fiscalId (test fiscal identity)
+    // sandbox config completeness: fiscalId AND the official payload identity
+    // fields are prerequisites — an incomplete payload must never be sent
     const config = loadMoadianConfigFromEnv().config;
     if (!config?.fiscalId) {
-      return notConfigured('شناسه حافظه مالیاتی آزمایشی (MOADIAN_FISCAL_ID) تنظیم نشده است.');
+      return notConfigured('شناسه حافظه مالیاتی آزمایشی (MOADIAN_FISCAL_ID) تنظیم نشده است.', 'SANDBOX_FISCAL_ID_MISSING');
+    }
+    const sandboxTaxid = process.env.MOADIAN_SANDBOX_TAXID;
+    const sandboxTins = process.env.MOADIAN_SANDBOX_TINS;
+    const sandboxSstid = process.env.MOADIAN_SANDBOX_SSTID;
+    if (!sandboxTaxid || !sandboxTins || !sandboxSstid) {
+      return notConfigured(
+        'داده‌های هویتی آزمایشی کامل نیست: MOADIAN_SANDBOX_TAXID (شناسه یکتای مالیاتی ۲۲ کاراکتری)، MOADIAN_SANDBOX_TINS (شناسه ملی/کد اقتصادی خریدار آزمایشی) و MOADIAN_SANDBOX_SSTID (کد کالا/خدمت ثبت‌شده) باید از پیکربندی sandbox مجاز تأمین شوند.',
+        'SANDBOX_PAYLOAD_FIELDS_MISSING',
+      );
+    }
+
+    // durable run row — BEFORE any external submission
+    const runDay = new Date().toISOString().slice(0, 10);
+    const uid = 'sandbox-test-' + crypto.createHash('sha256').update(`${config.fiscalId}|${runDay}`).digest('hex').slice(0, 24);
+    const adapter = this.buildAdapter();
+
+    // reconcile an EXISTING run first (timeout/restart/unknown outcome)
+    let startedAt = Date.now();
+    let run = await this.prisma.moadianDiagnosticRun.findUnique({
+      where: { companyId_runDay: { companyId, runDay } },
+    });
+    if (run && run.status !== 'REJECTED' && run.status !== 'SUCCESS') {
+      // a prior attempt exists whose outcome matters — reconcile by uid
+      const results = await adapter.inquiryByUid([run.uid]);
+      const result = results[0];
+      if (result) {
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: {
+            status:
+              result.status === 'SUCCESS'
+                ? 'SUCCESS'
+                : result.status === 'FAILED'
+                  ? 'REJECTED'
+                  : 'PENDING',
+            referenceNumber: result.referenceNumber || run.referenceNumber,
+            errorCode: result.errorCode || null,
+            errorDetail: result.errorDetail || null,
+            confirmationReferenceId: result.confirmationReferenceId || null,
+            taxResult: result.taxResult || null,
+            inquiredAt: new Date(),
+          },
+        });
+      }
+      // PENDING at the authority → wait; SUCCESS → report; REJECTED → official
+      // retry (new submission with retry=true) below
+      if (run.status === 'PENDING') {
+        steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'ارسال قبلی هنوز در حال بررسی است (PENDING) — ارسال جدید انجام نشد.'));
+        return {
+          report: { mode: base.mode, overall: 'NOT_CONFIGURED' as const, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
+          submission: { uid: run.uid, status: 'PENDING', referenceNumber: run.referenceNumber, detail: 'PENDING — بعداً استعلام بگیرید.' },
+        };
+      }
+      if (run.status === 'SUCCESS') {
+        steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'ارسال قبلی در مودیان تأیید شده است — بدون ارسال مجدد.'));
+        return {
+          report: { mode: base.mode, overall: 'PASS' as const, baseUrl: base.baseUrl, steps, finishedAt: new Date().toISOString() },
+          submission: { uid: run.uid, status: 'SUCCESS', referenceNumber: run.referenceNumber, detail: 'تأیید قبلی بازیابی شد.' },
+        };
+      }
+      steps.push(this.step('sandbox_reconcile', 'PASS', startedAt, 'ارسال قبلی رد شده بود — ارسال مجدد با retry=true مجاز است.'));
     }
 
     startedAt = Date.now();
-    // synthetic TEST-only packet: deterministic idempotency uid per day+fiscal
-    // so timeout/retry/restart cannot duplicate the submission
-    const fiscal = config.fiscalId;
-    const day = new Date().toISOString().slice(0, 10);
-    const uid = ('sandbox-test-' + crypto.createHash('sha256').update(`${fiscal}|${day}`).digest('hex').slice(0, 24));
-    const syntheticInvoice = {
+    const syntheticInvoice = this.buildSyntheticSandboxInvoice(config.fiscalId, sandboxTins, sandboxTaxid, sandboxSstid);
+    const packet: MoadianPacket = {
+      uid,
+      packetType: 'INVOICE.V01',
+      retry: run?.status === 'REJECTED',
+      data: JSON.stringify(syntheticInvoice),
+      encryptionKeyId: '',
+      symmetricKey: '',
+      iv: '',
+      fiscalId: config.fiscalId,
+      dataSignature: '',
+    };
+    // persist the run identity BEFORE submission (durable recovery anchor)
+    run = await this.prisma.moadianDiagnosticRun.upsert({
+      where: { companyId_runDay: { companyId, runDay } },
+      create: { companyId, runDay, uid, fiscalId: config.fiscalId, status: 'PREPARED' },
+      update: { status: 'PREPARED' },
+    });
+    steps.push(this.step('sandbox_prepare', 'PASS', startedAt, 'packet آزمایشی کامل و run durable ثبت شد (قبل از هر ارسال).'));
+
+    startedAt = Date.now();
+    try {
+      const responses = await adapter.enqueue([packet]);
+      const response = responses[0];
+      if (response?.errorCode === '5005') {
+        // official duplicate.request.uid — the authority already has THIS uid
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: { status: 'PENDING', referenceNumber: response.referenceNumber || null },
+        });
+        steps.push(this.step('sandbox_enqueue', 'PASS', startedAt, 'این آزمون قبلاً دریافت شده است (duplicate uid) — استعلام ادامه می‌یابد.'));
+      } else if (response?.errorCode) {
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: { status: 'REJECTED', errorCode: response.errorCode, errorDetail: response.errorDetail ?? null },
+        });
+        steps.push(
+          this.step('sandbox_enqueue', 'FAIL', startedAt, `ارسال sandbox ناموفق: ${response.errorCode} ${response.errorDetail ?? ''}`, response.errorCode),
+        );
+        return sandboxResult('FAIL', uid, 'REJECTED', null, `enqueue: ${response.errorCode}`);
+      } else {
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: { status: 'SUBMITTED', referenceNumber: response?.referenceNumber ?? null, sentAt: new Date() },
+        });
+        steps.push(
+          this.step('sandbox_enqueue', 'PASS', startedAt, `packet به sandbox ارسال شد (referenceNumber: ${response?.referenceNumber ?? '—'}).`),
+        );
+      }
+    } catch (error) {
+      const { code, message } = classifyNetworkError(error);
+      // run row stays PREPARED — the durable uid is kept for reconciliation;
+      // a later run inquires this uid BEFORE any resend (never blind-resend)
+      steps.push(this.step('sandbox_enqueue', 'FAIL', startedAt, `ارسال sandbox ناموفق: ${message}`, code));
+      return sandboxResult('FAIL', uid, 'UNKNOWN', null, `timeout/unknown: ${code} — استعلام قبلی قبل از ارسال مجدد.`);
+    }
+
+    // inquiry the just-submitted uid
+    startedAt = Date.now();
+    try {
+      const inquiry = await adapter.inquiryByUid([uid]);
+      const result = inquiry[0];
+      run = await this.prisma.moadianDiagnosticRun.findUniqueOrThrow({ where: { id: run.id } });
+      if (!result || result.status === 'PENDING') {
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: { status: 'PENDING', inquiredAt: new Date() },
+        });
+        return sandboxResult('NOT_CONFIGURED', uid, 'PENDING', run.referenceNumber, 'مودیان هنوز در حال بررسی است — بعداً استعلام بگیرید.');
+      }
+      if (result.status === 'SUCCESS') {
+        run = await this.prisma.moadianDiagnosticRun.update({
+          where: { id: run.id },
+          data: {
+            status: 'SUCCESS',
+            confirmationReferenceId: result.confirmationReferenceId || null,
+            taxResult: result.taxResult || null,
+            inquiredAt: new Date(),
+          },
+        });
+        steps.push(this.step('sandbox_inquiry', 'PASS', startedAt, `صورتحساب آزمایشی تأیید شد (${result.confirmationReferenceId ?? '—'}).`));
+        return sandboxResult('PASS', uid, 'SUCCESS', run.referenceNumber, 'آزمون کامل sandbox موفق بود.');
+      }
+      run = await this.prisma.moadianDiagnosticRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'REJECTED',
+          errorCode: result.errorCode || null,
+          errorDetail: result.errorDetail || null,
+          inquiredAt: new Date(),
+        },
+      });
+      steps.push(
+        this.step('sandbox_inquiry', 'FAIL', startedAt, `مودیان packet آزمایشی را رد کرد: ${result.errorCode ?? ''} ${result.errorDetail ?? ''}`, result.errorCode ?? null),
+      );
+      return sandboxResult('FAIL', uid, 'REJECTED', run.referenceNumber, `sandbox rejected: ${result.errorDetail ?? ''}`);
+    } catch (error) {
+      const { code, message } = classifyNetworkError(error);
+      return sandboxResult('FAIL', uid, 'UNKNOWN', null, `استعلام ناموفق: ${message} (${code}) — بعداً استعلام بگیرید.`);
+    }
+  }
+
+  /** synthetic sandbox invoice — complete per the official template: header
+   *  taxid/tins from authorized sandbox configuration, body sstid from the
+   *  registered goods list. Values are legally valid TEST-ONLY samples. */
+  private buildSyntheticSandboxInvoice(fiscalId: string, buyerTins: string, taxid: string, sstid: string) {
+    const now = Date.now();
+    return {
       header: {
-        taxid: null, // official taxid generation needs fiscal key material — gap documented
-        indatim: Date.now(),
-        indati2m: Date.now(),
-        inty: 1,
-        ins: 1,
+        taxid,
+        indatim: now,
+        indati2m: now,
+        inty: 1, // type 1: buyer has an economic code (sandbox test identity)
+        ins: 1, // اصلی
         inno: 'SANDBOX-TEST',
-        tins: null,
+        irtaxid: null,
+        tins: buyerTins,
         tob: 1,
         tprdis: '1000000',
         tdis: '0',
         tadis: '1000000',
         tvam: '90000',
+        todam: '0',
         tbill: '1090000',
+        setm: null,
+        cap: null,
+        insp: null,
+        tvop: null,
       },
-      body: [{ sstid: null, sstt: 'TEST-ONLY', am: '1', fee: '1000000', vam: '90000' }],
+      body: [
+        {
+          sstid,
+          sstt: 'TEST-ONLY (sandbox diagnostic)',
+          mu: null,
+          am: '1',
+          fee: '1000000',
+          cfee: '1000000',
+          cut: null,
+          exr: null,
+          prdis: '1000000',
+          dis: '0',
+          adis: '1000000',
+          vra: 0.09,
+          vam: '90000',
+          odt: null,
+          odr: null,
+          odam: null,
+          olt: null,
+          olr: null,
+          olam: null,
+          tsstam: '90000',
+        },
+      ],
       payment: [],
     };
-    const packet: MoadianPacket = {
-      uid,
-      packetType: 'INVOICE.V01',
-      retry: false,
-      data: JSON.stringify(syntheticInvoice),
-      encryptionKeyId: '',
-      symmetricKey: '',
-      iv: '',
-      fiscalId: fiscal,
-      dataSignature: '',
-    };
-    steps.push(
-      this.step('sandbox_prepare', 'PASS', startedAt, `packet آزمایشی ساخته شد (uid پایدار برای امروز؛ بدون ارسال تکراری).`),
-    );
-
-    const adapter = this.buildAdapter();
-    startedAt = Date.now();
-    try {
-      const responses = await adapter.enqueue([packet]);
-      const response = responses[0];
-      if (response?.errorCode) {
-        // official 5005 duplicate.request.uid = already received → not a failure
-        if (response.errorCode === '5005') {
-          steps.push(this.step('sandbox_enqueue', 'PASS', startedAt, 'این آزمون امروز قبلاً ارسال شده است (duplicate uid) — استعلام ادامه می‌یابد.'));
-        } else {
-          steps.push(
-            this.step('sandbox_enqueue', 'FAIL', startedAt, `ارسال sandbox ناموفق: ${response.errorCode} ${response.errorDetail ?? ''}`, response.errorCode),
-          );
-          return sandboxResult('FAIL', uid, 'FAILED', null, `enqueue: ${response.errorCode}`);
-        }
-      } else {
-        steps.push(
-          this.step('sandbox_enqueue', 'PASS', startedAt, `packet به sandbox ارسال شد (referenceNumber: ${response?.referenceNumber ?? '—'}).`),
-        );
-      }
-      // inquiry — the authority decides acceptance asynchronously
-      startedAt = Date.now();
-      const inquiry = await adapter.inquiryByUid([uid]);
-      const result = inquiry[0];
-      if (!result) {
-        return sandboxResult('FAIL', uid, 'UNKNOWN', null, 'استعلام پاسخی برای uid برنگرداند.');
-      }
-      if (result.status === 'PENDING') {
-        return sandboxResult('NOT_CONFIGURED', uid, 'PENDING', result.referenceNumber ?? null, 'مودیان هنوز در حال بررسی است — بعداً استعلام بگیرید.');
-      }
-      if (result.status === 'SUCCESS') {
-        steps.push(this.step('sandbox_inquiry', 'PASS', startedAt, `صورتحساب آزمایشی تأیید شد (${result.confirmationReferenceId ?? '—'}).`));
-        return sandboxResult('PASS', uid, 'SUCCESS', result.referenceNumber ?? null, 'آزمون کامل sandbox موفق بود.');
-      }
-      steps.push(
-        this.step('sandbox_inquiry', 'FAIL', startedAt, `مودیان packet آزمایشی را رد کرد: ${result.errorCode ?? ''} ${result.errorDetail ?? ''}`, result.errorCode ?? null),
-      );
-      return sandboxResult('FAIL', uid, 'REJECTED', result.referenceNumber ?? null, `sandbox rejected: ${result.errorDetail ?? ''}`);
-    } catch (error) {
-      const { code, message } = classifyNetworkError(error);
-      steps.push(this.step('sandbox_enqueue', 'FAIL', startedAt, `ارسال/استعلام sandbox ناموفق: ${message}`, code));
-      return sandboxResult('FAIL', uid, 'UNKNOWN', null, `timeout/unknown: ${code}`);
-    }
   }
 
   private finish(

@@ -3,6 +3,7 @@ import { Request } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CompanyContextService } from '../companies/company-context.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import {
@@ -23,6 +24,7 @@ const RATE_LIMIT_MS = 15_000; // 15s cooldown between administrator diagnostics
 export class TaxDiagnosticController {
   constructor(
     private readonly diagnostics: MoadianDiagnosticService,
+    private readonly prisma: PrismaService,
     private readonly companyContext: CompanyContextService,
     private readonly audit: AuditService,
   ) {}
@@ -71,6 +73,6 @@ export class TaxDiagnosticController {
       actor,
       newValues: { kind: 'sandbox-full-test', note: 'moadian sandbox test run' }, // no secrets recorded
     });
-    return this.diagnostics.runSerialized(() => this.diagnostics.runSandboxFullTest());
+    return this.diagnostics.runSerialized(() => this.diagnostics.runSandboxFullTest(companyId));
   }
 }

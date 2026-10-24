@@ -9,8 +9,8 @@ import {
  *  mocked global fetch for DNS/TLS/HTTP/timeout paths; mock-mode config;
  *  never-mutating behavior; sanitized errors. No real network, no secrets. */
 
-function makeService(fetchImpl: typeof fetch): MoadianDiagnosticService {
-  return new MoadianDiagnosticService(fetchImpl);
+function makeService(fetchImpl: typeof fetch, prisma: unknown = { moadianDiagnosticRun: { findUnique: async () => null, findUniqueOrThrow: async () => null, upsert: async (a: unknown) => a, update: async (a: unknown) => a, create: async (a: unknown) => a }, company: { delete: async () => undefined } }): MoadianDiagnosticService {
+  return new MoadianDiagnosticService(prisma as never, fetchImpl);
 }
 
 const okResponse = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
@@ -39,7 +39,9 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
   });
 
   it('mock success is NEVER represented as sandbox/live connectivity', async () => {
-    const report = await new MoadianDiagnosticService().runConnectionDiagnostics();
+    const report = await makeService(async () => {
+      throw new Error('no network in mock');
+    }).runConnectionDiagnostics();
     expect(report.mode).toBe('mock');
     expect(report.overall).not.toBe('PASS');
   });
@@ -123,6 +125,13 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
   });
 
   it('full sandbox flow: nonce OK + server info OK → ordered PASS through server_information', async () => {
+    const stubPrisma = {
+      moadianDiagnosticRun: {
+        findUnique: async () => null,
+        upsert: async (args: unknown) => args,
+        update: async (args: unknown) => args,
+      },
+    };
     process.env = {
       MOADIAN_MODE: 'sandbox',
       MOADIAN_FISCAL_ID: 'F',
@@ -149,13 +158,13 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
         ) as never;
       }
       return new Response('not found', { status: 404 }) as never;
-    }).runConnectionDiagnostics();
+    }, stubPrisma).runConnectionDiagnostics();
     const byStep = Object.fromEntries(report.steps.map((s) => [s.step, s.status]));
     expect(byStep.configuration).toBe('PASS');
     expect(byStep.network).toBe('PASS');
     expect(byStep.nonce).toBe('PASS');
-    expect(byStep.authentication).toBe('PASS');
-    expect(byStep.server_information).toBe('PASS');
+    expect(byStep.jws_local_construction).toBe('PASS');
+    expect(byStep.remote_authentication).toBe('PASS');
     expect(report.overall).toBe('PASS');
   });
 

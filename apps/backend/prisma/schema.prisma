@@ -64,6 +64,7 @@ model Company {
   taxDefinitions     TaxDefinition[]
   salesTaxInvoices   SalesTaxInvoice[]
   purchaseTaxInvoices PurchaseTaxInvoice[]
+  moadianDiagnosticRuns MoadianDiagnosticRun[]
   claims             OperationalSettlementClaim[]
   loadings           Loading[]
   workflowDefinitions WorkflowDefinition[]
@@ -1121,6 +1122,45 @@ model PurchaseTaxInvoice {
   @@unique([companyId, number])
   @@index([companyId, supplierPartyId])
   @@map("purchase_tax_invoices")
+}
+
+// ─────────────── Phase 8: Moadian diagnostic sandbox test runs ───────────────
+// Durable state for the administrator sandbox full-test: the run identity and
+// UID are persisted BEFORE external submission so a timeout/crash/unknown
+// outcome can be reconciled by INQUIRY (never blind-resend). Isolated from
+// business invoices. One run per company per UTC day (idempotency).
+enum MoadianDiagnosticRunStatus {
+  PREPARED
+  SUBMITTED
+  PENDING
+  SUCCESS
+  REJECTED
+  UNKNOWN
+}
+
+model MoadianDiagnosticRun {
+  id            String   @id @default(uuid()) @db.Uuid
+  companyId     String   @map("company_id") @db.Uuid
+  runDay        String   @map("run_day") // UTC yyyy-mm-dd — idempotency day
+  uid           String   @unique @map("uid")
+  fiscalId      String   @map("fiscal_id")
+  status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
+  referenceNumber String? @map("reference_number")
+  errorCode     String?  @map("error_code")
+  errorDetail   String?  @map("error_detail")
+  confirmationReferenceId String? @map("confirmation_reference_id")
+  taxResult     String?  @map("tax_result")
+  sentAt        DateTime? @map("sent_at") @db.Timestamptz(6)
+  inquiredAt    DateTime? @map("inquired_at") @db.Timestamptz(6)
+  createdBy     String?  @map("created_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, runDay])
+  @@index([companyId, status])
+  @@map("moadian_diagnostic_runs")
 }
 
 // ─────────────── Tax invoice ↔ order allocations (M:N) ───────────────

@@ -96,9 +96,16 @@
 - حالت mock: تمام گام‌های شبکه‌ای NOT_CONFIGURED — موفقیت mock هرگز اتصال
   واقعی نیست (تست‌شده).
 - حالت live: فقط گام‌های غیرتغییردهنده؛ آزمون کامل sandbox در live مسدود.
-- آزمون کامل sandbox: نیازمند MOADIAN_MODE=sandbox + fiscalId؛ packet
-  آزمایشی با uid پایدار روزانه (بدون ارسال تکراری با timeout/restart)؛
-  5005 = قبلاً پذیرفته‌شده؛ پاسخ PENDING → «بعداً استعلام بگیرید».
+- آزمون کامل sandbox — **state machine پایدار با مدل
+  `MoadianDiagnosticRun`** (migration `20241022100000`): ردیف run با uid و
+  status **قبل از هر ارسال** ثبت می‌شود؛ یکی از این‌ها در هر شرکت/روز (UNIQUE
+  DB). بازیابی: هر run موجود با INQUIRY_BY_UID reconcile می‌شود — PENDING →
+  صبر (بدون ارسال مجدد)، SUCCESS → گزارش نتیجه قبلی، REJECTED → ارسال مجدد
+  با `retry=true` و uid جدید. کرش/timeout/restart هرگز ارسال کورکورانه
+  تولید نمی‌کند. payload آزمایشی **کامل** است (taxid/tins/sstid از env
+  `MOADIAN_SANDBOX_*`)؛ اگر این envها تنظیم نشده باشند نتیجه
+  NOT_CONFIGURED با راهنمای اقدام برمی‌گردد — payload ناقص هرگز ارسال
+  نمی‌شود. 5005 duplicate = قبلاً پذیرفته‌شده (FAILED نمی‌شود).
 - رکورد diagnostic history جدا از تراکنش‌های کسب‌وکار نگهداری نمی‌شود؛ فقط
   audit (بدون هیچ secret) ثبت می‌شود و نتایج به UI برمی‌گردد.
 - امنیت: هر دو endpoint با زنجیره guard سراسری + requireCompanyId +
@@ -154,6 +161,10 @@ MOADIAN_PRIVATE_KEY=                 PEM کلید خصوصی (
 MOADIAN_CERTIFICATE=                 PEM گواهی X.509 (
  escape) — الزامی؛
                                      کلید عمومی آن باید با PRIVATE_KEY تطبیق کند
+# Sandbox full-test identity (REQUIRED for the sandbox full test — NO defaults)
+MOADIAN_SANDBOX_TAXID=               شناسه یکتای مالیاتی ۲۲ کاراکتری صورتحساب آزمایشی
+MOADIAN_SANDBOX_TINS=                شناسه ملی/کد اقتصادی خریدار آزمایشی
+MOADIAN_SANDBOX_SSTID=               کد کالا/خدمت ثبت‌شده در سامانه
 ```
 
 سیم‌کشی واقعی این متغیرها فقط در `moadian/adapter-factory.ts` انجام می‌شود
