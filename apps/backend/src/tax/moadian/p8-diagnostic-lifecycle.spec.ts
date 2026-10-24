@@ -25,6 +25,7 @@ let prisma: PrismaClient;
 let inquiryScript: Array<"PENDING" | "SUCCESS" | "FAILED"> = [];
 let inquiryFailures = 0;
 let inquiryFailureKind: "timeout" | "error" = "error";
+let inquiryEmptyResponse = false;
 const enqueuedUids: string[] = [];
 
 function makeFetch(): typeof fetch {
@@ -58,6 +59,9 @@ function makeFetch(): typeof fetch {
         throw new Error("inquiry transport failure");
       }
       const body = JSON.parse(String((init as RequestInit).body ?? "{}")) as { uidList: string[] };
+      if (inquiryEmptyResponse) {
+        return new Response(JSON.stringify({ result: [] }), { status: 200 }) as never;
+      }
       const results = body.uidList.map((uid) => {
         const next = inquiryScript.shift() ?? "SUCCESS";
         if (next === "PENDING") return { uid, status: "PENDING" };
@@ -76,6 +80,11 @@ function makeService(): MoadianDiagnosticService {
 }
 
 async function createCompany(): Promise<string> {
+  // reset mock knobs — tests run sequentially and share module state
+  inquiryScript = [];
+  inquiryFailures = 0;
+  inquiryFailureKind = "error";
+  inquiryEmptyResponse = false;
   const company = await prismaService.company.create({
     data: { nameFa: `p8r-${Date.now()}`, status: "ACTIVE" },
   });
@@ -204,6 +213,10 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
       expect(attempts).toHaveLength(1);
       expect(attempts[0].status).toBe("SUCCESS");
       expect(enqueuedUids.filter((u) => u === attempts[0].uid)).toHaveLength(1);
+      // fifth review #2: after the losing instance returns, the aggregate
+      // reflects ONLY the winner's final state — never a contender's
+      const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+      expect(runRow.status).toBe("SUCCESS");
     },
   );
 
@@ -371,6 +384,10 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
     expect(res.errorCode).toBe("SANDBOX_CLAIM_IN_PROGRESS");
     const attempts = await prisma.moadianDiagnosticAttempt.findMany({ where: { companyId } });
     expect(attempts).toHaveLength(1);
+    // fifth review #2: the contending (losing) caller must NOT overwrite the
+    // aggregate — it stays exactly as the owning instance left it
+    const runRow = await prisma.moadianDiagnosticRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(runRow.status).toBe("SUBMITTED");
   });
 
   itif(
@@ -475,5 +492,111 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
       expect(res.errorCode).toBe("SANDBOX_ATTEMPT_IDENTITY_LOST");
       expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(0);
       expect(enqueuedUids.length).toBe(enqueuedBefore);
+    },
+  );
+
+  // fifth review #1 — retry is unlocked ONLY by a fresh, explicit,
+  // authoritative rejection for the exact persisted uid
+  async function seedRejectedHead(uid: string): Promise<{ runId: string }> {
+    const run = await prisma.moadianDiagnosticRun.create({
+      data: { companyId: COMPANY_IDS[COMPANY_IDS.length - 1], runDay: today(), fiscalId: "F-TEST", status: "REJECTED" },
+    });
+    await prisma.moadianDiagnosticAttempt.create({
+      data: {
+        runId: run.id,
+        companyId: COMPANY_IDS[COMPANY_IDS.length - 1],
+        attempt: 1,
+        uid,
+        retry: false,
+        status: "REJECTED",
+        errorCode: "CONTENT",
+        errorDetail: "prior authoritative rejection",
+        payloadSnapshot: {},
+      },
+    });
+    return { runId: run.id };
+  }
+
+  itif("p8-20a prior REJECTED + inquiry PENDING -> NO new attempt, NO enqueue", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedRejectedHead("sandbox-rej-pending-1");
+    inquiryScript = ["PENDING"];
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.report.overall).toBe("FAIL");
+    expect(res.submission?.status).toBe("REJECTED"); // unchanged
+    expect(enqueuedUids.length).toBe(enqueuedBefore); // no resend
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-rej-pending-1" },
+    });
+    expect(attempt.status).toBe("REJECTED"); // not overwritten by the inconclusive inquiry
+    const runRow = await prisma.moadianDiagnosticRun.findFirstOrThrow({ where: { companyId } });
+    expect(runRow.status).toBe("REJECTED");
+  });
+
+  itif("p8-20b prior REJECTED + empty inquiry response -> NO new attempt, NO enqueue", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedRejectedHead("sandbox-rej-empty-1");
+    inquiryEmptyResponse = true;
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.report.overall).toBe("FAIL");
+    expect(res.submission?.status).toBe("REJECTED");
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-rej-empty-1" },
+    });
+    expect(attempt.status).toBe("REJECTED");
+  });
+
+  itif("p8-20c prior REJECTED + inquiry transport failure -> NO new attempt, NO enqueue", async () => {
+    const companyId = await createCompany();
+    process.env = { ...process.env, ...SANDBOX_ENV };
+    const svc = makeService();
+    await seedRejectedHead("sandbox-rej-transport-1");
+    inquiryFailures = 1;
+    inquiryFailureKind = "error";
+    const enqueuedBefore = enqueuedUids.length;
+    const res = await svc.runSandboxFullTest(companyId);
+    expect(res.report.overall).toBe("FAIL");
+    expect(res.submission?.status).toBe("REJECTED");
+    expect(enqueuedUids.length).toBe(enqueuedBefore);
+    expect(await prisma.moadianDiagnosticAttempt.count({ where: { companyId } })).toBe(1);
+    const attempt = await prisma.moadianDiagnosticAttempt.findFirstOrThrow({
+      where: { companyId, uid: "sandbox-rej-transport-1" },
+    });
+    expect(attempt.status).toBe("REJECTED");
+  });
+
+  itif(
+    "p8-20d explicit authoritative rejection for the persisted uid -> retry permitted exactly once",
+    async () => {
+      const companyId = await createCompany();
+      process.env = { ...process.env, ...SANDBOX_ENV };
+      const svc = makeService();
+      const { runId } = await seedRejectedHead("sandbox-rej-explicit-1");
+      void runId;
+      // fresh explicit FAILED from the authority for the SAME persisted uid
+      inquiryScript = ["FAILED", "SUCCESS"];
+      const res = await svc.runSandboxFullTest(companyId);
+      expect(res.submission?.status).toBe("SUCCESS");
+      const attempts = await prisma.moadianDiagnosticAttempt.findMany({
+        where: { companyId },
+        orderBy: { attempt: "asc" },
+      });
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1].attempt).toBe(2);
+      expect(attempts[1].retry).toBe(true);
+      expect(attempts[1].uid).not.toBe("sandbox-rej-explicit-1");
+      // exactly one enqueue, and only for the NEW uid (the rejected uid is
+      // never re-sent)
+      expect(enqueuedUids.filter((u) => u === "sandbox-rej-explicit-1")).toHaveLength(0);
+      expect(enqueuedUids.filter((u) => u === attempts[1].uid)).toHaveLength(1);
     },
   );});

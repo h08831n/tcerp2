@@ -13,6 +13,15 @@
 --   PENDING / SUCCESS / REJECTED / UNKNOWN copied as-is.
 -- The old model persisted no payload snapshot, so migrated attempts carry an
 -- empty snapshot; their recovery anchor is the copied uid/reference result.
+-- DEPLOYMENT NOTE (fifth review): this migration is intentionally
+-- self-contained (data copy BEFORE the drops) — the copy can never be a
+-- follow-up migration because the source columns would already be gone.
+-- Prisma never re-runs a recorded migration: an environment that applied the
+-- pre-fix drop-only variant (commit db3c86b) has already lost the source
+-- columns; that table is diagnostic-only (no business/tax data). Detection
+-- for operators: compare _prisma_migrations.started_at of this migration
+-- against the fix commit date (7daf814, 2026-10-24). Never edit an applied
+-- migration again — forward migrations only.
 CREATE TABLE "moadian_diagnostic_attempts" (
     "id" UUID NOT NULL,
     "run_id" UUID NOT NULL,
