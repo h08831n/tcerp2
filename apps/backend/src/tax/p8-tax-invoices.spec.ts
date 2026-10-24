@@ -453,24 +453,70 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     expect(submissions[submissions.length - 1].uid).not.toBe(submissions[0].uid);
   });
 
-  itif('p8-06 enqueue transport failure → FAILED with error kept; retry succeeds', async () => {
-    const doc = await makeOwnDoc();
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
-    fakeAdapter.failEnqueue = true;
-    const res = await service.send(COMPANY, invoice.id, ACTOR);
-    expect(res.status).toBe('FAILED');
-    fakeAdapter.failEnqueue = false;
-    const failed = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
-    expect(failed.status).toBe('FAILED');
-    expect(failed.moadianError).toContain('INJECTED');
-    const retryRes = await service.send(COMPANY, invoice.id, ACTOR);
-    expect(retryRes.status).toBe('SUBMITTED');
-    // exactly one SUBMITTED submission (the failed attempt stays in history)
-    const submitted = await prisma.salesTaxInvoiceSubmission.count({
-      where: { invoiceId: invoice.id, status: 'PENDING' },
-    });
-    expect(submitted).toBe(1);
-  });
+  itif(
+    'p8-06 enqueue transport failure = AMBIGUOUS outcome: stays PENDING, a retry NEVER mints a new uid (no duplicate invoice)',
+    async () => {
+      const doc = await makeOwnDoc();
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      fakeAdapter.failEnqueue = true;
+      const res = await service.send(COMPANY, invoice.id, ACTOR);
+      // transport errors are UNKNOWN outcomes: the packet MAY have reached
+      // the authority — never a definitive FAILED
+      expect(res.status).toBe('SUBMITTED');
+      expect(res.awaitingInquiry).toBe(true);
+      expect(res.errorCode).toBe('TRANSPORT');
+      fakeAdapter.failEnqueue = false;
+      const afterFail = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(afterFail.status).toBe('SUBMITTED');
+      expect(afterFail.moadianError).toContain('INJECTED'); // sanitized reason kept visible
+      const pendingSub = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+        where: { invoiceId: invoice.id, status: 'PENDING' },
+      });
+      expect(pendingSub.errorCode).toBe('TRANSPORT');
+      const enqueuedAfterFailure = fakeAdapter.enqueued.length;
+
+      // a re-send while the outcome is unresolved is BLOCKED — no second
+      // packet can ever be minted while the authority's verdict is unknown
+      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_NOT_SENDABLE');
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedAfterFailure); // NO duplicate enqueue
+
+      // reconciliation goes through inquiry() on the SAME persisted uid
+      fakeAdapter.inquiryQueue.push('SUCCESS'); // the authority accepted packet #1
+      expect((await service.inquiry(COMPANY, invoice.id)).status).toBe('SUCCESS');
+      const promoted = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(promoted.status).toBe('SUCCESS');
+      expect(promoted.moadianError).toBeNull();
+      // exactly one submission with one uid — no duplicate invoice exists
+      expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
+    },
+  );
+
+  itif(
+    'p8-06b transport failure then AUTHORITATIVE rejection → official retry with a NEW uid and retry=true',
+    async () => {
+      const doc = await makeOwnDoc();
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      fakeAdapter.failEnqueue = true;
+      await service.send(COMPANY, invoice.id, ACTOR);
+      fakeAdapter.failEnqueue = false;
+      // the authority definitively REJECTS the transport-pending packet —
+      // only this authoritative answer unlocks the official retry
+      fakeAdapter.inquiryQueue.push('FAILED');
+      expect((await service.inquiry(COMPANY, invoice.id)).status).toBe('FAILED');
+      const retryRes = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(retryRes.status).toBe('SUBMITTED');
+      const submissions = await prisma.salesTaxInvoiceSubmission.findMany({
+        where: { invoiceId: invoice.id },
+        orderBy: { attempt: 'asc' },
+      });
+      expect(submissions).toHaveLength(2);
+      expect(submissions[0].status).toBe('FAILED'); // authoritative rejection recorded
+      expect(submissions[0].errorCode).toBe('CONTENT'); // authoritative code wins over TRANSPORT
+      expect(submissions[1].attempt).toBe(2);
+      expect(submissions[1].retry).toBe(true); // official retry flag after authoritative failure
+      expect(submissions[1].uid).not.toBe(submissions[0].uid); // new uid — safe: #1 was authoritatively rejected
+    },
+  );
 
   itif('p8-07 two concurrent sends on one invoice claim atomically (single submission)', async () => {
     const doc = await makeOwnDoc();

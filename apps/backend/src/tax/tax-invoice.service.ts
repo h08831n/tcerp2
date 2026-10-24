@@ -374,6 +374,10 @@ export class TaxInvoiceService {
       include: { lines: true, customer: { select: { type: true, nameFa: true, nationalId: true, economicCode: true, nationalCode: true } } },
     });
     if (!invoice) throw new NotFoundError('Tax invoice not found', { invoiceId });
+    // authoritative-failure tracking: recoverPending() may resolve a prior
+    // attempt to FAILED — the OFFICIAL retry=true flag must reflect the
+    // post-recovery state, not the stale pre-call snapshot
+    let authoritativeFailure = false;
     if (invoice.status === 'SENDING') {
       // crash/timeout recovery path: a prior claim never completed — check
       // its pending submissions instead of blocking forever
@@ -382,9 +386,17 @@ export class TaxInvoiceService {
         // the authority still holds the packet unresolved — never resend
         throw new ConflictError('TAX_INVOICE_SEND_IN_PROGRESS');
       }
-      // recovered SUCCESS/FAILED → invoice status updated; continue below
+      if (recovered === 'SUCCESS') {
+        // late success recovered from the authority — report it, never resend
+        return { status: 'SUCCESS' as const, recoveredLateSuccess: true };
+      }
+      // recovered FAILED → invoice status updated; continue to official retry
+      authoritativeFailure = true;
     }
-    if (invoice.status !== 'READY' && invoice.status !== 'FAILED') {
+    // strict sendable gate: a SUBMITTED invoice always goes through
+    // inquiry() first (p8-04 contract) — send() can never bypass the
+    // authority's unresolved verdict, so no duplicate can be created
+    if (invoice.status !== 'READY' && invoice.status !== 'FAILED' && !authoritativeFailure) {
       throw new ConflictError('TAX_INVOICE_NOT_SENDABLE', { status: invoice.status });
     }
     // unknown-outcome guard: a still-PENDING prior submission means the
@@ -408,8 +420,9 @@ export class TaxInvoiceService {
         return { status: 'SUCCESS' as const, recoveredLateSuccess: true };
       }
       // prior attempt is definitively FAILED → fall through to a safe retry
+      authoritativeFailure = true;
     }
-    const isRetry = invoice.status === 'FAILED';
+    const isRetry = authoritativeFailure || invoice.status === 'FAILED';
     // atomic claim (like the loading allocation pattern): READY/FAILED → SENDING
     const claimed = await this.prisma.salesTaxInvoice.updateMany({
       where: { id: invoiceId, companyId, status: { in: ['READY', 'FAILED'] } },
@@ -515,15 +528,29 @@ export class TaxInvoiceService {
       return { status: 'SUBMITTED' as const, submissionId: submission.id, uid, referenceNumber: response?.referenceNumber ?? null };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // AMBIGUOUS OUTCOME (final acceptance audit #4): an enqueue error means
+      // the packet MAY have reached the authority — it is NEVER a definitive
+      // failure. The submission stays PENDING with its durable uid and the
+      // invoice goes SUBMITTED (awaiting inquiry); recoverPending() and the
+      // pendingPrior guard reconcile THIS exact uid before any resend, so a
+      // blind retry with a NEW uid (→ duplicate invoice at the authority)
+      // can never happen. Only an AUTHORITATIVE inquiry result unlocks the
+      // official retry (FAILED → new uid, retry=true).
       await this.prisma.salesTaxInvoiceSubmission.update({
         where: { id: submission.id },
-        data: { status: 'FAILED', errorDetail: message },
+        data: { errorCode: 'TRANSPORT', errorDetail: message },
       });
       await this.prisma.salesTaxInvoice.update({
         where: { id: invoiceId },
-        data: { status: 'FAILED', moadianStatus: 'FAILED', moadianError: message },
+        data: { status: 'SUBMITTED', moadianStatus: 'PENDING', moadianError: `TRANSPORT: ${message}` },
       });
-      return { status: 'FAILED' as const, submissionId: submission.id, errorCode: 'TRANSPORT' };
+      return {
+        status: 'SUBMITTED' as const,
+        submissionId: submission.id,
+        uid,
+        errorCode: 'TRANSPORT',
+        awaitingInquiry: true,
+      };
     }
   }
 
