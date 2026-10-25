@@ -108,7 +108,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
       data: { companyId: COMPANY, code: 'WEIGHT-P8', nameFa: 'وزن p8' },
     });
     const uom = await prismaService.uom.create({
-      data: { companyId: COMPANY, categoryId: uomCategory.id, nameFa: 'کیلوگرم', symbol: 'kg', conversionRatio: new Prisma.Decimal(1), isBaseUnit: true },
+      data: { companyId: COMPANY, categoryId: uomCategory.id, nameFa: 'کیلوگرم', symbol: 'kg', conversionRatio: new Prisma.Decimal(1), isBaseUnit: true, moadianUnitCode: '164' },
     });
     const template = await prismaService.productTemplate.create({
       data: {

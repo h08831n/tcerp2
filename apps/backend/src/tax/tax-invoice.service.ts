@@ -151,15 +151,18 @@ export class TaxInvoiceService {
       (input.lineOverrides ?? []).map((o) => [o.salesLineId, new Prisma.Decimal(o.quantity)]),
     );
 
-    // Over-invoicing guard (Critical Tax Audit): previously ISSUED invoice
-    // quantities (any status except CANCELLED) reduce the remaining
-    // tax-invoiceable quantity per line. Partial, multi-stage issuance is
-    // supported: each invoice issues at most the remaining amount.
+    // Over-invoicing guard (Critical Tax Audit + sixteenth review): only
+    // MAIN-subject invoices consume the loading-based issuance cap.
+    // CORRECTIVE/CANCEL/RETURN invoices are REFERENCE-LINKED adjustments of
+    // an existing submission — they never count as newly issued quantity or
+    // discount here (an explicit design decision: reference-linked subjects
+    // do not touch the cap). CANCELLED invoices are excluded, so cancelling
+    // frees the quantity for re-issuance (p8-12).
     const priorLines = await this.prisma.salesTaxInvoiceLine.findMany({
       where: {
         companyId,
         salesLineId: { in: doc.lines.map((l) => l.id) },
-        salesTaxInvoice: { status: { not: 'CANCELLED' } },
+        salesTaxInvoice: { status: { not: 'CANCELLED' }, subject: 'MAIN' },
       },
       select: { salesLineId: true, quantity: true, dis: true },
     });
@@ -1092,6 +1095,18 @@ export class TaxInvoiceService {
     }
     if (!Array.isArray(payload.payments)) {
       throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['payments'] });
+    }
+    // official RC_IITP.IS_V7.9 جدول ۲: mu (واحد اندازه‌گیری) is a REQUIRED
+    // body field carrying the AUTHORITY's unit code — an unmapped UOM (null
+    // mu) blocks submission BEFORE any state change (sixteenth review)
+    const muUnmapped = payload.body
+      .map((line, index) => (typeof line.mu === 'string' && line.mu.length > 0 ? null : index))
+      .filter((index): index is number => index !== null);
+    if (muUnmapped.length > 0) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_MU_UNMAPPED', {
+        bodyIndexes: muUnmapped,
+        remediation: 'map every UOM to its official unit code (Uom.moadianUnitCode) before submission',
+      });
     }
     // official RC_IITP.IS_V7.9 جدول ۲۴: setm (روش تسویه) 1=نقدی, 2=نسیه,
     // 3=نقدی/نسیه; setm=3 requires cap (مبلغ پرداختی نقدی) + insp (مبلغ نسیه).

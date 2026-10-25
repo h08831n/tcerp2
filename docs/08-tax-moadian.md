@@ -225,6 +225,10 @@ envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌�
   خالی <- `TAX_INVOICE_PAYLOAD_SELLER_TINS_UNAVAILABLE`.
 - **tob**: نوع شخص خریدار — 1=حقیقی، 2=حقوقی، 3=مشارکت مدنی، 4=اتباع
   غیرایرانی (نقشه: COMPANY=2، PERSON=1).
+- **inty وراثتی**: صورتحساب‌های اصلاحی/ابطالی/برگشتی inty را از **صورتحساب
+  مرجع** به ارث می‌برند (lookup با relatedTaxid در همان شرکت؛ اگر مرجع
+  موجود نباشد، از وضعیت اقتصادی خریدار مشتق می‌شود و اعتبارسنجی نهایی با
+  سازمان است) — منطق پیاده‌شده در createFromSalesDocument.
 - **bid**: شناسه/شماره ملی خریدار — tob=1 یعنی شماره ملی (nationalCode)؛
   tob=2 یعنی شناسه ملی (nationalId). خالی <- `TAX_INVOICE_PAYLOAD_BUYER_ID_MISSING`.
 - **tinb**: شماره اقتصادی خریدار — برای tob=2 الزامی؛ برای اشخاص حقیقی

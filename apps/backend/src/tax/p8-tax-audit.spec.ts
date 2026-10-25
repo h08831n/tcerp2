@@ -110,7 +110,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     const uomCategory = await prisma.uomCategory.create({ data: { companyId: COMPANY, code: `W-${stamp}`, nameFa: 'وزن' } });
     created.push(uomCategory.id);
     const uom = await prisma.uom.create({
-      data: { companyId: COMPANY, categoryId: uomCategory.id, nameFa: `kg-${stamp}`, symbol: `kg-${stamp}`, conversionRatio: new Prisma.Decimal(1), isBaseUnit: true },
+      data: { companyId: COMPANY, categoryId: uomCategory.id, nameFa: `kg-${stamp}`, symbol: `kg-${stamp}`, conversionRatio: new Prisma.Decimal(1), isBaseUnit: true, moadianUnitCode: '164' },
     });
     created.push(uom.id);
     const variant = await prisma.productVariant.create({
@@ -710,7 +710,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         tbill: '21255',
       },
       // official RC_IITP.IS_V7.9 sample line (adis = prdis - dis; tsstam = adis + vam)
-      body: [{ sstid: '2710000138624', am: '2', fee: '10000', prdis: '20000', dis: '500', adis: '19500', vam: '1755', tsstam: '21255' }],
+      body: [{ sstid: '2710000138624', mu: '164', am: '2', fee: '10000', prdis: '20000', dis: '500', adis: '19500', vam: '1755', tsstam: '21255' }],
       payments: [],
     };
     expect(() => TaxInvoiceService.validateSubmissionPayload(valid, false)).not.toThrow();
@@ -941,7 +941,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     });
     created.push(salesperson2.id);
     const uom2 = await prisma.uom.create({
-      data: { companyId: COMPANY, categoryId: (await prisma.uomCategory.create({ data: { companyId: COMPANY, code: `W-${seq2}`, nameFa: 'وزن' } })).id, nameFa: `kg-${seq2}`, symbol: `kg-${seq2}`, conversionRatio: new Prisma.Decimal(1), isBaseUnit: true },
+      data: { companyId: COMPANY, categoryId: (await prisma.uomCategory.create({ data: { companyId: COMPANY, code: `W-${seq2}`, nameFa: 'وزن' } })).id, nameFa: `kg-${seq2}`, symbol: `kg-${seq2}`, conversionRatio: new Prisma.Decimal(1), isBaseUnit: true, moadianUnitCode: '164' },
     });
     created.push(uom2.id);
     const doc2 = await prisma.salesDocument.create({
@@ -1192,4 +1192,155 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     // total tax and final amounts reconcile with the sales line
     expect(new Prisma.Decimal(s1.vam).plus(s2.vam).toString()).toBe('890');
     expect(new Prisma.Decimal(s1.tsstam).plus(s2.tsstam).toString()).toBe('10790');
+  });
+
+  // sixteenth review — reference-linked subjects (CORRECTIVE/CANCEL/RETURN)
+  // never consume the loading-based issuance cap; only MAIN does.
+  // CANCELLED invoices free their quantity for re-issuance (independent rule).
+  itif('p8-30 MAIN → CORRECTIVE → MAIN: corrective does not consume the cap; CANCEL frees it', async () => {
+    const { doc, line } = await makeDoc('30'); // loaded 30, ordered 999
+    const sstid = [{ salesLineId: line.id, sstid: '2710000138624' }];
+
+    // MAIN #1: issues ALL 30 loaded units
+    const main1 = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR);
+    const main1Taxid = 'A1A1A1A1A1A1A1A1A1A1A1';
+    await prisma.salesTaxInvoice.update({ where: { id: main1.id }, data: { taxid: main1Taxid } });
+    const main1Line = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: main1.id } });
+    expect(main1Line.quantity.toString()).toBe('30');
+
+    // CORRECTIVE referencing MAIN #1 — reference-linked; must NOT consume the cap
+    const corrective = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      subject: 'CORRECTIVE',
+      relatedTaxid: main1Taxid,
+      lineSstids: sstid,
+    }, ACTOR);
+    expect(corrective.subject).toBe('CORRECTIVE');
+    expect(corrective.inty).toBe(1); // inherited from the MAIN reference
+
+    // a NEW loading of 20 units: the second MAIN must be able to issue
+    // EXACTLY those 20 — if the corrective had consumed the cap, this
+    // issuance would fail with QUANTITY_EXCEEDED
+    const loading2 = await prisma.loading.create({ data: { companyId: COMPANY, loadingDate: new Date() } });
+    created.push(loading2.id);
+    const salesLineRow = await prisma.salesLine.findFirstOrThrow({ where: { id: line.id } });
+    const loadingLine2 = await prisma.loadingLine.create({
+      data: { loadingId: loading2.id, productVariantId: line.productVariantId, actualQuantity: new Prisma.Decimal('20'), uomId: salesLineRow.uomId },
+    });
+    created.push(loadingLine2.id);
+    await prisma.loadingAllocation.create({
+      data: { companyId: COMPANY, loadingLineId: loadingLine2.id, salesLineId: line.id, allocatedQuantity: new Prisma.Decimal('20') },
+    });
+    const main2 = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      lineOverrides: [{ salesLineId: line.id, quantity: '20' }], // only the NEW loading
+      lineSstids: sstid,
+    }, ACTOR);
+    const main2Line = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: main2.id } });
+    expect(main2Line.quantity.toString()).toBe('20'); // exactly the new loading
+
+    // CANCEL scenario (independent rule): cancelling main2 FREES its 20 —
+    // a third MAIN re-issues the same 20
+    await prisma.salesTaxInvoice.update({ where: { id: main2.id }, data: { status: 'CANCELLED' } });
+    const main3 = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      lineOverrides: [{ salesLineId: line.id, quantity: '20' }], // the freed quantity
+      lineSstids: sstid,
+    }, ACTOR);
+    const main3Line = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: main3.id } });
+    expect(main3Line.quantity.toString()).toBe('20');
+    // main1's 30 remain consumed throughout (never freed — never cancelled)
+  });
+
+  itif('p8-29 unmapped UOM unit code → rejected BEFORE SENDING and BEFORE the adapter call', async () => {
+    // fixture: invoice line whose UOM has NO moadianUnitCode
+    const seq = `${Date.now()}-mu`;
+    const customer = await prisma.party.create({
+      data: {
+        companyId: COMPANY,
+        type: 'PERSON',
+        nameFa: `p8a-mu ${seq}`,
+        economicCode: '411598765432',
+        nationalCode: `0012${seq.slice(-6)}`,
+        roles: { create: [{ role: 'CUSTOMER' }] },
+      },
+    });
+    created.push(customer.id);
+    const uomNoCode = await prisma.uom.create({
+      data: {
+        companyId: COMPANY,
+        categoryId: (await prisma.uomCategory.create({ data: { companyId: COMPANY, code: `W-${seq}`, nameFa: 'وزن' } })).id,
+        nameFa: `kg-${seq}`,
+        symbol: `kg-${seq}`,
+        conversionRatio: new Prisma.Decimal(1),
+        isBaseUnit: true,
+        // NO moadianUnitCode — unmapped
+      },
+    });
+    created.push(uomNoCode.id);
+    const variant = await prisma.productVariant.create({
+      data: {
+        companyId: COMPANY,
+        templateId: (
+          await prisma.productTemplate.create({
+            data: {
+              companyId: COMPANY,
+              categoryId: (
+                await prisma.productCategory.create({ data: { companyId: COMPANY, code: `P8A-MU-${seq}`, nameFa: 'p8a-mu' } })
+              ).id,
+              nameFa: 'p8a-mu',
+            },
+          })
+        ).id,
+        sku: `P8A-MU-${seq}`,
+        nameFa: 'کالای بدون کد واحد',
+        combinationKey: `p8a-mu-${seq}`,
+      },
+    });
+    created.push(variant.id);
+    const doc = await prisma.salesDocument.create({
+      data: {
+        companyId: COMPANY,
+        documentNumber: `P8A-MU-${seq}`,
+        customerPartyId: customer.id,
+        salespersonUserId: (await prisma.user.create({ data: { username: `p8a-mu-${seq}`, passwordHash: 'x', status: 'ACTIVE' } })).id,
+        documentDate: new Date(),
+        status: 'COMPLETED',
+        lines: {
+          create: {
+            companyId: COMPANY,
+            productVariantId: variant.id,
+            orderedQuantity: new Prisma.Decimal(999),
+            uomId: uomNoCode.id,
+            unitPrice: new Prisma.Decimal('100'),
+            discountAmount: new Prisma.Decimal('0'),
+            taxRateSnapshot: new Prisma.Decimal(9),
+            subtotal: new Prisma.Decimal('0'),
+            lineTotal: new Prisma.Decimal('0'),
+          },
+        },
+      },
+      include: { lines: true },
+    });
+    created.push(doc.id);
+    const loading = await prisma.loading.create({ data: { companyId: COMPANY, loadingDate: new Date() } });
+    created.push(loading.id);
+    const loadingLine = await prisma.loadingLine.create({
+      data: { loadingId: loading.id, productVariantId: doc.lines[0].productVariantId, actualQuantity: new Prisma.Decimal('10'), uomId: uomNoCode.id },
+    });
+    created.push(loadingLine.id);
+    await prisma.loadingAllocation.create({
+      data: { companyId: COMPANY, loadingLineId: loadingLine.id, salesLineId: doc.lines[0].id, allocatedQuantity: new Prisma.Decimal('10') },
+    });
+
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
+    const enqueuedBefore = fakeAdapter.enqueued.length;
+    // rejected BEFORE the claim: invoice stays READY, no submission, no adapter call
+    await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_PAYLOAD_MU_UNMAPPED');
+    const after = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+    expect(after.status).toBe('READY');
+    expect(
+      await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } }),
+    ).toBe(0);
+    expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
   });});
