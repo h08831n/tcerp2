@@ -14,6 +14,7 @@ import {
   TAX_INVOICE_STATUS_LABELS,
   TAX_INVOICE_SUBJECT_LABELS,
   taxInvoiceErrorMessage,
+  assignLineSstid,
   createTaxInvoiceFromSales,
   fetchTaxInvoice,
   fetchTaxInvoices,
@@ -40,6 +41,9 @@ export default function TaxInvoicesPage() {
   const [selectedDoc, setSelectedDoc] = useState<EntityOption | null>(null);
   const [subject, setSubject] = useState("MAIN");
   const [issueDate, setIssueDate] = useState<string | null>(null);
+  // official جدول ۲: sstid (کد کالا/خدمت) — required per line; resolved from
+  // the registered goods list and applied to every line of the new invoice
+  const [lineSstid, setLineSstid] = useState("");
   const [creating, setCreating] = useState(false);
 
   // detail modal
@@ -329,6 +333,10 @@ function TaxInvoiceDetailModal({
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof fetchTaxInvoice>> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setErrorLocal] = useState<string | null>(null);
+  // official جدول ۲: sstid mapping per line — assignable while the invoice is
+  // READY/FAILED (submission without a mapped code is blocked backend-side)
+  const [sstidDrafts, setSstidDrafts] = useState<Record<string, string>>({});
+  const [mappingId, setMappingId] = useState<string | null>(null);
 
   const load = useCallback(async (id: string) => {
     setLoading(true);
@@ -402,6 +410,7 @@ function TaxInvoiceDetailModal({
                   <th className="px-3 py-2 font-medium">پس‌کرک</th>
                   <th className="px-3 py-2 font-medium">نرخ مالیات</th>
                   <th className="px-3 py-2 font-medium">مالیات</th>
+                  <th className="px-3 py-2 font-medium">کد کالا/خدمت (sstid)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -416,6 +425,41 @@ function TaxInvoiceDetailModal({
                     <td className="px-3 py-2 tabular-nums">{faMoneyExact(l.prdis)}</td>
                     <td className="px-3 py-2 tabular-nums">{faDigits(l.vra)}٪</td>
                     <td className="px-3 py-2 tabular-nums">{faMoneyExact(l.vam)}</td>
+                    <td className="px-3 py-2">
+                      {/* official جدول ۲: sstid is REQUIRED per line — mapped
+                          here from the registered goods list */}
+                      {(detail.status === "READY" || detail.status === "FAILED") ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            value={sstidDrafts[l.id] ?? l.sstid ?? ""}
+                            onChange={(e) => setSstidDrafts((d) => ({ ...d, [l.id]: e.target.value }))}
+                            placeholder="کد کالا/خدمت"
+                            className="h-7 w-32 rounded border border-slate-300 px-1 text-xs"
+                          />
+                          <Button
+                            variant="secondary"
+                            disabled={mappingId === l.id}
+                            onClick={async () => {
+                              setMappingId(l.id);
+                              setErrorLocal(null);
+                              try {
+                                await assignLineSstid(l.id, (sstidDrafts[l.id] ?? l.sstid ?? "").trim());
+                                setNotice("کد کالا/خدمت ثبت شد.");
+                                await load(detail.id);
+                              } catch (e) {
+                                setErrorLocal(taxInvoiceErrorMessage(e));
+                              } finally {
+                                setMappingId(null);
+                              }
+                            }}
+                          >
+                            ثبت
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-xs tabular-nums">{l.sstid ? faDigits(l.sstid) : "—"}</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

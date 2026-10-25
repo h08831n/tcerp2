@@ -1,11 +1,22 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
-import { IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsArray, IsDateString, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { Request } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CompanyContextService } from '../companies/company-context.service';
 import { TaxInvoiceService } from './tax-invoice.service';
 import { SalesTaxInvoiceStatus } from '@prisma/client';
+
+export class LineSstidDto {
+  @IsUUID()
+  salesLineId!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(50)
+  sstid!: string;
+}
 
 export class CreateTaxInvoiceDto {
   @IsUUID()
@@ -18,6 +29,22 @@ export class CreateTaxInvoiceDto {
   @IsOptional()
   @IsDateString()
   issueDate?: string;
+
+  /** official جدول ۲: sstid (کد کالا/خدمت) is REQUIRED per line — the caller
+   *  supplies the product→goods-code mapping resolved from the registered
+   *  goods list; unmapped lines block submission. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => LineSstidDto)
+  lineSstids?: LineSstidDto[];
+}
+
+export class AssignLineSstidDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(50)
+  sstid!: string;
 }
 
 export class TaxInvoiceQueryDto {
@@ -111,6 +138,7 @@ export class TaxInvoiceController {
         salesDocumentId: dto.salesDocumentId,
         subject: dto.subject,
         issueDate: dto.issueDate ? new Date(dto.issueDate) : undefined,
+        lineSstids: dto.lineSstids,
       },
       actor,
     );
@@ -121,6 +149,19 @@ export class TaxInvoiceController {
   async send(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() actor: { id: string; username: string }, @Req() request: Request) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     return this.taxInvoices.send(companyId, id, actor);
+  }
+
+  @Post('lines/:lineId/sstid')
+  @RequirePermissions('tax.edit')
+  async assignLineSstid(
+    @Param('lineId', ParseUUIDPipe) lineId: string,
+    @Body() dto: AssignLineSstidDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    await this.taxInvoices.assignLineSstid(companyId, lineId, dto.sstid, actor);
+    return { status: 'ASSIGNED', lineId, sstid: dto.sstid };
   }
 
   @Post(':id/inquiry')

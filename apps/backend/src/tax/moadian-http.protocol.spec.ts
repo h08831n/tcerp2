@@ -238,6 +238,83 @@ describe('MoadianHttpAdapter — نسخه دوم offline protocol tests', () => 
     expect(ok.publicKeyPem).toContain('BEGIN PUBLIC KEY');
   });
 
+  it('server encryption key — ACTUAL key type and size validated (not just the algorithm string)', async () => {
+    const serverInfo = (publicKeys: unknown) =>
+      new AdapterClass({
+        fiscalId: 'TESTFISCAL',
+        economicCode: '411151234567',
+        clientId: 'test-client',
+        privateKeyPem: TEST_PRIVATE_PEM,
+        certificatePem: TEST_CERT_PEM,
+        fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
+          const url = String(input);
+          if (url.includes('/nonce')) {
+            return new Response(JSON.stringify({ nonce: 'n'.repeat(32) }), { status: 200 }) as never;
+          }
+          return new Response(JSON.stringify({ serverTime: 1, publicKeys }), { status: 200 }) as never;
+        }) as typeof fetch,
+      });
+    // an EC key labeled algorithm:"RSA" — the ACTUAL key type must be checked
+    const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const ecSpki = ec.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const ecB64 = ecSpki.replace(/-----[A-Z ]+-----/g, '').replace(/[\r\n]+/g, '');
+    await expect(
+      serverInfo([{ key: ecB64, id: 'ec1', algorithm: 'RSA', purpose: 1 }]).getServerInformation(),
+    ).rejects.toThrow('MOADIAN_SERVER_INFO_KEY_UNSUITABLE: key type is');
+    // an undersized RSA key (1024 bits) is rejected
+    const weak = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 });
+    const weakB64 = weak.publicKey.export({ type: 'spki', format: 'pem' }).toString().replace(/-----[A-Z ]+-----/g, '').replace(/[\r\n]+/g, '');
+    await expect(
+      serverInfo([{ key: weakB64, id: 'weak', algorithm: 'RSA', purpose: 1 }]).getServerInformation(),
+    ).rejects.toThrow('below the 2048-bit floor');
+    // encryptInvoiceJwe itself refuses a non-RSA wrap key before encrypting
+    expect(() =>
+      AdapterClass.encryptInvoiceJwe('a.b.c', ec.publicKey.export({ type: 'spki', format: 'pem' }).toString(), 'k'),
+    ).toThrow('MOADIAN_SERVER_INFO_KEY_UNSUITABLE');
+  });
+
+  it('enqueue correlation — duplicate response uid is rejected', async () => {
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const adapter = new AdapterClass({
+      fiscalId: 'TESTFISCAL',
+      economicCode: '411151234567',
+      clientId: 'test-client',
+      privateKeyPem: TEST_PRIVATE_PEM,
+      certificatePem: TEST_CERT_PEM,
+      fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = String(input);
+        if (url.includes('/nonce')) {
+          return new Response(JSON.stringify({ nonce: 'n'.repeat(32) }), { status: 200 }) as never;
+        }
+        if (url.includes('server-information')) {
+          const keyB64 = publicKeyPem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----/g, '').replace(/[\r\n]+/g, '');
+          return new Response(
+            JSON.stringify({ serverTime: 1, publicKeys: [{ key: keyB64, id: 'k1', algorithm: 'RSA', purpose: 1 }] }),
+            { status: 200 },
+          ) as never;
+        }
+        // two invoices submitted, ONE uid echoed twice (duplicate + missing)
+        const body = JSON.parse(String(init?.body ?? '[]')) as Array<{ header: { requestTraceId: string } }>;
+        return new Response(
+          JSON.stringify({ timestamp: 1, result: body.map((b) => ({ uid: body[0].header.requestTraceId, referenceNumber: 'r' })) }),
+          { status: 200 },
+        ) as never;
+      }) as typeof fetch,
+    });
+    const mk = (uid: string): MoadianPacket => ({
+      uid,
+      packetType: 'INVOICE.V01',
+      retry: false,
+      data: '{}',
+      dataSignature: '',
+      encryptionKeyId: '',
+      symmetricKey: '',
+      iv: '',
+      fiscalId: 'TESTFISCAL',
+    });
+    await expect(adapter.enqueue([mk('u1'), mk('u2')])).rejects.toThrow('duplicate response uid');
+  });
+
   it('sigT — official §5 format: SECONDS precision UTC (no fractional seconds) on BOTH JWS paths', async () => {
     const sigTRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
     // auth-token JWS header

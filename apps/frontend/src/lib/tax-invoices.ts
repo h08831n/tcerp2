@@ -121,8 +121,21 @@ export function createTaxInvoiceFromSales(input: {
   salesDocumentId: string;
   subject?: string;
   issueDate?: string;
+  /** official جدول ۲: sstid is REQUIRED per body line — the mapping resolved
+   *  from the registered goods list; unmapped lines block submission */
+  lineSstids?: Array<{ salesLineId: string; sstid: string }>;
 }): Promise<SalesTaxInvoiceDetail> {
   return apiJson(`/tax/invoices/from-sales`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function assignLineSstid(
+  lineId: string,
+  sstid: string,
+): Promise<{ status: "ASSIGNED"; lineId: string; sstid: string }> {
+  return apiJson(`/tax/invoices/lines/${lineId}/sstid`, {
+    method: "POST",
+    body: JSON.stringify({ sstid }),
+  });
 }
 
 export function sendTaxInvoice(id: string): Promise<{

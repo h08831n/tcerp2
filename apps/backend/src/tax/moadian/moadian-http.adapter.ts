@@ -190,10 +190,20 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: unsupported algorithm ${encryption.algorithm ?? ''}`);
     }
     const pem = `-----BEGIN PUBLIC KEY-----\n${(encryption.key.match(/.{1,64}/g) ?? []).join('\n')}\n-----END PUBLIC KEY-----`;
+    let keyObject: crypto.KeyObject;
     try {
-      crypto.createPublicKey(pem);
+      keyObject = crypto.createPublicKey(pem);
     } catch {
       throw new Error('MOADIAN_SERVER_INFO_KEY_UNSUITABLE: key is not a parseable SPKI public key');
+    }
+    // verify the ACTUAL key type and size — the server's `algorithm` string
+    // alone is not proof (official §7.3: the encryption key is RSA)
+    if (keyObject.asymmetricKeyType !== 'rsa') {
+      throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: key type is ${String(keyObject.asymmetricKeyType)}, not RSA`);
+    }
+    const modulusLength = (keyObject.asymmetricKeyDetails as { modulusLength?: number } | undefined)?.modulusLength ?? 0;
+    if (!Number.isFinite(modulusLength) || modulusLength < 2048) {
+      throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: RSA modulus ${modulusLength} bits is below the 2048-bit floor (official example: 4096)`);
     }
     return { publicKeyId: encryption.id, publicKeyPem: pem };
   }
@@ -233,6 +243,21 @@ export class MoadianHttpAdapter implements MoadianAdapter {
    *  wrapped with RSA-OAEP-256 under the server's 4096-bit public key,
    *  fresh 96-bit IV, AAD = ASCII(Base64URL(header)). */
   static encryptInvoiceJwe(signedJws: string, serverPublicKeyPem: string, keyId: string): string {
+    // fail-safe before encryption: the wrap key must be an RSA public key of
+    // adequate size — a non-RSA or undersized key never reaches publicEncrypt
+    let wrapKey: crypto.KeyObject;
+    try {
+      wrapKey = crypto.createPublicKey(serverPublicKeyPem);
+    } catch {
+      throw new Error('MOADIAN_SERVER_INFO_KEY_UNSUITABLE: encryption key is not parseable');
+    }
+    if (wrapKey.asymmetricKeyType !== 'rsa') {
+      throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: encryption key type is ${String(wrapKey.asymmetricKeyType)}, not RSA`);
+    }
+    const modulusLength = (wrapKey.asymmetricKeyDetails as { modulusLength?: number } | undefined)?.modulusLength ?? 0;
+    if (!Number.isFinite(modulusLength) || modulusLength < 2048) {
+      throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: encryption key modulus ${modulusLength} bits is below the 2048-bit floor`);
+    }
     const headerB64 = Buffer.from(
       JSON.stringify({ alg: 'RSA-OAEP-256', enc: 'A256GCM', kid: keyId }),
     ).toString('base64url');
@@ -287,10 +312,18 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: result array missing or length mismatch');
     }
     const sentUids = new Set(packets.map((p) => p.uid));
+    const responded = new Set<string>();
     for (const entry of body.result) {
       if (!entry || typeof entry.uid !== 'string' || !sentUids.has(entry.uid)) {
         throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: response uid does not correlate with the request');
       }
+      if (responded.has(entry.uid)) {
+        throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: duplicate response uid');
+      }
+      responded.add(entry.uid);
+    }
+    if (responded.size !== sentUids.size) {
+      throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: response does not cover every submitted uid');
     }
     return body.result.map((r) => ({ uid: r.uid ?? '', referenceNumber: r.referenceNumber ?? '' }));
   }

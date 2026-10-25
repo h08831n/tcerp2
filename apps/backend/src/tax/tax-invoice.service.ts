@@ -468,6 +468,14 @@ export class TaxInvoiceService {
       include: { lines: true, customer: { select: { type: true, nameFa: true, nationalId: true, economicCode: true, nationalCode: true } } },
     });
     if (!invoice) throw new NotFoundError('Tax invoice not found', { invoiceId });
+    // official RC_IITP.IS_V7.9 جدول ۲: tins = the SELLER's registered economic
+    // code and MUST match the taxpayer's own records — taken from the
+    // authoritative company configuration, never from the buyer
+    const sellerCompany = await this.prisma.company.findUniqueOrThrow({
+      where: { id: companyId },
+      select: { economicCode: true },
+    });
+    const sellerEconomicCode = sellerCompany.economicCode ?? null;
     // authoritative-failure tracking: recoverPending() may resolve a prior
     // attempt to FAILED — the OFFICIAL retry=true flag must reflect the
     // post-recovery state, not the stale pre-call snapshot
@@ -551,7 +559,7 @@ export class TaxInvoiceService {
     // or the wire. This boundary cannot be bypassed: every submission passes
     // through send().
     const submissionMode = (process.env.MOADIAN_MODE ?? 'mock') as 'mock' | 'sandbox' | 'live';
-    const payload = this.buildPayload(invoice);
+    const payload = this.buildPayload({ ...invoice, sellerEconomicCode });
     TaxInvoiceService.validateSubmissionPayload(payload, submissionMode !== 'mock');
 
     // atomic claim (like the loading allocation pattern): READY/FAILED → SENDING
@@ -779,6 +787,7 @@ export class TaxInvoiceService {
   private buildPayload(invoice: {
     number: string;
     taxid: string | null;
+    sellerEconomicCode: string | null;
     subject: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
     inty: number;
     issueDate: Date;
@@ -820,7 +829,17 @@ export class TaxInvoiceService {
     //  tprdis/tdis/tadis/tvam/tbill — grand totals, all Decimal strings.
     const subjectToIns: Record<string, number> = { MAIN: 1, CORRECTIVE: 2, CANCEL: 3, RETURN: 4 };
     const ins = subjectToIns[invoice.subject] ?? 1;
-    const tob = invoice.customer.type === 'COMPANY' ? 1 : 2; // 1=حقوقی, 2=حقیقی
+    // official RC_IITP.IS_V7.9 جدول ۲: tob (نوع شخص خریدار) — 1=حقیقی
+    // (individual), 2=حقوقی (legal entity), 3=مشارکت مدنی, 4=اتباع غیرایرانی
+    const tob = invoice.customer.type === 'COMPANY' ? 2 : 1;
+    // official RC_IITP.IS_V7.9 جدول ۲:
+    //   tins = شماره اقتصادی **فروشنده** (SELLER — must match the taxpayer's
+    //         own registered economic code; NOT the buyer),
+    //   tinb = شماره اقتصادی خریدار (buyer economic code, per tob pattern),
+    //   bid  = شناسه/شماره ملی خریدار (buyer national id, per tob pattern):
+    //          tob=1 → شماره ملی (nationalCode), tob=2 → شناسه ملی (nationalId)
+    const bid = invoice.customer.type === 'COMPANY' ? invoice.customer.nationalId : invoice.customer.nationalCode;
+    const tinb = invoice.customer.economicCode ?? null;
     return {
       header: {
         // official RC_IITP.IS_V7.9 جدول ۲ ردیف ۱: taxid (شماره منحصربه‌فرد
@@ -828,6 +847,9 @@ export class TaxInvoiceService {
         // material (documented gap); validation blocks non-mock submission
         // while it is absent
         taxid: invoice.taxid ?? null,
+        // SELLER identity (official جدول ۲) — must match the taxpayer's own
+        // economic code; the BUYER carries tinb/bid below
+        tins: invoice.sellerEconomicCode ?? null,
         inno: invoice.number,
         inty: invoice.inty,
         // official RC_TICS.IS_v1.6 §7 example carries `inp` (الگوی صورتحساب)
@@ -839,7 +861,10 @@ export class TaxInvoiceService {
           : {}),
         indatim: invoice.issueDate.getTime(),
         indati2m: invoice.createdAt.getTime(),
-        tins: invoice.customer.nationalId ?? invoice.customer.nationalCode ?? null,
+        // BUYER identity per tob pattern (tob=1 → bid=شماره ملی; tob=2 →
+        // bid=شناسه ملی + tinb=شماره اقتصادی)
+        bid: bid ?? null,
+        tinb: tinb ?? null,
         tob,
         tprdis: invoice.subtotal.toString(),
         tdis: invoice.discountTotal.toString(),
@@ -884,13 +909,40 @@ export class TaxInvoiceService {
     requireTaxid: boolean,
   ): void {
     const header = payload.header ?? {};
-    const requiredFields = ['inno', 'indatim', 'indati2m', 'tins', 'tprdis', 'tdis', 'tadis', 'tvam', 'todam', 'tbill'];
+    // tins is checked by the dedicated SELLER identity rule below
+    const requiredFields = ['inno', 'indatim', 'indati2m', 'tprdis', 'tdis', 'tadis', 'tvam', 'todam', 'tbill'];
     const missing = requiredFields.filter((f) => {
       const v = header[f];
       return v === null || v === undefined || v === '';
     });
     if (missing.length > 0) {
       throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_MISSING', { fields: missing });
+    }
+    // SELLER identity: official جدول ۲ rule 1 — tins is the seller's own
+    // registered economic code and is mandatory for domestic submissions
+    if (typeof header.tins !== 'string' || (header.tins as string).length === 0) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_SELLER_TINS_UNAVAILABLE', {
+        remediation: 'تنظیم کد اقتصادی شرکت (فروشنده) در پیکربندی شرکت الزامی است',
+      });
+    }
+    // BUYER identity per tob pattern (official جدول ۲): tob=1 (حقیقی) ->
+    // bid = شماره ملی; tob=2 (حقوقی) -> bid = شناسه ملی + tinb = شماره اقتصادی
+    const tob = Number(header.tob);
+    if (![1, 2, 3, 4].includes(tob)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['tob'] });
+    }
+    if (tob === 1 && (typeof header.bid !== 'string' || (header.bid as string).length === 0)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_BUYER_ID_MISSING', { fields: ['bid'] });
+    }
+    if (tob === 2 && (typeof header.bid !== 'string' || (header.bid as string).length === 0)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_BUYER_ID_MISSING', { fields: ['bid'] });
+    }
+    if (tob === 2 && (typeof header.tinb !== 'string' || (header.tinb as string).length === 0)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_BUYER_ID_MISSING', { fields: ['tinb'] });
+    }
+    // conditional reference: non-MAIN subjects MUST carry the original taxid
+    if (Number(header.ins) !== 1 && (typeof header.irtaxid !== 'string' || (header.irtaxid as string).length === 0)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_IRTAXID_REQUIRED', { ins: header.ins });
     }
     if (![1, 2, 3].includes(Number(header.inty)) || ![1, 2, 3, 4].includes(Number(header.ins)) || Number(header.inp) !== 1) {
       throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['inty', 'ins', 'inp'] });

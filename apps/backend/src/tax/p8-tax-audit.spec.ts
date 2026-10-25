@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { TaxInvoiceService } from './tax-invoice.service';
+import { TaxInvoiceController } from './tax-invoice.controller';
+import { PERMISSIONS_KEY } from '../common/decorators/permissions.decorator';
 import { TEST_INTEGRATION, disconnectIntegrationPrisma } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 
@@ -252,8 +254,14 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         const buyer = await prisma.party.findFirstOrThrow({
       where: { companyId: COMPANY, id: invoice.customerPartyId },
     });
-    expect(payload.header.tins).toBe(buyer.nationalCode); // buyer national code (real person)
-    expect(payload.header.tob).toBe(2); // حقیقی
+    // official RC_IITP.IS_V7.9 جدول ۲: tins = SELLER economic code (must
+    // match the taxpayer's own records); tob = buyer person type with
+    // 1=حقیقی, 2=حقوقی; bid/tinb carry the BUYER identity per tob
+    expect(payload.header.tins).toBe('411151234567'); // seller (company) economic code
+    expect(payload.header.tob).toBe(1); // buyer is a real person (حقیقی)
+    expect(payload.header.bid).toBe(buyer.nationalCode); // buyer شماره ملی
+    expect(payload.header.taxid).toBeNull(); // generated only with fiscal key material
+    expect(Array.isArray(payload.payments)).toBe(true);
     // totals: prdis=20×123.45=2469; tdis=23.45; tadis=2445.55; tvam=2445.55×9%=220.0995; tbill=2665.6495
     expect(payload.header.tprdis).toBe('2469');
     expect(payload.header.tdis).toBe('23.45');
@@ -684,8 +692,9 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         inty: 1,
         inp: 1,
         ins: 1,
-        tins: '14003778990',
-        tob: 2,
+        tins: '411151234567', // seller economic code (official جدول ۲)
+        tob: 1, // buyer = real person (حقیقی)
+        bid: '0012345678', // buyer شماره ملی (required for tob=1)
         tprdis: '20000',
         tdis: '500',
         tadis: '19500',
@@ -704,15 +713,56 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
         true,
       ),
     ).not.toThrow();
+    // tob=2 (حقوقی): bid + tinb are the required buyer fields
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload(
+        {
+          ...valid,
+          header: { ...valid.header, tob: 2, bid: '10109999999', tinb: '411199999999' },
+        },
+        false,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload(
+        { ...valid, header: { ...valid.header, tob: 2, bid: '10109999999' } },
+        false,
+      ),
+    ).toThrow('TAX_INVOICE_PAYLOAD_BUYER_ID_MISSING');
+    // non-MAIN subject without irtaxid is rejected
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload(
+        { ...valid, header: { ...valid.header, ins: 2 } },
+        false,
+      ),
+    ).toThrow('TAX_INVOICE_PAYLOAD_IRTAXID_REQUIRED');
+    // missing seller tins is rejected (official جدول ۲ rule 1)
+    const noTins = JSON.parse(JSON.stringify(valid));
+    noTins.header.tins = '';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(noTins, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_SELLER_TINS_UNAVAILABLE',
+    );
     // strict (sandbox/live): missing taxid is rejected — never fabricated
     expect(() => TaxInvoiceService.validateSubmissionPayload(valid, true)).toThrow(
       'TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE',
     );
     // required header fields
+    const missingInno = JSON.parse(JSON.stringify(valid));
+    missingInno.header.inno = '';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(missingInno, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_FIELD_MISSING',
+    );
+    // empty seller tins → the dedicated seller-identity error
     const missingTins = JSON.parse(JSON.stringify(valid));
     missingTins.header.tins = '';
     expect(() => TaxInvoiceService.validateSubmissionPayload(missingTins, false)).toThrow(
-      'TAX_INVOICE_PAYLOAD_FIELD_MISSING',
+      'TAX_INVOICE_PAYLOAD_SELLER_TINS_UNAVAILABLE',
+    );
+    // absent seller tins (header built without it) → same dedicated error
+    const absentTins = JSON.parse(JSON.stringify(valid));
+    delete absentTins.header.tins;
+    expect(() => TaxInvoiceService.validateSubmissionPayload(absentTins, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_SELLER_TINS_UNAVAILABLE',
     );
     // invalid classification fields
     const badInty = JSON.parse(JSON.stringify(valid));
@@ -752,4 +802,53 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(() =>
       TaxInvoiceService.validateSubmissionPayload({ ...valid, payments: {} as unknown as unknown[] }, false),
     ).toThrow('TAX_INVOICE_PAYLOAD_FIELD_INVALID');
-  });});
+  });
+
+  // thirteenth review — the mapping workflow is usable through the REAL
+  // application: DTO forwarding, secured assign endpoint, company scoping
+  itif(
+    'p8-24 controller-level mapping workflow: lineSstids forwarded, secured assign endpoint, cross-company rejected',
+    async () => {
+      const { doc } = await makeDoc('6');
+      const controller = new TaxInvoiceController(service, {
+        requireCompanyId: async () => COMPANY,
+      } as never);
+      const requestStub = { headers: {} } as never;
+
+      // permission metadata on the mapping route (backend-enforced)
+      expect(Reflect.getMetadata(PERMISSIONS_KEY, controller.assignLineSstid)).toEqual(['tax.edit']);
+
+      // 1) the create DTO forwards lineSstids into the service
+      const createdInvoice = await controller.createFromSales(
+        {
+          salesDocumentId: doc.id,
+          lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }],
+        },
+        ACTOR,
+        requestStub,
+      );
+      const createdLine = await prisma.salesTaxInvoiceLine.findFirstOrThrow({
+        where: { salesTaxInvoiceId: createdInvoice.id },
+      });
+      expect(createdLine.sstid).toBe('2710000138624');
+
+      // 2) the assign endpoint records a correction on the invoice line
+      await controller.assignLineSstid(createdLine.id, { sstid: '9999999999999' }, ACTOR, requestStub);
+      const remapped = await prisma.salesTaxInvoiceLine.findUniqueOrThrow({ where: { id: createdLine.id } });
+      expect(remapped.sstid).toBe('9999999999999');
+
+      // 3) cross-company access is rejected (company scoping is DB-filtered)
+      const otherCompany = await prisma.company.create({
+        data: { nameFa: `p8-cross-${Date.now()}`, status: 'ACTIVE', economicCode: '411199999999' },
+      });
+      created.push(otherCompany.id);
+      const controllerOther = new TaxInvoiceController(service, {
+        requireCompanyId: async () => otherCompany.id,
+      } as never);
+      await expect(
+        controllerOther.assignLineSstid(createdLine.id, { sstid: '8888888888888' }, ACTOR, requestStub),
+      ).rejects.toThrow('Tax invoice line not found');
+      const untouched = await prisma.salesTaxInvoiceLine.findUniqueOrThrow({ where: { id: createdLine.id } });
+      expect(untouched.sstid).toBe('9999999999999');
+    },
+  );});
