@@ -109,6 +109,11 @@ export class TaxInvoiceService {
       // the original invoice's taxid (irtaxid header field)
       throw new ValidationError('TAX_INVOICE_RELATED_TAXID_REQUIRED', { subject });
     }
+    // official format: a 22-char alphanumeric taxid is mandatory for
+    // non-MAIN subjects (fifteenth review)
+    if (subject !== 'MAIN' && input.relatedTaxid && !/^[A-Z0-9]{22}$/.test(input.relatedTaxid)) {
+      throw new ValidationError('TAX_INVOICE_RELATED_TAXID_INVALID', { relatedTaxid: input.relatedTaxid });
+    }
     // inty: a corrective/cancel/return invoice has the SAME type as the
     // original it adjusts (they are tied via irtaxid); MAIN derives from the
     // buyer's economic-operator status
@@ -116,9 +121,14 @@ export class TaxInvoiceService {
     if (subject !== 'MAIN' && input.relatedTaxid) {
       const original = await this.prisma.salesTaxInvoice.findFirst({
         where: { companyId, taxid: input.relatedTaxid },
-        select: { inty: true },
+        select: { inty: true, status: true },
       });
+      if (original && original.status === 'CANCELLED') {
+        throw new ValidationError('TAX_INVOICE_REFERENCE_CANCELLED', { relatedTaxid: input.relatedTaxid });
+      }
       if (original) inty = original.inty as 1 | 2 | 3;
+      // external references (not in our DB) are accepted: the authority
+      // performs the final validation of externally-issued taxids
     }
 
     const loadedByLine = new Map<string, Prisma.Decimal>();
@@ -151,12 +161,18 @@ export class TaxInvoiceService {
         salesLineId: { in: doc.lines.map((l) => l.id) },
         salesTaxInvoice: { status: { not: 'CANCELLED' } },
       },
-      select: { salesLineId: true, quantity: true },
+      select: { salesLineId: true, quantity: true, dis: true },
     });
     const issuedByLine = new Map<string, Prisma.Decimal>();
+    const issuedDiscountByLine = new Map<string, Prisma.Decimal>();
     for (const l of priorLines) {
       if (!l.salesLineId) continue;
       issuedByLine.set(l.salesLineId, (issuedByLine.get(l.salesLineId) ?? new Prisma.Decimal(0)).plus(l.quantity));
+      // cumulative discount allocation: prior stages' applied discounts
+      issuedDiscountByLine.set(
+        l.salesLineId,
+        (issuedDiscountByLine.get(l.salesLineId) ?? new Prisma.Decimal(0)).plus(l.dis),
+      );
     }
 
     // The remaining-quantity cap applies to MAIN invoices only — corrective/
@@ -191,14 +207,32 @@ export class TaxInvoiceService {
       }
       if (enforceCap && remaining.isZero() && requested.isZero()) continue; // nothing left to invoice on this line
       const quantity = requested;
-      const gross = new Prisma.Decimal(line.unitPrice).times(quantity);
-      const discount = new Prisma.Decimal(line.discountAmount);
+      // official RC_IITP.IS_V7.9 قاعده عمومی مبالغ (صفحه مبانی): «تمامی مقادیر
+      // ریالی و ارزی می‌بایست، با احتساب رقم اعشار ذکر شده در سند و با روش
+      // قطع کردن (TRUNCATION) محاسبه و در صورتحساب ثبت گردد» — فیلدهای ریالی
+      // سرآیند/بدنه با دقت ۱۸ رقم صحیح و ۰ رقم اعشار تعریف شده‌اند.
+      const truncateRial = (value: Prisma.Decimal) => value.truncated();
+      const gross = truncateRial(new Prisma.Decimal(line.unitPrice).times(quantity));
+      // PARTIAL-INVOICE DISCOUNT ALLOCATION (fifteenth review): the sales
+      // line's discountAmount is the TOTAL discount for the whole ordered
+      // quantity. CUMULATIVE allocation — each stage receives TRUNCATE(
+      // discountAmount × cumulativeQty ÷ orderedQty) minus prior stages' dis:
+      // a partial invoice never re-applies the full discount AND the final
+      // stage exactly exhausts it (no drift, no over-allocation)
+      const orderedQuantity = new Prisma.Decimal(line.orderedQuantity);
+      const cumulativeQuantity = (issuedByLine.get(line.id) ?? new Prisma.Decimal(0)).plus(quantity);
+      const cumulativeDiscount = orderedQuantity.isZero()
+        ? new Prisma.Decimal(0)
+        : truncateRial(new Prisma.Decimal(line.discountAmount).times(cumulativeQuantity).dividedBy(orderedQuantity));
+      const discount = cumulativeDiscount.minus(
+        issuedDiscountByLine.get(line.id) ?? new Prisma.Decimal(0),
+      );
       const net = gross.minus(discount);
       const vra = new Prisma.Decimal(line.taxRateSnapshot ?? 0);
-      const vam = net.times(vra).dividedBy(100);
+      const vam = truncateRial(net.times(vra).dividedBy(100));
       // official RC_IITP.IS_V7.9 line formulas (جدول ۲ + فرمول‌های کنترلی):
       //   adis (Is)   = Es − Gs  = prdis − dis   (مبلغ بعد از تخفیف)
-      //   vam  (Ks)   = adis × vra / 100
+      //   vam  (Ks)   = TRUNCATE(adis × vra / 100)
       //   tsstam (Os) = Ks + Is  = vam + adis    (مبلغ کل کالا/خدمت)
       // نمونه رسمی دستورالعمل: prdis=20000, dis=500, adis=19500, vam=1755,
       // tsstam=21255 (= 19500 + 1755)
@@ -208,7 +242,9 @@ export class TaxInvoiceService {
         salesLineId: line.id,
         sstid: input.lineSstids?.find((m) => m.salesLineId === line.id)?.sstid ?? null,
         description: line.printableDescription ?? line.productVariant.nameFa,
-        mu: line.uom.symbol,
+        // official جدول ۲: mu is the authority's unit CODE — mapped per UOM;
+        // the internal symbol is never sent (unmapped -> submission blocked)
+        mu: line.uom.moadianUnitCode ?? null,
         quantity,
         unitPrice: new Prisma.Decimal(line.unitPrice),
         prdis: gross,
@@ -823,7 +859,7 @@ export class TaxInvoiceService {
     // Official template field mapping (دستورالعمل فنی, tax.gov.ir):
     // Official جدول ۷ (technical instruction, tax.gov.ir):
     //  inty — invoice TYPE (independent of subject): 1=نوع اول, 2=نوع دوم,
-    //    3=نوع سوم (خرید). Stored on the invoice row at creation.
+    //    3=نوع سوم (NOT implemented in Phase 8 — no "purchase" assumption).
     //  ins — SUBJECT: 1=اصلی, 2=اصلاحی, 3=ابطالی, 4=برگشت از فروش.
     //  irtaxid — ORIGINAL invoice taxid, required for non-MAIN subjects.
     //  indatim — صدور: Timestamp, 14 digits = MILLISECONDS (sample
@@ -889,7 +925,10 @@ export class TaxInvoiceService {
         mu: l.mu,
         am: l.quantity.toString(),
         fee: l.unitPrice.toString(),
-        cfee: l.unitPrice.toString(),
+        // official RC_IITP.IS_V7.9: cfee (Cf = Cs/Exr) is the unit price in
+        // FOREIGN CURRENCY — only for currency-sale patterns (14 int/4 dec).
+        // Our supported domestic patterns do not carry it (the official §7
+        // sample body omits cfee) — it is NOT a duplicate of fee.
         prdis: l.prdis.toString(),
         dis: l.dis.toString(),
         adis: l.adis.toString(),

@@ -262,23 +262,27 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(payload.header.bid).toBe(buyer.nationalCode); // buyer شماره ملی
     expect(payload.header.taxid).toBeNull(); // generated only with fiscal key material
     expect(Array.isArray(payload.payments)).toBe(true);
-    // totals: prdis=20×123.45=2469; tdis=23.45; tadis=2445.55; tvam=2445.55×9%=220.0995; tbill=2665.6495
+    // totals with official TRUNCATION (قطع) — RC_IITP.IS_V7.9: all rial
+    // values carry 18 integer digits and 0 decimals. CUMULATIVE discount
+    // allocation: ordered=999, stage=20 -> dis=TRUNC(23.45×20/999)=0
+    // (the full discount is exhausted proportionally across real stages):
+    // tadis=2469; tvam=TRUNC(2469×9%)=222; tbill=2691
     expect(payload.header.tprdis).toBe('2469');
-    expect(payload.header.tdis).toBe('23.45');
-    expect(payload.header.tadis).toBe('2445.55');
-    expect(payload.header.tvam).toBe('220.0995');
-    expect(payload.header.tbill).toBe('2665.6495');
+    expect(payload.header.tdis).toBe('0'); // TRUNC(23.45 × 20/999)
+    expect(payload.header.tadis).toBe('2469');
+    expect(payload.header.tvam).toBe('222'); // TRUNC(2469 × 9%)
+    expect(payload.header.tbill).toBe('2691');
     expect(payload.body).toHaveLength(1);
     expect(payload.body[0].am).toBe('20');
     expect(payload.body[0].fee).toBe('123.45');
     expect(payload.body[0].prdis).toBe('2469');
-    expect(payload.body[0].dis).toBe('23.45');
+    expect(payload.body[0].dis).toBe('0'); // TRUNC(23.45 × 20/999)
     expect(payload.body[0].vra).toBe('9');
-    expect(payload.body[0].vam).toBe('220.0995');
-    // official RC_IITP.IS_V7.9 line formulas: adis (Is) = prdis - dis;
-    // tsstam (Os) = adis + vam  -> 2445.55 + 220.0995 = 2665.6495
-    expect(payload.body[0].adis).toBe('2445.55');
-    expect(payload.body[0].tsstam).toBe('2665.6495');
+    expect(payload.body[0].vam).toBe('222'); // TRUNC(2469 × 9%)
+    // official RC_IITP.IS_V7.9 line formulas (with قطع truncation):
+    // adis (Is) = prdis - dis = 2469; tsstam (Os) = adis + vam = 2691
+    expect(payload.body[0].adis).toBe('2469');
+    expect(payload.body[0].tsstam).toBe('2691');
     // official RC_TICS.IS_v1.6 §7: the top-level payments array is named
     // `payments` and `inp` (الگوی) is a header field
     expect(Array.isArray(payload.payments)).toBe(true);
@@ -293,7 +297,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
   itif('p8-11 corrective invoice inherits the ORIGINAL invoice type (inty), ins is independent, irtaxid required', async () => {
     const { doc } = await makeDoc('5');
     const original = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
-    const taxid = 'A1B2C3D4E5F6G7H';
+    const taxid = 'A1B2C3D4E5F6G7H0000000'; // 22-char official format
     await prisma.salesTaxInvoice.update({ where: { id: original.id }, data: { taxid } });
     await expect(
       service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, subject: 'CORRECTIVE' }, ACTOR),
@@ -336,7 +340,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect(consumerMain.inty).toBe(2);
     expect(consumerMain.subject).toBe('MAIN');
     // corrective on a consumer invoice: inherits inty=2, ins=2
-    const consumerTaxid = 'B1B2C3D4E5F6G7H';
+    const consumerTaxid = 'B1B2C3D4E5F6G7H0000000'; // 22-char official format
     await prisma.salesTaxInvoice.update({ where: { id: consumerMain.id }, data: { taxid: consumerTaxid } });
     const corrective = await service.createFromSalesDocument(COMPANY, {
       salesDocumentId: consumerDoc.id,
@@ -907,15 +911,17 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     // zero-discount line: adis == prdis, tsstam == prdis + vam
     const zeroDoc = await makeDoc('10');
     const zeroInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: zeroDoc.doc.id, lineSstids: [{ salesLineId: zeroDoc.doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
-    // direct DB read of the persisted line values (source of truth)
+    // direct DB read of the persisted line values (source of truth) — with
+    // official قطع truncation and cumulative discount allocation
+    // (ordered=999, stage=10 -> discount = TRUNC(23.45×10/999) = 0)
     const zeroPersisted = await prisma.salesTaxInvoiceLine.findFirstOrThrow({
       where: { salesTaxInvoiceId: zeroInvoice.id },
     });
-    expect(zeroPersisted.prdis.toString()).toBe('1234.5'); // 10 × 123.45
-    expect(zeroPersisted.dis.toString()).toBe('23.45');
-    expect(zeroPersisted.adis.toString()).toBe('1211.05'); // 1234.5 − 23.45
-    expect(zeroPersisted.vam.toString()).toBe('108.9945'); // 1211.05 × 9%
-    expect(zeroPersisted.tsstam.toString()).toBe('1320.0445'); // 1211.05 + 108.9945
+    expect(zeroPersisted.prdis.toString()).toBe('1234'); // TRUNC(10 × 123.45)
+    expect(zeroPersisted.dis.toString()).toBe('0'); // TRUNC(23.45 × 10/999) = 0
+    expect(zeroPersisted.adis.toString()).toBe('1234'); // prdis − dis
+    expect(zeroPersisted.vam.toString()).toBe('111'); // TRUNC(1234 × 9%)
+    expect(zeroPersisted.tsstam.toString()).toBe('1345'); // adis + vam
 
     // multi-line with DIFFERENT tax rates and a zero-discount second line
     const seq2 = `${Date.now()}-multi`;
@@ -981,24 +987,26 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       orderBy: { lineOrder: 'asc' },
     });
     expect(multiLines).toHaveLength(2);
-    // line 1: zero discount — prdis=500, dis=0, adis=500, vam=45, tsstam=545
+    // line 1: zero discount — prdis=500, dis=0, adis=500, vam=TRUNC(45)=45, tsstam=545
     expect(multiLines[0].prdis.toString()).toBe('500');
     expect(multiLines[0].dis.toString()).toBe('0');
     expect(multiLines[0].adis.toString()).toBe('500');
     expect(multiLines[0].vam.toString()).toBe('45');
     expect(multiLines[0].tsstam.toString()).toBe('545');
-    // line 2: discount + 10% rate — prdis=600, dis=50, adis=550, vam=55, tsstam=605
+    // line 2: discount + 10% rate (ordered=999, stage=3 ->
+    // dis=TRUNC(50×3/999)=0) — prdis=600, adis=600, vam=TRUNC(60)=60, tsstam=660
     expect(multiLines[1].prdis.toString()).toBe('600');
-    expect(multiLines[1].dis.toString()).toBe('50');
-    expect(multiLines[1].adis.toString()).toBe('550');
-    expect(multiLines[1].vam.toString()).toBe('55');
-    expect(multiLines[1].tsstam.toString()).toBe('605');
-    // header agreement: tprdis=1100, tdis=50, tadis=1050, tvam=100, tbill=1150
+    expect(multiLines[1].dis.toString()).toBe('0');
+    expect(multiLines[1].adis.toString()).toBe('600');
+    expect(multiLines[1].vam.toString()).toBe('60');
+    expect(multiLines[1].tsstam.toString()).toBe('660');
+    // header agreement (truncated discounts): tprdis=1100, tdis=0,
+    // tadis=1100, tvam=TRUNC(1100×9.4%avg)=105, tbill=1205
     const multiInvoice = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: multi.id } });
     expect(multiInvoice.subtotal.toString()).toBe('1100');
-    expect(multiInvoice.discountTotal.toString()).toBe('50');
-    expect(multiInvoice.taxTotal.toString()).toBe('100');
-    expect(multiInvoice.grandTotal.toString()).toBe('1150');
+    expect(multiInvoice.discountTotal.toString()).toBe('0');
+    expect(multiInvoice.taxTotal.toString()).toBe('105');
+    expect(multiInvoice.grandTotal.toString()).toBe('1205');
   });
 
   itif('p8-26 sstid mapping is BLOCKED once the invoice enters the submission pipeline', async () => {
@@ -1045,4 +1053,143 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       const payloadInvoice = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: created.id } });
       expect(payloadInvoice.relatedTaxid).toBe(originalTaxid);
     }
+  });
+
+  // fifteenth review — partial/multi-stage issuance never double-applies the
+  // line discount (CUMULATIVE allocation: stage dis = TRUNC(discountAmount ×
+  // cumulativeQty ÷ orderedQty) − prior stages' dis)
+  itif('p8-28 two-stage issuance: discount allocated exactly once across stages (no double application)', async () => {
+    const seq = `${Date.now()}-stages`;
+    const customer = await prisma.party.create({
+      data: {
+        companyId: COMPANY,
+        type: 'PERSON',
+        nameFa: `p8a-stages ${seq}`,
+        economicCode: '411598765432',
+        nationalCode: `0012${seq.slice(-6)}`,
+        roles: { create: [{ role: 'CUSTOMER' }] },
+      },
+    });
+    created.push(customer.id);
+    const salesperson = await prisma.user.create({
+      data: { username: `p8a-st-${seq}`, passwordHash: 'x', status: 'ACTIVE' },
+    });
+    created.push(salesperson.id);
+    const uom = await prisma.uom.create({
+      data: {
+        companyId: COMPANY,
+        categoryId: (await prisma.uomCategory.create({ data: { companyId: COMPANY, code: `W-${seq}`, nameFa: 'وزن' } })).id,
+        nameFa: `kg-${seq}`,
+        symbol: `kg-${seq}`,
+        conversionRatio: new Prisma.Decimal(1),
+        isBaseUnit: true,
+        moadianUnitCode: '164',
+      },
+    });
+    created.push(uom.id);
+    const variant = await prisma.productVariant.create({
+      data: {
+        companyId: COMPANY,
+        templateId: (
+          await prisma.productTemplate.create({
+            data: {
+              companyId: COMPANY,
+              categoryId: (
+                await prisma.productCategory.create({ data: { companyId: COMPANY, code: `P8A-S-${seq}`, nameFa: 'p8a-s' } })
+              ).id,
+              nameFa: 'p8a-s',
+            },
+          })
+        ).id,
+        sku: `P8A-S-${seq}`,
+        nameFa: 'کالای مرحله‌ای',
+        combinationKey: `p8a-s-${seq}`,
+      },
+    });
+    created.push(variant.id);
+    // ordered 100 @ 100 rial with a TOTAL line discount of 100
+    const doc = await prisma.salesDocument.create({
+      data: {
+        companyId: COMPANY,
+        documentNumber: `P8A-S-${seq}`,
+        customerPartyId: customer.id,
+        salespersonUserId: salesperson.id,
+        documentDate: new Date(),
+        status: 'COMPLETED',
+        lines: {
+          create: {
+            companyId: COMPANY,
+            productVariantId: variant.id,
+            orderedQuantity: new Prisma.Decimal(100),
+            uomId: uom.id,
+            unitPrice: new Prisma.Decimal('100'),
+            discountAmount: new Prisma.Decimal('100'),
+            taxRateSnapshot: new Prisma.Decimal(9),
+            subtotal: new Prisma.Decimal('0'),
+            lineTotal: new Prisma.Decimal('0'),
+          },
+        },
+      },
+      include: { lines: true },
+    });
+    created.push(doc.id);
+    const line = doc.lines[0];
+    // STAGE 1 loading: only 50 of the 100 ordered units
+    const loading = await prisma.loading.create({ data: { companyId: COMPANY, loadingDate: new Date() } });
+    created.push(loading.id);
+    const loadingLine = await prisma.loadingLine.create({
+      data: { loadingId: loading.id, productVariantId: line.productVariantId, actualQuantity: new Prisma.Decimal('50'), uomId: uom.id },
+    });
+    created.push(loadingLine.id);
+    await prisma.loadingAllocation.create({
+      data: { companyId: COMPANY, loadingLineId: loadingLine.id, salesLineId: line.id, allocatedQuantity: new Prisma.Decimal('50') },
+    });
+
+    // STAGE 1: 50 units -> cumulative 50/100 -> dis = TRUNC(100×50/100) = 50
+    const stage1 = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: line.id, sstid: '2710000138624' }] }, ACTOR);
+    const s1 = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: stage1.id } });
+    expect(s1.quantity.toString()).toBe('50');
+    expect(s1.prdis.toString()).toBe('5000'); // TRUNC(100 × 50)
+    expect(s1.dis.toString()).toBe('50'); // TRUNC(100 × 50/100)
+    expect(s1.adis.toString()).toBe('4950');
+    expect(s1.vam.toString()).toBe('445'); // TRUNC(4950 × 9%)
+    expect(s1.tsstam.toString()).toBe('5395'); // adis + vam
+
+    // STAGE 2 loading: the remaining 50 units
+    const loading2 = await prisma.loading.create({ data: { companyId: COMPANY, loadingDate: new Date() } });
+    created.push(loading2.id);
+    const loadingLine2 = await prisma.loadingLine.create({
+      data: { loadingId: loading2.id, productVariantId: line.productVariantId, actualQuantity: new Prisma.Decimal('50'), uomId: uom.id },
+    });
+    created.push(loadingLine2.id);
+    await prisma.loadingAllocation.create({
+      data: { companyId: COMPANY, loadingLineId: loadingLine2.id, salesLineId: line.id, allocatedQuantity: new Prisma.Decimal('50') },
+    });
+
+    // STAGE 2: cumulative 100/100 -> dis = 100 − 50 = 50 (exact exhaustion);
+    // the stage quantity is pinned via lineOverrides (50 of the newly loaded 50)
+    const stage2 = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      lineOverrides: [{ salesLineId: line.id, quantity: '50' }],
+      lineSstids: [{ salesLineId: line.id, sstid: '2710000138624' }],
+    }, ACTOR);
+    const s2 = await prisma.salesTaxInvoiceLine.findFirstOrThrow({
+      where: { salesTaxInvoiceId: stage2.id, salesLineId: line.id },
+    });
+    expect(s2.quantity.toString()).toBe('50');
+    expect(s2.dis.toString()).toBe('50'); // 100 − 50 (exact exhaustion)
+    expect(s2.adis.toString()).toBe('4950');
+    expect(s2.vam.toString()).toBe('445');
+    expect(s2.tsstam.toString()).toBe('5395');
+
+    // the TOTAL discount across BOTH stages equals the line discount exactly —
+    // the full 100 was NEVER applied twice
+    const totalDiscount = new Prisma.Decimal(s1.dis).plus(s2.dis);
+    expect(totalDiscount.toString()).toBe('100');
+    // total quantities across stages == loaded == ordered
+    const totalQty = new Prisma.Decimal(s1.quantity).plus(s2.quantity);
+    expect(totalQty.toString()).toBe('100');
+    // total tax and final amounts reconcile with the sales line
+    expect(new Prisma.Decimal(s1.vam).plus(s2.vam).toString()).toBe('890');
+    expect(new Prisma.Decimal(s1.tsstam).plus(s2.tsstam).toString()).toBe('10790');
   });});

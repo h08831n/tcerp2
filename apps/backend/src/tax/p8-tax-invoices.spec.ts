@@ -309,21 +309,25 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     expect(invoice.number).toMatch(/^STI-\d{5}$/); // resetCycle NEVER → no year segment
     // tax_invoiced_quantity = 50 (loading allocation), not 100 (ordered)
     expect(withLines.lines[0].quantity.toString()).toBe('50');
-    // Decimal-exact: unitPrice 123.45 × 50 = 6172.5 prdis; dis 23.45;
-    // vam = (6172.5 − 23.45) × 9% = 553.4145
-    expect(withLines.lines[0].prdis.toString()).toBe('6172.5');
-    expect(withLines.lines[0].dis.toString()).toBe('23.45');
-    expect(withLines.lines[0].vam.toString()).toBe('553.4145');
-    expect(invoice.subtotal.toString()).toBe('6172.5');
-    expect(invoice.taxTotal.toString()).toBe('553.4145');
-    expect(invoice.grandTotal.toString()).toBe('6702.4645'); // 6172.5 − 23.45 + 553.4145
+    // official قطع truncation + CUMULATIVE discount allocation
+    // (RC_IITP.IS_V7.9: rial values 0 decimals; ordered=100, stage=50 ->
+    // dis=TRUNC(23.45×50/100)=11): prdis=6172; adis=6161;
+    // vam=TRUNC(6161×9%)=554; tsstam=6715; grandTotal=6161+554=6715
+    expect(withLines.lines[0].prdis.toString()).toBe('6172');
+    expect(withLines.lines[0].dis.toString()).toBe('11');
+    expect(withLines.lines[0].adis.toString()).toBe('6161');
+    expect(withLines.lines[0].vam.toString()).toBe('554');
+    expect(withLines.lines[0].tsstam.toString()).toBe('6715');
+    expect(invoice.subtotal.toString()).toBe('6172');
+    expect(invoice.taxTotal.toString()).toBe('554');
+    expect(invoice.grandTotal.toString()).toBe('6715');
     // M:N allocation to the source order created with the invoice total
     const allocations = await prisma.salesTaxInvoiceOrderAllocation.findMany({
       where: { companyId: COMPANY, salesTaxInvoiceId: invoice.id },
     });
     expect(allocations).toHaveLength(1);
     expect(allocations[0].salesDocumentId).toBe(docId);
-    expect(allocations[0].allocatedAmount.toString()).toBe('6702.4645');
+    expect(allocations[0].allocatedAmount.toString()).toBe('6715'); // grandTotal with official truncation
   });
 
   itif('p8-02 invalid sources rejected (draft doc, missing identity, zero quantity)', async () => {
