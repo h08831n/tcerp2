@@ -121,6 +121,9 @@ export function createTaxInvoiceFromSales(input: {
   salesDocumentId: string;
   subject?: string;
   issueDate?: string;
+  /** official جدول ۲: taxid of the ORIGINAL invoice — required for
+   *  اصلاحی/ابطالی/برگشتی subjects */
+  relatedTaxid?: string;
   /** official جدول ۲: sstid is REQUIRED per body line — the mapping resolved
    *  from the registered goods list; unmapped lines block submission */
   lineSstids?: Array<{ salesLineId: string; sstid: string }>;

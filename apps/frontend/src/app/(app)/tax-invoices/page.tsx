@@ -41,6 +41,9 @@ export default function TaxInvoicesPage() {
   const [selectedDoc, setSelectedDoc] = useState<EntityOption | null>(null);
   const [subject, setSubject] = useState("MAIN");
   const [issueDate, setIssueDate] = useState<string | null>(null);
+  // official جدول ۲: taxid of the ORIGINAL invoice — required when the
+  // subject is اصلاحی/ابطالی/برگشتی (non-MAIN)
+  const [relatedTaxid, setRelatedTaxid] = useState("");
   // official جدول ۲: sstid (کد کالا/خدمت) — required per line; resolved from
   // the registered goods list and applied to every line of the new invoice
   const [lineSstid, setLineSstid] = useState("");
@@ -82,6 +85,7 @@ export default function TaxInvoicesPage() {
         salesDocumentId: selectedDoc.id,
         subject,
         issueDate: issueDate ?? undefined,
+        relatedTaxid: subject !== "MAIN" ? relatedTaxid.trim() || undefined : undefined,
       });
       setCreateOpen(false);
       setSelectedDoc(null);
@@ -303,6 +307,18 @@ export default function TaxInvoicesPage() {
             <span className="mb-1 block text-xs text-slate-500">تاریخ صدور</span>
             <JalaliDateInput value={issueDate} onChange={setIssueDate} />
           </div>
+          {subject !== "MAIN" && (
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label className="mb-1 block text-xs text-slate-500">
+                شماره مالیاتی صورتحساب مرجع (الزامی برای اصلاحی/ابطالی/برگشتی)
+              </label>
+              <input
+                value={relatedTaxid}
+                onChange={(e) => setRelatedTaxid(e.target.value)}
+                className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-sm"
+              />
+            </div>
+          )}
         </div>
       </Modal>
 

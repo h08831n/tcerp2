@@ -30,6 +30,13 @@ export class CreateTaxInvoiceDto {
   @IsDateString()
   issueDate?: string;
 
+  /** official جدول ۲: taxid of the ORIGINAL invoice — required for the
+   *  CORRECTIVE/CANCEL/RETURN subjects (اصلاحی/ابطالی/برگشتی). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  relatedTaxid?: string;
+
   /** official جدول ۲: sstid (کد کالا/خدمت) is REQUIRED per line — the caller
    *  supplies the product→goods-code mapping resolved from the registered
    *  goods list; unmapped lines block submission. */
@@ -138,6 +145,7 @@ export class TaxInvoiceController {
         salesDocumentId: dto.salesDocumentId,
         subject: dto.subject,
         issueDate: dto.issueDate ? new Date(dto.issueDate) : undefined,
+        relatedTaxid: dto.relatedTaxid,
         lineSstids: dto.lineSstids,
       },
       actor,

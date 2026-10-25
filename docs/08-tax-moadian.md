@@ -241,6 +241,26 @@ envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌�
   است — در sandbox/live بدون آن، ارسال با
   `TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE` مسدود می‌شود (هرگز جعل نمی‌شود).
 
+## فرمول‌های رسمی اقلام (Verified — RC_IITP.IS_V7.9, فرمول‌های کنترلی سند صدور)
+
+- **adis (Is)** = Es − Gs = **prdis − dis** (مبلغ بعد از تخفیف) — سند صدور:
+  «Is=Es-Gs».
+- **vam (Ks)** = adis × vra / 100 (نرخ مالیات بر ارزش افزوده ردیف).
+- **tsstam (Os)** = Ks + Is = **vam + adis** (مبلغ کل کالا/خدمت؛ + Ks2/Ks3
+  برای سایر مالیات‌ها/عوارض در الگوهای خاص) — نمونه رسمی: ۱۹۵۰۰ + ۱۷۵۵ = ۲۱۲۵۵.
+- **سرآیند**: tprdis=ΣEs، tdis=ΣGs، tadis=ΣIs، tvam=ΣKs،
+  tbill=ΣOs (= tadis+tvam+todam). همه با Decimal دقیق و بدون گردکردن.
+- **setm (روش تسویه)**: 1=نقدی، 2=نسیه، 3=نقدی/نسیه؛ برای نوع دوم/سوم نقدی
+  الزامی است؛ با setm=3 ثبت cap (مبلغ پرداختی نقدی) و insp (مبلغ نسیه) اجباری
+  است (جدول ۲۴). منبع داده روش تسویه هنوز در ERP وجود ندارد <- ارسال واقعی با
+  `TAX_INVOICE_PAYLOAD_SETM_UNAVAILABLE` مسدود می‌شود (gap مستند).
+- **پرداخت‌ها**: گزارش پرداخت از طریق API مجزا
+  `POST /api/v2/invoice-payment` (بخش ۱۱ سند فنی v1.6؛ taxid/paidAmount/
+  paymentDate/paymentMethod) برای تسویه نسیه/نقدی-نسیه است — خارج از payload
+  ارسال؛ تا طراحی داده‌ای، payments خالی مطابق مثال رسمی §7 ارسال می‌شود.
+- **taxid**: قالب ۲۲ نویسه الفبایی-عددی (نمونه رسمی) — اعتبارسنجی
+  `TAX_INVOICE_PAYLOAD_TAXID_INVALID`؛ تولید نیازمند سند جداگانه + کلید.
+
 ## چرخه وضعیت و idempotency
 
 ```

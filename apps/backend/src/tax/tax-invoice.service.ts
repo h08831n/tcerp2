@@ -196,6 +196,14 @@ export class TaxInvoiceService {
       const net = gross.minus(discount);
       const vra = new Prisma.Decimal(line.taxRateSnapshot ?? 0);
       const vam = net.times(vra).dividedBy(100);
+      // official RC_IITP.IS_V7.9 line formulas (جدول ۲ + فرمول‌های کنترلی):
+      //   adis (Is)   = Es − Gs  = prdis − dis   (مبلغ بعد از تخفیف)
+      //   vam  (Ks)   = adis × vra / 100
+      //   tsstam (Os) = Ks + Is  = vam + adis    (مبلغ کل کالا/خدمت)
+      // نمونه رسمی دستورالعمل: prdis=20000, dis=500, adis=19500, vam=1755,
+      // tsstam=21255 (= 19500 + 1755)
+      const adis = net;
+      const tsstam = adis.plus(vam);
       lines.push({
         salesLineId: line.id,
         sstid: input.lineSstids?.find((m) => m.salesLineId === line.id)?.sstid ?? null,
@@ -205,10 +213,10 @@ export class TaxInvoiceService {
         unitPrice: new Prisma.Decimal(line.unitPrice),
         prdis: gross,
         dis: discount,
-        adis: new Prisma.Decimal(0),
+        adis,
         vra,
         vam,
-        tsstam: vam,
+        tsstam,
         lineOrder: line.lineOrder,
       });
     }
@@ -955,8 +963,13 @@ export class TaxInvoiceService {
       // «قالب شناسه یکتای حافظه مالیاتی و شماره منحصر به فرد مالیاتی»
       // document — a real (sandbox/live) submission is impossible without it
       throw new ValidationError('TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE', {
-        remediation: 'فiscal key material must be configured so the official taxid can be generated',
+        remediation: 'fiscal key material must be configured so the official taxid can be generated',
       });
+    }
+    // official format (docs/08, official sample A1121604C220002F095011):
+    // exactly 22 alphanumeric characters
+    if (typeof header.taxid === 'string' && header.taxid.length > 0 && !/^[A-Z0-9]{22}$/.test(header.taxid)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TAXID_INVALID', { taxid: header.taxid });
     }
     if (!Array.isArray(payload.body) || payload.body.length === 0) {
       throw new ValidationError('TAX_INVOICE_PAYLOAD_BODY_EMPTY');
@@ -972,11 +985,41 @@ export class TaxInvoiceService {
         remediation: 'assign the official goods/service code (sstid) to every line before submission',
       });
     }
+    const headerMonetary = ['tprdis', 'tdis', 'tadis', 'tvam', 'todam', 'tbill'];
+    for (const field of headerMonetary) {
+      const value = new Prisma.Decimal(String(header[field]));
+      if (!value.isFinite() || value.isNegative()) {
+        throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: [field] });
+      }
+    }
+    const lineSum = { prdis: new Prisma.Decimal(0), dis: new Prisma.Decimal(0), adis: new Prisma.Decimal(0), vam: new Prisma.Decimal(0), tsstam: new Prisma.Decimal(0) };
     for (const [index, line] of payload.body.entries()) {
       const am = new Prisma.Decimal(String(line.am ?? '0'));
-      if (!Number.isFinite(Number(line.fee)) || am.isNegative() || am.isZero()) {
+      const fee = new Prisma.Decimal(String(line.fee ?? '0'));
+      const prdis = new Prisma.Decimal(String(line.prdis ?? '0'));
+      const dis = new Prisma.Decimal(String(line.dis ?? '0'));
+      const adis = new Prisma.Decimal(String(line.adis ?? '0'));
+      const vam = new Prisma.Decimal(String(line.vam ?? '0'));
+      const tsstam = new Prisma.Decimal(String(line.tsstam ?? '0'));
+      // numeric sanity: finite, non-negative, non-zero quantity/price
+      for (const [field, value] of [['prdis', prdis], ['dis', dis], ['adis', adis], ['vam', vam], ['tsstam', tsstam], ['fee', fee]] as const) {
+        if (!value.isFinite() || value.isNegative()) {
+          throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { bodyIndex: index, fields: [field] });
+        }
+      }
+      if (am.isNegative() || am.isZero() || fee.isZero()) {
         throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { bodyIndex: index, fields: ['am', 'fee'] });
       }
+      // official line relations (RC_IITP.IS_V7.9): adis = prdis − dis;
+      // tsstam = adis + vam
+      if (!adis.eq(prdis.minus(dis)) || !tsstam.eq(adis.plus(vam))) {
+        throw new ValidationError('TAX_INVOICE_PAYLOAD_LINE_TOTALS_MISMATCH', { bodyIndex: index });
+      }
+      lineSum.prdis = lineSum.prdis.plus(prdis);
+      lineSum.dis = lineSum.dis.plus(dis);
+      lineSum.adis = lineSum.adis.plus(adis);
+      lineSum.vam = lineSum.vam.plus(vam);
+      lineSum.tsstam = lineSum.tsstam.plus(tsstam);
     }
     // monetary consistency (Decimal-exact, official totals relations)
     const tprdis = new Prisma.Decimal(String(header.tprdis));
@@ -994,13 +1037,43 @@ export class TaxInvoiceService {
         tbill: header.tbill,
       });
     }
-    const sumVam = payload.body
-      .reduce((acc, line) => acc.plus(new Prisma.Decimal(String(line.vam ?? '0'))), new Prisma.Decimal(0));
-    if (!sumVam.eq(tvam)) {
-      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', { sumVam: sumVam.toString(), tvam: header.tvam });
+    // exact header↔body agreement for EVERY official total column
+    if (!lineSum.prdis.eq(tprdis) || !lineSum.dis.eq(tdis) || !lineSum.adis.eq(tadis)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', {
+        sumPrdis: lineSum.prdis.toString(),
+        sumDis: lineSum.dis.toString(),
+        sumAdis: lineSum.adis.toString(),
+      });
+    }
+    if (!lineSum.vam.eq(tvam)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', { sumVam: lineSum.vam.toString(), tvam: header.tvam });
+    }
+    if (!lineSum.tsstam.eq(tbill)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', { sumTsstam: lineSum.tsstam.toString(), tbill: header.tbill });
     }
     if (!Array.isArray(payload.payments)) {
       throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['payments'] });
+    }
+    // official RC_IITP.IS_V7.9 جدول ۲۴: setm (روش تسویه) 1=نقدی, 2=نسیه,
+    // 3=نقدی/نسیه; setm=3 requires cap (مبلغ پرداختی نقدی) + insp (مبلغ نسیه).
+    // NO settlement-method data source exists in the ERP yet — a real
+    // (sandbox/live) submission is BLOCKED until that data model exists
+    // (documented gap; the official §7 example shows an empty payments array
+    // is what the wire carries for unreported settlements).
+    if (requireTaxid) {
+      const setm = Number(header.setm);
+      if (![1, 2, 3].includes(setm)) {
+        throw new ValidationError('TAX_INVOICE_PAYLOAD_SETM_UNAVAILABLE', {
+          remediation: 'capture the settlement method (روش تسویه) on the invoice before real submission',
+        });
+      }
+      if (setm === 3) {
+        const cap = header.cap === null || header.cap === undefined ? '' : String(header.cap);
+        const insp = header.insp === null || header.insp === undefined ? '' : String(header.insp);
+        if (cap.length === 0 || insp.length === 0) {
+          throw new ValidationError('TAX_INVOICE_PAYLOAD_SETM_FIELDS_REQUIRED', { fields: ['cap', 'insp'] });
+        }
+      }
     }
   }
 
@@ -1015,11 +1088,31 @@ export class TaxInvoiceService {
   ): Promise<void> {
     const trimmed = sstid.trim();
     if (!trimmed) throw new ValidationError('TAX_INVOICE_SSTID_EMPTY');
-    const line = await this.prisma.salesTaxInvoiceLine.updateMany({
+    const existing = await this.prisma.salesTaxInvoiceLine.findFirst({
       where: { id: taxInvoiceLineId, companyId },
+      select: { id: true, salesTaxInvoice: { select: { status: true } } },
+    });
+    if (!existing) throw new NotFoundError('Tax invoice line not found', { taxInvoiceLineId });
+    const parentStatus = existing.salesTaxInvoice.status;
+    // official lifecycle: the goods/service code is mappable only while the
+    // invoice has not entered the submission pipeline
+    if (parentStatus !== 'READY' && parentStatus !== 'FAILED') {
+      throw new ConflictError('TAX_INVOICE_LINE_NOT_MAPPABLE', { status: parentStatus });
+    }
+    // ATOMIC against concurrent status transitions: the conditional UPDATE
+    // re-checks the parent status at write time — a claim (READY→SENDING)
+    // racing this write makes it a no-op, which surfaces as a conflict
+    const updated = await this.prisma.salesTaxInvoiceLine.updateMany({
+      where: {
+        id: taxInvoiceLineId,
+        companyId,
+        salesTaxInvoice: { status: { in: ['READY', 'FAILED'] } },
+      },
       data: { sstid: trimmed },
     });
-    if (line.count === 0) throw new NotFoundError('Tax invoice line not found', { taxInvoiceLineId });
+    if (updated.count === 0) {
+      throw new ConflictError('TAX_INVOICE_LINE_NOT_MAPPABLE', { status: parentStatus });
+    }
     await this.audit.record({
       entityType: 'sales_tax_invoice_line',
       entityId: taxInvoiceLineId,
