@@ -19,8 +19,8 @@ import {
  *
  *   base:      https://tp.tax.gov.ir/requestsmanager/api/v2
  *   auth:      GET  …/nonce?timeToLive={10..200,default 30} → {nonce,expDate};
- *              JWS (RS256, x5c=[cert], sigT ISO-8601, crit=[sigT]) over
- *              {nonce, clientId} = single-use Bearer token per request (§5)
+ *              JWS (RS256, x5c=[cert], sigT ISO-8601 seconds 'Z', crit=[sigT])
+ *              over {nonce, clientId} = single-use Bearer token (§5)
  *   server:    GET  …/server-information → { serverTime, publicKeys:
  *              [{ key: base64 SPKI, id, algorithm: "RSA", purpose: 1 }] } (§6)
  *   submit:    POST …/invoice  body=[{ payload: JWE,
@@ -99,9 +99,31 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     }
   }
 
+  /** Official §5 sigT format: `yyyy-MM-dd'T'HH:mm:ss'Z'` — ISO-8601 UTC
+   *  with SECONDS precision (no fractional seconds). The single shared
+   *  formatter for the auth token and the invoice signature. */
+  static formatSigT(date: Date = new Date()): string {
+    return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+
+  /** Bounded network policy: every outbound call carries a cancellation
+   *  signal. MOADIAN_HTTP_TIMEOUT_MS (ms, minimum 1000) overrides the
+   *  30s default. Redirects stay disabled (security policy). */
+  private static httpTimeoutMs(): number {
+    const raw = Number(process.env.MOADIAN_HTTP_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw >= 1000 ? raw : 30_000;
+  }
+
+  private fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+    return this.fetchImpl(url, {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(MoadianHttpAdapter.httpTimeoutMs()),
+    });
+  }
+
   /** Official §5 auth: GET nonce → build JWS (RS256, x5c cert, sigT, crit) →
    *  the JWS itself is the single-use Bearer credential for one request. */
-  buildJws(nonce: string, sigT = new Date().toISOString()): string {
+  buildJws(nonce: string, sigT = MoadianHttpAdapter.formatSigT()): string {
     const b64url = (input: Buffer | string) =>
       Buffer.from(input).toString('base64url');
     const cert = this.certificatePem
@@ -124,7 +146,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
   }
 
   private async getNonce(): Promise<string> {
-    const res = await this.fetchImpl(`${this.base}/nonce?timeToLive=200`, { redirect: 'error' });
+    const res = await this.fetchWithTimeout(`${this.base}/nonce?timeToLive=200`, { redirect: 'error' });
     if (!res.ok) throw new Error(`MOADIAN_NONCE_FAILED:${res.status}`);
     const body = (await res.json()) as { nonce?: string };
     if (!body.nonce) throw new Error('MOADIAN_NONCE_MISSING');
@@ -140,11 +162,14 @@ export class MoadianHttpAdapter implements MoadianAdapter {
   }
 
   /** Official §6 server information: { serverTime, publicKeys: [{ key
-   *  (base64 SPKI), id, algorithm, purpose }] } — purpose 1 = encryption
-   *  key. The base64 SPKI is wrapped into a PEM for node crypto use. */
+   *  (base64 SPKI), id, algorithm, purpose }] } — STRICT selection: only a
+   *  purpose-1 (encryption) key with algorithm "RSA" and a parseable base64
+   *  SPKI encoding is accepted; anything missing, malformed, ambiguous or
+   *  unsuitable is rejected with MOADIAN_SERVER_INFO_KEY_UNSUITABLE. There
+   *  is NO fallback to an arbitrary key. */
   async getServerInformation(): Promise<{ publicKeyId: string; publicKeyPem: string }> {
     const token = (await this.getToken()).token;
-    const res = await this.fetchImpl(`${this.base}/server-information`, {
+    const res = await this.fetchWithTimeout(`${this.base}/server-information`, {
       method: 'GET',
       redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
@@ -154,21 +179,34 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       serverTime?: number;
       publicKeys?: Array<{ key?: string; id?: string; algorithm?: string; purpose?: number }>;
     };
-    const keys = body.publicKeys ?? [];
-    const encryption = keys.find((k) => k.purpose === 1) ?? keys[0];
-    if (!encryption?.key || !encryption.id) throw new Error('MOADIAN_SERVER_INFO_SCHEMA');
+    if (!body || !Array.isArray(body.publicKeys) || body.publicKeys.length === 0) {
+      throw new Error('MOADIAN_SERVER_INFO_SCHEMA: publicKeys array missing or empty');
+    }
+    const encryption = body.publicKeys.find((k) => k && k.purpose === 1);
+    if (!encryption || typeof encryption.key !== 'string' || !encryption.key || !encryption.id) {
+      throw new Error('MOADIAN_SERVER_INFO_KEY_UNSUITABLE: no purpose-1 encryption key with id present');
+    }
+    if (encryption.algorithm !== 'RSA') {
+      throw new Error(`MOADIAN_SERVER_INFO_KEY_UNSUITABLE: unsupported algorithm ${encryption.algorithm ?? ''}`);
+    }
     const pem = `-----BEGIN PUBLIC KEY-----\n${(encryption.key.match(/.{1,64}/g) ?? []).join('\n')}\n-----END PUBLIC KEY-----`;
+    try {
+      crypto.createPublicKey(pem);
+    } catch {
+      throw new Error('MOADIAN_SERVER_INFO_KEY_UNSUITABLE: key is not a parseable SPKI public key');
+    }
     return { publicKeyId: encryption.id, publicKeyPem: pem };
   }
 
   /** Official §7.2: sign the invoice JSON as a compact JWS — header
-   *  {alg: RS256, x5c: [cert], sigT: ISO-8601, crit: [sigT]}, payload =
-   *  the invoice JSON (utf8 → Base64URL), RSASSA-PKCS1-v1_5 SHA-256. */
+   *  {alg: RS256, x5c: [cert], sigT: ISO-8601 seconds, crit: [sigT]},
+   *  payload = the invoice JSON (utf8 → Base64URL), RSASSA-PKCS1-v1_5
+   *  SHA-256. sigT uses the shared seconds-precision formatter. */
   static signInvoiceJws(
     invoiceJson: string,
     privateKeyPem: string,
     certificatePem: string,
-    sigT = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    sigT = MoadianHttpAdapter.formatSigT(),
   ): string {
     const headerB64 = Buffer.from(
       JSON.stringify({
@@ -221,7 +259,11 @@ export class MoadianHttpAdapter implements MoadianAdapter {
    *  (JWS) then encrypted (JWE) and sent as
    *  { payload, header: { requestTraceId, fiscalId } }; the response echoes
    *  OUR requestTraceId back as `uid` (§7/§8). The official response has NO
-   *  errorCode field — content errors surface at INQUIRY time (§8). */
+   *  errorCode field — content errors surface at INQUIRY time (§8).
+   *  RESPONSE CORRELATION (final audit): the parsed result must be an array
+   *  with exactly one entry per submitted invoice and every entry's uid must
+   *  match a requestTraceId we actually sent — a missing, malformed or
+   *  uncorrelated response is an error (→ UNKNOWN outcome), never success. */
   async enqueue(packets: MoadianPacket[]): Promise<MoadianAsyncResponse[]> {
     if (packets.length > 100) throw new Error('MOADIAN_PACKET_LIMIT: max 100 invoices per request');
     const token = (await this.getToken()).token;
@@ -231,15 +273,26 @@ export class MoadianHttpAdapter implements MoadianAdapter {
       const payload = MoadianHttpAdapter.encryptInvoiceJwe(signed, org.publicKeyPem, org.publicKeyId);
       return { payload, header: { requestTraceId: p.uid, fiscalId: p.fiscalId || this.fiscalId } };
     });
-    const res = await this.fetchImpl(`${this.base}/invoice`, {
+    const res = await this.fetchWithTimeout(`${this.base}/invoice`, {
       method: 'POST',
       redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(envelope),
     });
     if (!res.ok) throw new Error(`MOADIAN_INVOICE_FAILED:${res.status}`);
-    const body = (await res.json()) as { result?: Array<{ uid?: string; referenceNumber?: string }> };
-    return (body.result ?? []).map((r) => ({ uid: r.uid ?? '', referenceNumber: r.referenceNumber ?? '' }));
+    const body = (await res.json()) as {
+      result?: Array<{ uid?: string; referenceNumber?: string }>;
+    };
+    if (!body || !Array.isArray(body.result) || body.result.length !== packets.length) {
+      throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: result array missing or length mismatch');
+    }
+    const sentUids = new Set(packets.map((p) => p.uid));
+    for (const entry of body.result) {
+      if (!entry || typeof entry.uid !== 'string' || !sentUids.has(entry.uid)) {
+        throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH: response uid does not correlate with the request');
+      }
+    }
+    return body.result.map((r) => ({ uid: r.uid ?? '', referenceNumber: r.referenceNumber ?? '' }));
   }
 
   /** Official §8.2: GET /inquiry-by-uid with REPEATED uidList query params
@@ -251,7 +304,7 @@ export class MoadianHttpAdapter implements MoadianAdapter {
     const params = new URLSearchParams();
     for (const uid of uids) params.append('uidList', uid);
     params.append('fiscalId', this.fiscalId);
-    const res = await this.fetchImpl(`${this.base}/inquiry-by-uid?${params.toString()}`, {
+    const res = await this.fetchWithTimeout(`${this.base}/inquiry-by-uid?${params.toString()}`, {
       method: 'GET',
       redirect: 'error',
       headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },

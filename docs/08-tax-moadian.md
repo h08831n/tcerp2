@@ -39,7 +39,7 @@
   `{nonce, clientId}`، امضای RS256 با کلید خصوصی — **خود JWS همان Bearer
   است**. جریان GET_TOKEN/`/req/` نسخه اول منسوخ و حذف شده است.
   **UNVERIFIED روی سرویس واقعی.**
-- **Base URL (نسخه دوم):** `https://tp.tax.gov.ir/requestsmanager/api/v2` — `GET /nonce`، `GET /server-information`، `POST /normal-enqueue`، `POST /INQUIRY_BY_UID`. (مسیرهای `/req/…` نسخه اول — منسوخ.)
+- **Base URL (سند رسمی v1.6):** `https://tp.tax.gov.ir/requestsmanager/api/v2` — `GET /nonce`، `GET /server-information`، `POST /invoice`، `GET /inquiry-by-uid`. (مسیرهای `/req/…` و `normal-enqueue` آینه‌ای — در سند رسمی وجود ندارند؛ historical.)
 
 ## ماتریس وضعیت پیاده‌سازی مودیان (Official v1.6 Conformance — 2026-10-24)
 
@@ -69,7 +69,8 @@
 
 **سابق/آینه‌ای (حذف از adapter):** normalize/dataSignature/XOR-whitening/
 envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌ها در
-سند رسمی v1.6 نیستند؛ شاخه 5005 در سرویس‌ها فقط به‌صورت دفاعی باقی است.
+سند رسمی v1.6 نیستند؛ [HISTORICAL — historical] هیچ شاخه کد خطای آینه‌ای در
+سرویس‌ها باقی نمانده است.
 
 **دستگاه زمانی indatim/indati2m: میلی‌ثانیه** (نمونه رسمی 1655620821274 = ۱۳
 رقم ms؛ «طول ۱۴» ظرفیت ذخیره‌سازی است). indatim=صدور (issueDate روزانه →
@@ -81,16 +82,14 @@ envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌�
 مرجع فنی: «دستورالعمل فنی نحوه اتصال به سامانه مودیان» (tax.gov.ir —
 بازتاب: rahrokh.com). موارد به‌کاررفته در adapter:
 
-- Base (نسخه دوم): `https://tp.tax.gov.ir/requestsmanager/api/v2` — ارسال:
-  `POST /normal-enqueue`، استعلام: `POST /INQUIRY_BY_UID`، توکن: JWS از
-  `GET /nonce` (نسخه اول `/req/…`/GET_TOKEN — منسوخ).
-- Packet: `uid` (یکتای کلاینت)، `packetType: INVOICE.V01`، `retry=true` در
-  ارسال مجدد پس از FAILED، `data`، `fiscalId`، `dataSignature`.
-- رمزنگاری (در adapter HTTP پیاده، **تأییدنشده روی سرویس واقعی**): نرمال‌سازی
-  (جفت‌های کلید-مقدار مرتب‌شده با `#`)، امضا RSA2048-SHA256، بدنه AES-256-GCM
-  با کلید wrapشده RSA-OAEP-SHA256.
-- کدهای خطای رسمی: 5000/5001/5002/5005 (duplicate uid)/5006 (بیش از ۱۰۰
-  packet)/5013/5015.
+- [HISTORICAL — mirror-era، دیگر پیاده‌سازی نیست] ارسال `POST /normal-enqueue`
+  با packets/dataSignature/XOR-whitening و کدهای خطای 5000/5001/5002/5005/5006:
+  این اشکال در سند رسمی v1.3/v1.6 وجود ندارند و از adapter حذف شدند.
+- قرارداد جاری (سند رسمی v1.6): `POST /api/v2/invoice` با
+  `[{payload: JWE, header: {requestTraceId, fiscalId}}]`؛ استعلام
+  `GET /api/v2/inquiry-by-uid?uidList=…&fiscalId=…`؛ امضای صورتحساب JWS روی
+  JSON خام؛ رمزنگاری JWE (RSA-OAEP-256 + A256GCM) با کلید عمومی سازمان از
+  server-information (purpose=1).
 
 **وضعیت اعتبار:** فیلدها و جریان از مستند فنی برداشت شده‌اند؛ اتصال واقعی
 نیازمند اعتبارنامه مودی (کلید خصوصی + fiscalId + کد اقتصادی) است که در
@@ -119,9 +118,10 @@ envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌�
 - **بازیابی بدون resend کورکورانه**: attempt PREPARED (claim ثبت شده، enqueue
   قطعاً تکمیل نشده) با مهلت ۱۲۰ثانیه‌ای از createdAt — نمونه‌های دیگر تا
   انقضای مهلت عقب می‌کشند (p8-19c)؛ پس از انقضا با **همان uid و محتوای
-  منجمد** از payload_snapshot ادامه می‌یابد — ارسال با همان uid در مرجع
-  idempotent است (رفتار مستند 5005 duplicate.request.uid، شواهد p8-14؛ این
-  همگرایی روی sandbox واقعی تأیید نشده است). aggregate claimed بدون ردیف
+  منجمد** از payload_snapshot ادامه می‌یابد — uid همان requestTraceId رسمی
+  است (§7/§8 سند v1.6: «uid … همان requestTraceId») و response/استعلام با
+  همان شناسه همبسته می‌شود (شواهد p8-14 بازنویسی‌شده؛ همگرایی روی sandbox
+  واقعی تأیید نشده است). aggregate claimed بدون ردیف
   attempt (پنجره کرش قدیمی) → هیچ چیزی هرگز ارسال نشده و attempt 1 با uid
   تازه آغاز می‌شود (p8-19a)؛ aggregate در جریان/نهایی بدون ردیف attempt
   (هویت گم‌شده) → کاملاً مسدود با `SANDBOX_ATTEMPT_IDENTITY_LOST` (p8-19g).
@@ -157,9 +157,10 @@ envelope-signature/normal-enqueue/INQUIRY_BY_UID (POST)/کد 5005 — این‌�
   (p8-18c). payload آزمایشی **کامل** است (taxid/tins/sstid از env
   `MOADIAN_SANDBOX_*`)؛ اگر این envها تنظیم نشده باشند نتیجه
   NOT_CONFIGURED با راهنمای اقدام برمی‌گردد — payload ناقص هرگز ارسال
-  نمی‌شود. 5005 duplicate = قبلاً پذیرفته‌شده (FAILED نمی‌شود).
-- **جدا‌سازی ادعاها از شواهد**: رفتار 5005 duplicate و شکل endpointها از
-  مستند رسمی نسخه دوم پیاده‌سازی شده اما **هیچ‌کدام از این رفتارها روی
+  نمی‌شود. پاسخ enqueue با همبستگی requestTraceId اعتبارسنجی می‌شود
+  (MOADIAN_INVOICE_RESPONSE_MISMATCH → UNKNOWN، هرگز موفق تلقی نمی‌شود).
+- **جدا‌سازی ادعاها از شواهد**: قرارداد ارسال/استعلام/رمزنگاری از سند رسمی
+  RC_TICS.IS_v1.6 پیاده‌سازی شده اما **هیچ‌کدام از این رفتارها روی
   sandbox/live واقعی تأیید نشده‌اند** — همه شواهد runtime از تست‌های
   fetch-injected/mock روی tcerp_test است. تماس با سرویس واقعی بدون
   اعتبارنامه sandbox مجاز و بدون authorization ممنوع است.

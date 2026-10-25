@@ -773,16 +773,13 @@ export class MoadianDiagnosticService {
     startedAt = Date.now();
     try {
       const responses = await adapter.enqueue([packet]);
-      const response = responses[0];
-      if (response?.errorCode === '5005') {
-        // official duplicate.request.uid — the authority already has THIS uid
-        await this.prisma.moadianDiagnosticAttempt.updateMany({
-          where: { id: attemptRow.id, status: 'PREPARED' },
-          data: { status: 'PENDING', referenceNumber: response.referenceNumber || null },
-        });
-        head = await this.prisma.moadianDiagnosticAttempt.findUniqueOrThrow({ where: { id: attemptRow.id } });
-        steps.push(this.step('sandbox_enqueue', 'PASS', startedAt, 'این uid قبلاً دریافت شده است (duplicate) — استعلام ادامه می‌یابد.'));
-      } else if (response?.errorCode) {
+      // official §7/§8: the response uid must echo our requestTraceId
+      const response = responses.find((r) => r.uid === packet.uid);
+      if (!response) throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH');
+      if (response?.errorCode) {
+        // defensive: the official v1.6 submission response has NO errorCode —
+        // any surfaced errorCode is unexpected and treated as a rejection,
+        // never as a documented duplicate/retry signal
         await this.prisma.moadianDiagnosticAttempt.updateMany({
           where: { id: attemptRow.id, status: 'PREPARED' },
           data: { status: 'REJECTED', errorCode: response.errorCode, errorDetail: response.errorDetail ?? null },
@@ -986,7 +983,9 @@ export class MoadianDiagnosticService {
           tsstam: '90000',
         },
       ],
-      payment: [],
+      // official RC_TICS.IS_v1.6 §7: top-level `payments` array (empty —
+      // payment mapping is a documented data gap)
+      payments: [],
     };
   }
 

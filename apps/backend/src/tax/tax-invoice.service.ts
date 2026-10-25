@@ -63,6 +63,10 @@ export class TaxInvoiceService {
       issueDate?: Date;
       relatedTaxid?: string; // original invoice taxid for CORRECTIVE/CANCEL/RETURN
       lineOverrides?: Array<{ salesLineId: string; quantity: string }>;
+      // official جدول ۲: sstid is a REQUIRED body field per line — the caller
+      // supplies the product→goods-code mapping resolved from the registered
+      // goods list (GET_SERVICE_STUFF_LIST); unmapped lines block submission
+      lineSstids?: Array<{ salesLineId: string; sstid: string }>;
     },
     actor: { id: string; username: string },
   ) {
@@ -84,6 +88,7 @@ export class TaxInvoiceService {
       issueDate?: Date;
       relatedTaxid?: string;
       lineOverrides?: Array<{ salesLineId: string; quantity: string }>;
+      lineSstids?: Array<{ salesLineId: string; sstid: string }>;
     },
     actor: { id: string; username: string },
   ) {
@@ -193,7 +198,7 @@ export class TaxInvoiceService {
       const vam = net.times(vra).dividedBy(100);
       lines.push({
         salesLineId: line.id,
-        sstid: null as string | null, // official service code — mapped from the goods list at send time (documented gap)
+        sstid: input.lineSstids?.find((m) => m.salesLineId === line.id)?.sstid ?? null,
         description: line.printableDescription ?? line.productVariant.nameFa,
         mu: line.uom.symbol,
         quantity,
@@ -456,7 +461,7 @@ export class TaxInvoiceService {
     invoiceId: string,
     actor: { id: string; username: string },
   ): Promise<
-    | { status: 'SUBMITTED' | 'SUCCESS' | 'FAILED'; submissionId?: string; uid?: string; referenceNumber?: string | null; errorCode?: string; awaitingInquiry?: boolean; recoveredLateSuccess?: boolean; duplicateUid?: boolean }
+    | { status: 'SUBMITTED' | 'SUCCESS' | 'FAILED'; submissionId?: string; uid?: string; referenceNumber?: string | null; errorCode?: string; awaitingInquiry?: boolean; recoveredLateSuccess?: boolean }
   > {
     const invoice = await this.prisma.salesTaxInvoice.findFirst({
       where: { id: invoiceId, companyId },
@@ -539,6 +544,16 @@ export class TaxInvoiceService {
       }
     }
     const isRetry = authoritativeFailure || invoice.status === 'FAILED';
+    // FAIL-SAFE PAYLOAD VALIDATION (final audit #2): the payload is built and
+    // fully validated BEFORE any state change — an incomplete payload (unmapped
+    // sstid, missing taxid in non-mock mode, inconsistent totals) is rejected
+    // with a specific domain error and never reaches the submission lifecycle
+    // or the wire. This boundary cannot be bypassed: every submission passes
+    // through send().
+    const submissionMode = (process.env.MOADIAN_MODE ?? 'mock') as 'mock' | 'sandbox' | 'live';
+    const payload = this.buildPayload(invoice);
+    TaxInvoiceService.validateSubmissionPayload(payload, submissionMode !== 'mock');
+
     // atomic claim (like the loading allocation pattern): READY/FAILED → SENDING
     const claimed = await this.prisma.salesTaxInvoice.updateMany({
       where: { id: invoiceId, companyId, status: { in: ['READY', 'FAILED'] } },
@@ -558,8 +573,8 @@ export class TaxInvoiceService {
       {
         uid,
         packetType: PACKET_TYPE,
-        retry: isRetry,
-        data: JSON.stringify(this.buildPayload(invoice)),
+        retry: isRetry, // internal bookkeeping only — official v1.6 wire has no retry field
+        data: JSON.stringify(payload),
         encryptionKeyId: '',
         symmetricKey: '',
         iv: '',
@@ -582,7 +597,11 @@ export class TaxInvoiceService {
 
     try {
       const responses = await this.adapter.enqueue(packets);
-      const response = responses[0];
+      // official §7/§8: the response uid MUST echo our requestTraceId — an
+      // uncorrelated/missing response is an UNKNOWN outcome (safe catch below),
+      // never an accepted submission
+      const response = responses.find((r) => r.uid === uid);
+      if (!response) throw new Error('MOADIAN_INVOICE_RESPONSE_MISMATCH');
       await this.prisma.salesTaxInvoiceSubmission.update({
         where: { id: submission.id },
         data: {
@@ -592,18 +611,11 @@ export class TaxInvoiceService {
           errorDetail: response?.errorDetail || null,
         },
       });
-      if (response?.errorCode === '5005') {
-        // duplicate.request.uid — the authority ALREADY has this uid: treat
-        // as accepted (submission stays PENDING; inquiry resolves it) and
-        // never mark the invoice FAILED for a duplicate of itself
-        await this.prisma.salesTaxInvoice.update({
-          where: { id: invoiceId },
-          data: { status: 'SUBMITTED', moadianStatus: 'PENDING', moadianError: null },
-        });
-        return { status: 'SUBMITTED' as const, submissionId: submission.id, uid, duplicateUid: true };
-      }
       if (response?.errorCode) {
-        // transport-level rejection (bad request, too large…)
+        // defensive: the official v1.6 submission response carries NO
+        // errorCode field — any adapter-surfaced errorCode is unexpected and
+        // treated as a transport-level rejection, never as a documented
+        // duplicate/retry signal
         await this.prisma.salesTaxInvoice.update({
           where: { id: invoiceId },
           data: {
@@ -766,6 +778,7 @@ export class TaxInvoiceService {
    *  set by the adapter when fiscal key material is configured. */
   private buildPayload(invoice: {
     number: string;
+    taxid: string | null;
     subject: 'MAIN' | 'CORRECTIVE' | 'CANCEL' | 'RETURN';
     inty: number;
     issueDate: Date;
@@ -810,6 +823,11 @@ export class TaxInvoiceService {
     const tob = invoice.customer.type === 'COMPANY' ? 1 : 2; // 1=حقوقی, 2=حقیقی
     return {
       header: {
+        // official RC_IITP.IS_V7.9 جدول ۲ ردیف ۱: taxid (شماره منحصربه‌فرد
+        // مالیاتی) is the FIRST header field — generated with fiscal key
+        // material (documented gap); validation blocks non-mock submission
+        // while it is absent
+        taxid: invoice.taxid ?? null,
         inno: invoice.number,
         inty: invoice.inty,
         // official RC_TICS.IS_v1.6 §7 example carries `inp` (الگوی صورتحساب)
@@ -827,6 +845,9 @@ export class TaxInvoiceService {
         tdis: invoice.discountTotal.toString(),
         tadis: invoice.subtotal.minus(invoice.discountTotal).toString(),
         tvam: invoice.taxTotal.toString(),
+        // official RC_IITP.IS_V7.9 جدول ۲: todam (جمع عوارض) — no other-duties
+        // data source exists yet, so the honest value is an exact zero
+        todam: '0',
         tbill: invoice.grandTotal.toString(),
       },
       body: invoice.lines.map((l) => ({
@@ -848,6 +869,113 @@ export class TaxInvoiceService {
       // mapping is a documented gap pending a data decision)
       payments: [],
     };
+  }
+
+  /** FAIL-SAFE submission payload validation (final audit #2). Pure and
+   *  static so tests exercise the exact production rules. Throws a
+   *  ValidationError with a specific, actionable code — a knowingly invalid
+   *  payload never reaches the wire. */
+  static validateSubmissionPayload(
+    payload: {
+      header: Record<string, unknown>;
+      body: Array<Record<string, unknown>>;
+      payments: unknown[];
+    },
+    requireTaxid: boolean,
+  ): void {
+    const header = payload.header ?? {};
+    const requiredFields = ['inno', 'indatim', 'indati2m', 'tins', 'tprdis', 'tdis', 'tadis', 'tvam', 'todam', 'tbill'];
+    const missing = requiredFields.filter((f) => {
+      const v = header[f];
+      return v === null || v === undefined || v === '';
+    });
+    if (missing.length > 0) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_MISSING', { fields: missing });
+    }
+    if (![1, 2, 3].includes(Number(header.inty)) || ![1, 2, 3, 4].includes(Number(header.ins)) || Number(header.inp) !== 1) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['inty', 'ins', 'inp'] });
+    }
+    if (!Number.isInteger(Number(header.indatim)) || Number(header.indatim) <= 0) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['indatim'] });
+    }
+    if (requireTaxid && (typeof header.taxid !== 'string' || header.taxid.length === 0)) {
+      // taxid generation needs the fiscal-key material + the separate
+      // «قالب شناسه یکتای حافظه مالیاتی و شماره منحصر به فرد مالیاتی»
+      // document — a real (sandbox/live) submission is impossible without it
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE', {
+        remediation: 'فiscal key material must be configured so the official taxid can be generated',
+      });
+    }
+    if (!Array.isArray(payload.body) || payload.body.length === 0) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_BODY_EMPTY');
+    }
+    const unmapped = payload.body
+      .map((line, index) => (typeof line.sstid === 'string' && line.sstid.length > 0 ? null : index))
+      .filter((index): index is number => index !== null);
+    if (unmapped.length > 0) {
+      // official جدول ۲: sstid (کد کالا/خدمت) is a REQUIRED body field —
+      // every line must be mapped from the registered goods list first
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_SSTID_UNMAPPED', {
+        bodyIndexes: unmapped,
+        remediation: 'assign the official goods/service code (sstid) to every line before submission',
+      });
+    }
+    for (const [index, line] of payload.body.entries()) {
+      const am = new Prisma.Decimal(String(line.am ?? '0'));
+      if (!Number.isFinite(Number(line.fee)) || am.isNegative() || am.isZero()) {
+        throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { bodyIndex: index, fields: ['am', 'fee'] });
+      }
+    }
+    // monetary consistency (Decimal-exact, official totals relations)
+    const tprdis = new Prisma.Decimal(String(header.tprdis));
+    const tdis = new Prisma.Decimal(String(header.tdis));
+    const tadis = new Prisma.Decimal(String(header.tadis));
+    const tvam = new Prisma.Decimal(String(header.tvam));
+    const todam = new Prisma.Decimal(String(header.todam));
+    const tbill = new Prisma.Decimal(String(header.tbill));
+    if (!tadis.eq(tprdis.minus(tdis)) || !tbill.eq(tadis.plus(tvam).plus(todam))) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', {
+        tprdis: header.tprdis,
+        tdis: header.tdis,
+        tadis: header.tadis,
+        tvam: header.tvam,
+        tbill: header.tbill,
+      });
+    }
+    const sumVam = payload.body
+      .reduce((acc, line) => acc.plus(new Prisma.Decimal(String(line.vam ?? '0'))), new Prisma.Decimal(0));
+    if (!sumVam.eq(tvam)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH', { sumVam: sumVam.toString(), tvam: header.tvam });
+    }
+    if (!Array.isArray(payload.payments)) {
+      throw new ValidationError('TAX_INVOICE_PAYLOAD_FIELD_INVALID', { fields: ['payments'] });
+    }
+  }
+
+  /** operator/integration mapping entry: assign the official goods/service
+   *  code (sstid) to an invoice line (the GET_SERVICE_STUFF_LIST-driven
+   *  mapping itself is a documented data gap — this records the decision). */
+  async assignLineSstid(
+    companyId: string,
+    taxInvoiceLineId: string,
+    sstid: string,
+    actor: { id: string; username: string },
+  ): Promise<void> {
+    const trimmed = sstid.trim();
+    if (!trimmed) throw new ValidationError('TAX_INVOICE_SSTID_EMPTY');
+    const line = await this.prisma.salesTaxInvoiceLine.updateMany({
+      where: { id: taxInvoiceLineId, companyId },
+      data: { sstid: trimmed },
+    });
+    if (line.count === 0) throw new NotFoundError('Tax invoice line not found', { taxInvoiceLineId });
+    await this.audit.record({
+      entityType: 'sales_tax_invoice_line',
+      entityId: taxInvoiceLineId,
+      action: AuditAction.UPDATE,
+      companyId,
+      actor,
+      newValues: { sstid: trimmed },
+    });
   }
 
   // ─── purchase tax invoices (received from suppliers) ─────────────────────

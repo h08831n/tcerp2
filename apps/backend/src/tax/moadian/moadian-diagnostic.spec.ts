@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import { MockMoadianAdapter } from './mock-moadian.adapter';
 import { FakeMoadianAdapter } from './fake-moadian-fixtures';
 import { TEST_CERT_PEM, TEST_PRIVATE_PEM } from './test-certs';
@@ -5,6 +6,12 @@ import {
   classifyNetworkError,
   MoadianDiagnosticService,
 } from './moadian-diagnostic.service';
+
+// official §6: the mock authority key must be a REAL parseable base64 SPKI
+const DIAG_SPKI_B64 = new crypto.X509Certificate(TEST_CERT_PEM).publicKey
+  .export({ type: 'spki', format: 'pem' }).toString()
+  .replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----/g, '')
+  .replace(/[\r\n]+/g, '');
 
 /** Deterministic offline tests for the administrator connection diagnostic:
  *  mocked global fetch for DNS/TLS/HTTP/timeout paths; mock-mode config;
@@ -152,7 +159,7 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
         return new Response(
           JSON.stringify({
             serverTime: 1684055518885,
-            publicKeys: [{ key: 'pub', id: 'key-1', algorithm: 'RSA', purpose: 1 }],
+            publicKeys: [{ key: DIAG_SPKI_B64, id: 'key-1', algorithm: 'RSA', purpose: 1 }],
           }),
           { status: 200 },
         ) as never;
@@ -186,7 +193,7 @@ describe('MoadianDiagnosticService — connection diagnostics', () => {
       return new Response(
         JSON.stringify({
           serverTime: 1684055518885,
-          publicKeys: [{ key: 'p', id: 'k', algorithm: 'RSA', purpose: 1 }],
+          publicKeys: [{ key: DIAG_SPKI_B64, id: 'k', algorithm: 'RSA', purpose: 1 }],
         }),
         { status: 200 },
       ) as never;

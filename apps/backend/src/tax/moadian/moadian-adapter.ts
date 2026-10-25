@@ -1,18 +1,25 @@
 /**
- * Moadian adapter contract (Phase 8, docs/08).
+ * Moadian adapter contract (Phase 8 — OFFICIAL protocol RC_TICS.IS_v1.6,
+ * شهریور ۱۴۰۴, retrieved from www.intamedia.ir).
  *
- * The technical flow follows the official "دستورالعمل فنی نحوه اتصال به
- * سامانه مودیان" (technical instructions for connecting to the Iranian
- * Moadian system, tax.gov.ir — mirrored at rahrokh.com): the whole migration
- * of an invoice packet to `https://tp.tax.gov.ir/req/` works through
- * async enqueue (normal/fast) + sync inquiry, with packets that carry a
- * client `uid`, a `packetType` (INVOICE.V01), a `retry` flag, and an
- * RSA2048-SHA256 `dataSignature` over the normalized JSON.
+ * Official flow (§5-§8): nonce (GET, timeToLive 10..200) → JWS Bearer token
+ * (RS256/x5c/sigT/crit over {nonce, clientId}, single-use per request) →
+ * server-information (publicKeys[], purpose 1 = encryption) → invoice
+ * submission as `POST /api/v2/invoice` with
+ * [{ payload: JWE, header: { requestTraceId, fiscalId } }] where the payload
+ * is the invoice JSON signed (§7.2 JWS) then encrypted (§7.3 JWE,
+ * RSA-OAEP-256 + A256GCM) — the response `uid` echoes OUR requestTraceId →
+ * status inquiry via `GET /api/v2/inquiry-by-uid?uidList=…&fiscalId=…`
+ * (SUCCESS | FAILED | IN_PROGRESS | NOT_FOUND).
  *
- * NOTHING in this file invents legal/API details: every field below maps to
- * the fetched official instruction. The HTTP adapter is UNVERIFIED against
- * the live service until real Sharjh credentials (private key + fiscalId +
- * economic code) are supplied at runtime — mock mode is the default.
+ * The older mirror-era contracts (normal-enqueue packets, normalization +
+ * dataSignature, XOR-whitening, INQUIRY_BY_UID POST, error 5005) DO NOT
+ * exist in the official document and are not part of this contract.
+ *
+ * NOTHING here invents legal/API details. The HTTP adapter is UNVERIFIED
+ * against the live service until real Sharjh credentials (private key +
+ * certificate + clientId + fiscalId) are supplied at runtime — mock mode is
+ * the default and mock/simulated success is never real connectivity.
  */
 
 export interface MoadianConfig {
@@ -23,17 +30,22 @@ export interface MoadianConfig {
   privateKeyPem?: string; // signer key (RSA2048-SHA256 normalization signature)
 }
 
-/** One packet = one invoice send attempt (official packet fields). */
+/** One packet = one invoice send attempt. WIRE USAGE (official v1.6):
+ *  `uid` becomes header.requestTraceId, `data` (invoice JSON) is signed and
+ *  encrypted into the JWE payload, `fiscalId` fills the envelope header.
+ *  The remaining fields are INTERNAL bookkeeping/history only — they are
+ *  never placed on the wire (retry is our resubmission bookkeeping; the
+ *  crypto fields belong to the retired mirror-era envelope). */
 export interface MoadianPacket {
-  uid: string; // client-generated unique send id
-  packetType: string; // e.g. INVOICE.V01
-  retry: boolean; // official spec: must be true on resubmission after FAILED
-  data: string; // serialized invoice JSON (encrypted or plaintext)
-  encryptionKeyId: string; // org public key id (empty when unencrypted)
-  symmetricKey: string; // RSA-OAEP wrapped AES key (empty when unencrypted)
-  iv: string; // AES IV (empty when unencrypted)
+  uid: string; // client-generated unique send id (== official requestTraceId)
+  packetType: string; // internal classification (not sent on the v1.6 wire)
+  retry: boolean; // internal bookkeeping: true on resubmission after FAILED
+  data: string; // serialized invoice JSON (signed + encrypted by the adapter)
+  encryptionKeyId: string; // legacy bookkeeping (not on the v1.6 wire)
+  symmetricKey: string; // legacy bookkeeping (not on the v1.6 wire)
+  iv: string; // legacy bookkeeping (not on the v1.6 wire)
   fiscalId: string;
-  dataSignature: string; // RSA2048-SHA256 over the normalized JSON
+  dataSignature: string; // legacy bookkeeping (not on the v1.6 wire)
 }
 
 export interface MoadianAsyncResponse {
@@ -62,12 +74,12 @@ export interface MoadianToken {
 export const MOADIAN_ADAPTER = Symbol('MOADIAN_ADAPTER');
 
 export interface MoadianAdapter {
-  /** GET_TOKEN (sync) — JWT for async enqueue calls. */
+  /** §5 auth: nonce → JWS Bearer (single-use per request). */
   getToken(): Promise<MoadianToken>;
-  /** normal-enqueue (async) — send invoice packets. */
+  /** §7: POST /invoice — send signed+encrypted invoice payloads. */
   enqueue(packets: MoadianPacket[]): Promise<MoadianAsyncResponse[]>;
-  /** INQUIRY_BY_UID (sync) — per-uid submission results. */
+  /** §8.2: GET /inquiry-by-uid — per-uid submission results. */
   inquiryByUid(uids: string[]): Promise<MoadianInquiryResult[]>;
-  /** GET_SERVER_INFORMATION — org public key id + key (for encryption). */
+  /** §6: GET /server-information — purpose-1 encryption public key. */
   getServerInformation(): Promise<{ publicKeyId: string; publicKeyPem: string }>;
 }

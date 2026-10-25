@@ -221,7 +221,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
   itif('p8-10 payload audit: header/body fields match the official template exactly', async () => {
     const { doc } = await makeDoc('20');
     const issued = new Date('2026-03-15T10:30:00Z');
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, issueDate: issued }, ACTOR);
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, issueDate: issued, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     await service.send(COMPANY, invoice.id, ACTOR);
     const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
       where: { invoiceId: invoice.id },
@@ -281,7 +281,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
 
   itif('p8-11 corrective invoice inherits the ORIGINAL invoice type (inty), ins is independent, irtaxid required', async () => {
     const { doc } = await makeDoc('5');
-    const original = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const original = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     const taxid = 'A1B2C3D4E5F6G7H';
     await prisma.salesTaxInvoice.update({ where: { id: original.id }, data: { taxid } });
     await expect(
@@ -291,6 +291,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       salesDocumentId: doc.id,
       subject: 'CORRECTIVE',
       relatedTaxid: taxid,
+      lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }],
     }, ACTOR);
     await service.send(COMPANY, corrective.id, ACTOR);
     const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
@@ -315,12 +316,12 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
   itif('p8-17 table-driven inty/ins derivation: buyer determines type, subject is independent', async () => {
     // buyer WITH economicCode → نوع اول (inty=1) for every subject
     const { doc: b2bDoc } = await makeDoc('4');
-    const b2bMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: b2bDoc.id }, ACTOR);
+    const b2bMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: b2bDoc.id, lineSstids: [{ salesLineId: b2bDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     expect(b2bMain.inty).toBe(1);
     expect(b2bMain.subject).toBe('MAIN');
     // consumer WITHOUT economicCode → نوع دوم (inty=2)
     const { doc: consumerDoc } = await makeDoc('4', { withEconomicCode: false });
-    const consumerMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: consumerDoc.id }, ACTOR);
+    const consumerMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: consumerDoc.id, lineSstids: [{ salesLineId: consumerDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     expect(consumerMain.inty).toBe(2);
     expect(consumerMain.subject).toBe('MAIN');
     // corrective on a consumer invoice: inherits inty=2, ins=2
@@ -330,6 +331,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       salesDocumentId: consumerDoc.id,
       subject: 'RETURN',
       relatedTaxid: consumerTaxid,
+      lineSstids: [{ salesLineId: consumerDoc.lines[0].id, sstid: '2710000138624' }],
     }, ACTOR);
     expect(corrective.inty).toBe(2); // inherited from consumer original
     expect(corrective.subject).toBe('RETURN');
@@ -338,14 +340,14 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
 
   itif('p8-12 over-invoicing blocked; cancelled frees; override above remaining rejected', async () => {
     const { doc, line } = await makeDoc('50');
-    const first = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const first = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     expect((await prisma.salesTaxInvoiceLine.findUniqueOrThrow({ where: { id: first.lines[0].id } })).quantity.toString()).toBe('50');
     await expect(
-      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR),
+      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR),
     ).rejects.toThrow('TAX_INVOICE_QUANTITY_EXCEEDED');
     // cancellation (never accepted by the authority) frees the loaded quantity
     await prisma.salesTaxInvoice.update({ where: { id: first.id }, data: { status: 'CANCELLED' } });
-    const second = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const second = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     expect((await prisma.salesTaxInvoiceLine.findUniqueOrThrow({ where: { id: second.lines[0].id } })).quantity.toString()).toBe('50');
     await expect(
       service.createFromSalesDocument(COMPANY, {
@@ -357,7 +359,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
 
   itif('p8-13 unknown outcome: stuck SENDING → recovery inquires, NEVER blind-resends', async () => {
     const { doc } = await makeDoc('10');
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     const res = await service.send(COMPANY, invoice.id, ACTOR);
     expect(res.status).toBe('SUBMITTED');
     // simulate crash between claim and completion
@@ -371,36 +373,47 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     expect((await service.inquiry(COMPANY, invoice.id)).status).toBe('SUCCESS');
   });
 
-  itif('p8-14 duplicate uid response (5005) = already accepted, NOT failed', async () => {
-    const { doc } = await makeDoc('8');
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
-    const seenUids: string[] = [];
-    const realEnqueue = fakeAdapter.enqueue.bind(fakeAdapter);
-    fakeAdapter.enqueue = async (packets) => {
-      const uid = packets[0].uid;
-      const res = seenUids.includes(uid)
-        ? [{ uid, referenceNumber: '', errorCode: '5005', errorDetail: 'duplicate.request.uid' }]
-        : await realEnqueue(packets);
-      seenUids.push(uid);
-      return res;
-    };
-    // first send OK; then crash → SENDING; recovery finds FAILED?? — the
-    // authority has it pending: inquiry says SUCCESS → invoice promoted
-    const first = await service.send(COMPANY, invoice.id, ACTOR);
-    expect(first.status).toBe('SUBMITTED');
-    await prisma.salesTaxInvoice.update({ where: { id: invoice.id }, data: { status: 'SENDING' } });
-    fakeAdapter.inquiryQueue.push('PENDING');
-    await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_SEND_IN_PROGRESS');
-    fakeAdapter.inquiryQueue.push('SUCCESS');
-    expect((await service.inquiry(COMPANY, invoice.id)).status).toBe('SUCCESS');
-    const fresh = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
-    expect(fresh.status).toBe('SUCCESS');
-    expect(fresh.moadianError).toBeNull();
-  });
+  itif(
+    'p8-14 uncorrelated submission response (official v1.6) is an UNKNOWN outcome — never accepted, never FAILED',
+    async () => {
+      // official RC_TICS.IS_v1.6 §7: the response uid MUST echo the sent
+      // requestTraceId. An uncorrelated/malformed response is rejected by the
+      // adapter and lands in the safe UNKNOWN path (submission stays PENDING,
+      // invoice awaiting inquiry) — never accepted, never failed, no resend.
+      const { doc } = await makeDoc('8');
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
+      const realEnqueue = fakeAdapter.enqueue.bind(fakeAdapter);
+      fakeAdapter.enqueue = async (packets) => {
+        await realEnqueue(packets); // the authority "received" packet #1
+        return [{ uid: 'not-our-trace-id', referenceNumber: 'ref-foreign' }]; // uncorrelated response
+      };
+      const res = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(res.status).toBe('SUBMITTED');
+      expect(res.awaitingInquiry).toBe(true);
+      fakeAdapter.enqueue = realEnqueue;
+      const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+        where: { invoiceId: invoice.id },
+        orderBy: { attempt: 'desc' },
+      });
+      expect(submission.status).toBe('PENDING'); // UNKNOWN outcome — recoverable
+      expect(submission.errorCode).toBe('TRANSPORT');
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      // a re-send while the outcome is unresolved is blocked — no duplicate
+      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow('TAX_INVOICE_NOT_SENDABLE');
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+      // recovery via the SAME uid: the authority accepted packet #1
+      fakeAdapter.inquiryQueue.push('SUCCESS');
+      expect((await service.inquiry(COMPANY, invoice.id)).status).toBe('SUCCESS');
+      const fresh = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(fresh.status).toBe('SUCCESS');
+      expect(fresh.moadianError).toBeNull();
+      expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
+    },
+  );
 
   itif('p8-15 stale response: older-attempt SUCCESS never overwrites newer FAILED', async () => {
     const { doc } = await makeDoc('6');
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     await service.send(COMPANY, invoice.id, ACTOR); // attempt 1 → PENDING
     fakeAdapter.inquiryQueue.push('FAILED');
     await service.inquiry(COMPANY, invoice.id); // attempt 1 FAILED
@@ -423,8 +436,8 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
   itif('p8-16 concurrent creation cannot over-issue (gate serializes same doc)', async () => {
     const { doc } = await makeDoc('10');
     const [a, b] = await Promise.allSettled([
-      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR),
-      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR),
+      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR),
+      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR),
     ]);
     const fulfilled = [a, b].filter((r) => r.status === 'fulfilled');
     expect(fulfilled.length).toBe(1);
@@ -443,7 +456,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     'p8-17a invoice-update failure after remote SUCCESS rolls back the transaction; same uid re-inquired, no new uid/enqueue',
     async () => {
       const { doc } = await makeDoc('9');
-      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
       const sent = await service.send(COMPANY, invoice.id, ACTOR);
       expect(sent.status).toBe('SUBMITTED');
       const uid = sent.uid!;
@@ -519,7 +532,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     'p8-17b persisted SUCCESS attempt is never misclassified as safe-to-retry (torn partial write repaired)',
     async () => {
       const { doc } = await makeDoc('7');
-      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
       const sent = await service.send(COMPANY, invoice.id, ACTOR);
       expect(sent.status).toBe('SUBMITTED');
       // simulate the torn state the defect produced: submission terminal
@@ -549,7 +562,7 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     'p8-17c inquiry() has the same atomic protection: parent-update failure rolls back, submission stays recoverable',
     async () => {
       const { doc } = await makeDoc('5');
-      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
       const sent = await service.send(COMPANY, invoice.id, ACTOR);
       expect(sent.status).toBe('SUBMITTED');
       const uid = sent.uid!;
@@ -606,4 +619,137 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       expect(await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } })).toBe(1);
     },
   );
-});
+
+
+  // final audit #2 — fail-safe payload validation at the submission boundary
+  itif(
+    'p8-23a unmapped sstid → specific domain error BEFORE any state change; assignLineSstid then allows submission',
+    async () => {
+      const { doc } = await makeDoc('6');
+      // create WITHOUT the goods-code mapping → sstid stays null
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow(
+        'TAX_INVOICE_PAYLOAD_SSTID_UNMAPPED',
+      );
+      // fail-fast: nothing was claimed, nothing was submitted, nothing was sent
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+      expect(
+        await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } }),
+      ).toBe(0);
+      const untouched = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(untouched.status).toBe('READY');
+      // the operator maps the lines via the assignment entry point
+      const line = await prisma.salesTaxInvoiceLine.findFirstOrThrow({
+        where: { salesTaxInvoiceId: invoice.id },
+      });
+      await service.assignLineSstid(COMPANY, line.id, '2710000138624', ACTOR);
+      const res = await service.send(COMPANY, invoice.id, ACTOR);
+      expect(res.status).toBe('SUBMITTED');
+      const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+        where: { invoiceId: invoice.id },
+      });
+      const payload = JSON.parse(
+        (submission.payloadSnapshot as { packets: Array<{ data: string }> }).packets[0].data,
+      ) as { body: Array<{ sstid: string }> };
+      expect(payload.body.every((l) => l.sstid === '2710000138624')).toBe(true);
+    },
+  );
+
+  itif('p8-23b sandbox mode without taxid → TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE (never a fabricated id)', async () => {
+    const { doc } = await makeDoc('4');
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
+    const previousMode = process.env.MOADIAN_MODE;
+    process.env.MOADIAN_MODE = 'sandbox'; // a REAL authority requires a real taxid
+    try {
+      await expect(service.send(COMPANY, invoice.id, ACTOR)).rejects.toThrow(
+        'TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE',
+      );
+      expect(
+        await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } }),
+      ).toBe(0);
+    } finally {
+      if (previousMode === undefined) delete process.env.MOADIAN_MODE;
+      else process.env.MOADIAN_MODE = previousMode;
+    }
+  });
+
+  it('p8-23c validateSubmissionPayload: totals, fields, sstid, taxid and payments rules', () => {
+    const valid = {
+      header: {
+        inno: 'INV-1',
+        taxid: null,
+        indatim: 1683997837988,
+        indati2m: 1683997837988,
+        inty: 1,
+        inp: 1,
+        ins: 1,
+        tins: '14003778990',
+        tob: 2,
+        tprdis: '20000',
+        tdis: '500',
+        tadis: '19500',
+        tvam: '1755',
+        todam: '0',
+        tbill: '21255',
+      },
+      body: [{ sstid: '2710000138624', am: '2', fee: '10000', vam: '1755' }],
+      payments: [],
+    };
+    expect(() => TaxInvoiceService.validateSubmissionPayload(valid, false)).not.toThrow();
+    // a valid payload with a taxid passes even in strict mode
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload(
+        { ...valid, header: { ...valid.header, taxid: 'A1121604C220002F095011' } },
+        true,
+      ),
+    ).not.toThrow();
+    // strict (sandbox/live): missing taxid is rejected — never fabricated
+    expect(() => TaxInvoiceService.validateSubmissionPayload(valid, true)).toThrow(
+      'TAX_INVOICE_PAYLOAD_TAXID_UNAVAILABLE',
+    );
+    // required header fields
+    const missingTins = JSON.parse(JSON.stringify(valid));
+    missingTins.header.tins = '';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(missingTins, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_FIELD_MISSING',
+    );
+    // invalid classification fields
+    const badInty = JSON.parse(JSON.stringify(valid));
+    badInty.header.inty = 9;
+    expect(() => TaxInvoiceService.validateSubmissionPayload(badInty, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_FIELD_INVALID',
+    );
+    // empty body
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload({ ...valid, body: [] }, false),
+    ).toThrow('TAX_INVOICE_PAYLOAD_BODY_EMPTY');
+    // unmapped sstid
+    const unmapped = JSON.parse(JSON.stringify(valid));
+    unmapped.body[0].sstid = null;
+    expect(() => TaxInvoiceService.validateSubmissionPayload(unmapped, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_SSTID_UNMAPPED',
+    );
+    // totals: tadis ≠ tprdis − tdis
+    const badTotals = JSON.parse(JSON.stringify(valid));
+    badTotals.header.tadis = '99999';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(badTotals, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH',
+    );
+    // totals: tbill ≠ tadis + tvam + todam
+    const badBill = JSON.parse(JSON.stringify(valid));
+    badBill.header.tbill = '1';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(badBill, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH',
+    );
+    // totals: Σ body vam ≠ tvam
+    const badVam = JSON.parse(JSON.stringify(valid));
+    badVam.body[0].vam = '1';
+    expect(() => TaxInvoiceService.validateSubmissionPayload(badVam, false)).toThrow(
+      'TAX_INVOICE_PAYLOAD_TOTALS_MISMATCH',
+    );
+    // payments must be an array
+    expect(() =>
+      TaxInvoiceService.validateSubmissionPayload({ ...valid, payments: {} as unknown as unknown[] }, false),
+    ).toThrow('TAX_INVOICE_PAYLOAD_FIELD_INVALID');
+  });});

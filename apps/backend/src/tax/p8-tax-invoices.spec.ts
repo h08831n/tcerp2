@@ -400,7 +400,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
 
   itif('p8-04 send → SUBMITTED with unique uid + submission row; re-send while SUBMITTED conflicts', async () => {
     const doc = await makeOwnDoc();
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     const res = await service.send(COMPANY, invoice.id, ACTOR);
     expect(res.status).toBe('SUBMITTED');
     const submission = await prisma.salesTaxInvoiceSubmission.findUniqueOrThrow({
@@ -421,7 +421,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
 
   itif('p8-05 inquiry lifecycle: PENDING → SUCCESS and → FAILED', async () => {
     const successDoc = await makeOwnDoc();
-    const successInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: successDoc.id }, ACTOR);
+    const successInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: successDoc.id, lineSstids: [{ salesLineId: successDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     await service.send(COMPANY, successInvoice.id, ACTOR);
     fakeAdapter.inquiryQueue.push('PENDING');
     expect((await service.inquiry(COMPANY, successInvoice.id)).status).toBe('PENDING');
@@ -434,7 +434,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
 
     // FAILED inquiry → FAILED invoice, retry carries retry=true
     const failDoc = await makeOwnDoc();
-    const failInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: failDoc.id }, ACTOR);
+    const failInvoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: failDoc.id, lineSstids: [{ salesLineId: failDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     await service.send(COMPANY, failInvoice.id, ACTOR);
     fakeAdapter.inquiryQueue.push('FAILED');
     expect((await service.inquiry(COMPANY, failInvoice.id)).status).toBe('FAILED');
@@ -457,7 +457,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     'p8-06 enqueue transport failure = AMBIGUOUS outcome: stays PENDING, a retry NEVER mints a new uid (no duplicate invoice)',
     async () => {
       const doc = await makeOwnDoc();
-      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
       // the failure flag is ALWAYS cleared — even when the send or an
       // assertion fails (eleventh review: test isolation)
       try {
@@ -500,7 +500,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
     'p8-06b transport failure then AUTHORITATIVE rejection → official retry with a NEW uid and retry=true',
     async () => {
       const doc = await makeOwnDoc();
-      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+      const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
       // the failure flag is ALWAYS cleared — even when the send fails
       try {
         fakeAdapter.failEnqueue = true;
@@ -529,7 +529,7 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
 
   itif('p8-07 two concurrent sends on one invoice claim atomically (single submission)', async () => {
     const doc = await makeOwnDoc();
-    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id }, ACTOR);
+    const invoice = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: doc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     const [a, b] = await Promise.allSettled([
       service.send(COMPANY, invoice.id, ACTOR),
       service.send(COMPANY, invoice.id, ACTOR),
@@ -569,12 +569,12 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
   itif('p8-09 sales document Moadian registration status', async () => {
     // fresh doc with an invoice that is created but never sent → Not Registered
     const freshDoc = await makeOwnDoc();
-    await service.createFromSalesDocument(COMPANY, { salesDocumentId: freshDoc.id }, ACTOR);
+    await service.createFromSalesDocument(COMPANY, { salesDocumentId: freshDoc.id, lineSstids: [{ salesLineId: freshDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     const notRegistered = await service.salesDocumentMoadianStatus(COMPANY, freshDoc.id);
     expect(notRegistered.moadianStatus).toBe('Not Registered');
     // doc sent + confirmed → Fully Registered with covered amount
     const sentDoc = await makeOwnDoc();
-    const inv = await service.createFromSalesDocument(COMPANY, { salesDocumentId: sentDoc.id }, ACTOR);
+    const inv = await service.createFromSalesDocument(COMPANY, { salesDocumentId: sentDoc.id, lineSstids: [{ salesLineId: sentDoc.lines[0].id, sstid: '2710000138624' }] }, ACTOR);
     await service.send(COMPANY, inv.id, ACTOR);
     fakeAdapter.inquiryQueue.push('SUCCESS');
     await service.inquiry(COMPANY, inv.id);

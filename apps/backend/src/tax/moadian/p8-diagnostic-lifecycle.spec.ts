@@ -33,10 +33,23 @@ let inquiryEmptyResponse = false;
 const enqueuedUids: string[] = [];
 
 /** official RC_TICS.IS_v1.6 §7.3 authority-side recovery: unwrap the JWE
- *  (RSA-OAEP-256 CEK + A256GCM, AAD = ASCII(Base64URL(header))) and return
- *  the inner compact JWS — proves the adapter's crypto round-trip. */
-function decryptInvoiceJwe(jwe: string): string {
-  const [h, ek, iv, ct, tag] = jwe.split(".");
+ *  (RSA-OAEP-256 CEK + A256GCM, AAD = ASCII(Base64URL(header))), then
+ *  §7.2 verify the inner compact JWS: header {alg: RS256, x5c: [cert],
+ *  sigT seconds-precision, crit: [sigT]}, signature verifies against the
+ *  certificate, payload is a complete invoice JSON. Throws on ANY failure —
+ *  a broken adapter crypto cannot reach this mock unnoticed. */
+function decryptAndVerifyInvoiceJwe(jwe: string): { invoice: { header: Record<string, unknown>; body: unknown[]; payments: unknown[] } } {
+  const parts = jwe.split(".");
+  if (parts.length !== 5) throw new Error("mock: not a compact JWE");
+  const [h, ek, iv, ct, tag] = parts;
+  const jweHeader = JSON.parse(Buffer.from(h, "base64url").toString("utf8")) as {
+    alg?: string;
+    enc?: string;
+    kid?: string;
+  };
+  if (jweHeader.alg !== "RSA-OAEP-256" || jweHeader.enc !== "A256GCM" || !jweHeader.kid) {
+    throw new Error("mock: JWE protected header does not match the official parameters");
+  }
   const cek = crypto.privateDecrypt(
     { key: TEST_PRIVATE_PEM, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
     Buffer.from(ek, "base64url"),
@@ -46,7 +59,38 @@ function decryptInvoiceJwe(jwe: string): string {
   });
   decipher.setAAD(Buffer.from(h, "ascii"));
   decipher.setAuthTag(Buffer.from(tag, "base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(ct, "base64url")), decipher.final()]).toString("utf8");
+  const signedJws = Buffer.concat([decipher.update(Buffer.from(ct, "base64url")), decipher.final()]).toString("utf8");
+  const [jwsH, jwsP, jwsSig] = signedJws.split(".");
+  if (!jwsH || !jwsP || !jwsSig) throw new Error("mock: inner payload is not a compact JWS");
+  const jwsHeader = JSON.parse(Buffer.from(jwsH, "base64url").toString("utf8")) as {
+    alg?: string;
+    x5c?: string[];
+    sigT?: string;
+    crit?: string[];
+  };
+  if (jwsHeader.alg !== "RS256" || !Array.isArray(jwsHeader.x5c) || jwsHeader.crit?.[0] !== "sigT") {
+    throw new Error("mock: JWS protected header does not match the official parameters");
+  }
+  if (!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(jwsHeader.sigT ?? "")) {
+    throw new Error("mock: sigT is not seconds-precision ISO-8601 UTC");
+  }
+  const signerCert = new crypto.X509Certificate(
+    `-----BEGIN CERTIFICATE-----\n${jwsHeader.x5c[0]}\n-----END CERTIFICATE-----`,
+  );
+  const verifier = crypto.createVerify("RSA-SHA256");
+  verifier.update(`${jwsH}.${jwsP}`);
+  if (!verifier.verify(signerCert.publicKey, Buffer.from(jwsSig, "base64url"))) {
+    throw new Error("mock: inner JWS signature does NOT verify against the submitted certificate");
+  }
+  const invoice = JSON.parse(Buffer.from(jwsP, "base64url").toString("utf8")) as {
+    header: Record<string, unknown>;
+    body: unknown[];
+    payments: unknown[];
+  };
+  if (!invoice.header || !Array.isArray(invoice.body) || !Array.isArray(invoice.payments)) {
+    throw new Error("mock: signed payload is not a complete invoice JSON");
+  }
+  return { invoice };
 }
 
 function makeFetch(): typeof fetch {
@@ -72,8 +116,11 @@ function makeFetch(): typeof fetch {
         header: { requestTraceId: string; fiscalId: string };
       }>;
       for (const item of body) {
-        const signedJws = decryptInvoiceJwe(item.payload); // throws if crypto is broken
-        if (!signedJws.includes(".")) throw new Error("mock: payload is not a JWS");
+        // full cryptographic + structural verification; throws on any mismatch
+        decryptAndVerifyInvoiceJwe(item.payload);
+        if (!item.header.requestTraceId || !item.header.fiscalId) {
+          throw new Error("mock: envelope header misses requestTraceId/fiscalId");
+        }
         enqueuedUids.push(item.header.requestTraceId); // §8: uid === requestTraceId
       }
       return new Response(
@@ -393,7 +440,13 @@ describe("p8-18 — attempt lifecycle & recovery (durable state machine)", () =>
                 uid: "sandbox-resume-uid-1",
                 packetType: "INVOICE.V01",
                 retry: false,
-                data: "{}",
+                // a COMPLETE invoice — the mock authority verifies the inner
+                // JWS payload structure (header/body/payments)
+                data: JSON.stringify({
+                  header: { taxid: null, inty: 1, inp: 1, ins: 1 },
+                  body: [{ sstid: "2710000138624", am: "1", vam: "0" }],
+                  payments: [],
+                }),
                 dataSignature: "",
                 encryptionKeyId: "",
                 symmetricKey: "",
