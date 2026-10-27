@@ -1007,10 +1007,13 @@ model SalesTaxInvoice {
   number       String // STI sequence (SALES_TAX_INVOICE, prefix STI)
   status       SalesTaxInvoiceStatus @default(DRAFT) @map("status")
   subject      TaxInvoiceSubject    @default(MAIN) @map("subject")
-  // official header inty (invoice TYPE, independent of subject): 1=نوع اول
-  // (sales), 2=نوع دوم (corrective/return/cancel referencing type 1),
-  // 3=نوع سوم (a distinct pattern — NOT implemented in Phase 8, never a
-  // "purchase" invoice). Official RC_IITP.IS_V7.9 جدول ۲.
+  // official header inty (invoice TYPE — independent of the subject field):
+  // 1=نوع اول, 2=نوع دوم, 3=نوع سوم (a distinct pattern — NOT implemented in
+  // Phase 8, never a "purchase" invoice). Official RC_IITP.IS_V7.9 جدول ۲.
+  // Assignment: MAIN derives from the buyer's economic-operator status;
+  // CORRECTIVE/CANCEL/RETURN INHERIT the type of their reference invoice
+  // (lookup by relatedTaxid) or fall back to buyer derivation when the
+  // reference was issued outside this system.
   inty         Int                  @default(1) @map("inty")
   customerPartyId String            @map("customer_party_id") @db.Uuid
   issueDate    DateTime             @map("issue_date") @db.Date
@@ -1021,14 +1024,16 @@ model SalesTaxInvoice {
   taxTotal     Decimal              @default(0) @map("tax_total") @db.Decimal(20, 4) // tvam
   grandTotal   Decimal              @default(0) @map("grand_total") @db.Decimal(20, 4) // tbill
   // Moadian submission bookkeeping (latest state; full history in submissions)
-  taxid        String?              @unique @map("taxid") // 22-char alphanumeric official tax id — generated with fiscal key material (documented gap; never fabricated)ial
+  taxid        String?              @unique @map("taxid") // 22-char alphanumeric official tax id — generated with fiscal key material (documented gap; never fabricated)
   referenceNumber String?           @map("reference_number") // server receipt of the latest enqueue
   moadianStatus String?             @map("moadian_status") // PENDING | SUCCESS | FAILED (last inquiry)
   moadianError String?              @map("moadian_error")
   confirmationReferenceId String?   @map("confirmation_reference_id")
   taxResult    String?              @map("tax_result")
   // for CORRECTIVE/CANCEL/RETURN subjects — the original invoice's taxid
-  // (official header field irtaxid)
+  // (official header field irtaxid). A confirmed SUCCESS on a CANCEL-subject
+  // submission cancels the referenced original at the authority and frees
+  // its issuance quantity here.
   relatedTaxid String?              @map("related_taxid")
   createdBy    String?              @map("created_by") @db.Uuid
   createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)

@@ -1343,4 +1343,100 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: invoice.id } }),
     ).toBe(0);
     expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+  });
+
+  // seventeenth review — the REAL ابطالی workflow: subject=CANCEL is created,
+  // SENT, and its inquiry confirmation is what cancels the referenced
+  // original. The cap frees ONLY after authority SUCCESS — never before
+  // confirmation and never after a FAILED cancellation.
+  itif('p8-31 ابطالی E2E: cap frees ONLY after authority-confirmed cancellation', async () => {
+    const { doc, line } = await makeDoc('50');
+    const sstid = [{ salesLineId: line.id, sstid: '2710000138624' }];
+
+    // MAIN: created, sent, inquiry SUCCESS (accepted at the authority)
+    const main = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR);
+    const mainTaxid = 'B2B2B2B2B2B2B2B2B2B2B2';
+    await prisma.salesTaxInvoice.update({ where: { id: main.id }, data: { taxid: mainTaxid } });
+    await service.send(COMPANY, main.id, ACTOR); // accepted at the authority
+    fakeAdapter.inquiryQueue.push('SUCCESS');
+    expect((await service.inquiry(COMPANY, main.id)).status).toBe('SUCCESS');
+
+    // ابطالی invoice referencing the original — sent to the authority
+    const cancelInvoice = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      subject: 'CANCEL',
+      relatedTaxid: mainTaxid,
+      lineSstids: sstid,
+    }, ACTOR);
+    expect(cancelInvoice.subject).toBe('CANCEL');
+    expect(cancelInvoice.inty).toBe(1); // inherited from the referenced original
+    await service.send(COMPANY, cancelInvoice.id, ACTOR);
+
+    // BEFORE confirmation: the original's quantity stays consumed — a new
+    // MAIN over the same loaded quantity is rejected (cap intact)
+    await expect(
+      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR),
+    ).rejects.toThrow('TAX_INVOICE_QUANTITY_EXCEEDED');
+
+    // FAILED cancellation does NOT free the cap either
+    fakeAdapter.inquiryQueue.push('FAILED');
+    expect((await service.inquiry(COMPANY, cancelInvoice.id)).status).toBe('FAILED');
+    await expect(
+      service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR),
+    ).rejects.toThrow('TAX_INVOICE_QUANTITY_EXCEEDED');
+    const stillConsumed = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } });
+    expect(stillConsumed.status).not.toBe('CANCELLED');
+
+    // reset the cancellation submission to PENDING (retry path) and confirm
+    await prisma.salesTaxInvoiceSubmission.updateMany({
+      where: { invoiceId: cancelInvoice.id },
+      data: { status: 'PENDING', errorCode: null, errorDetail: null },
+    });
+    fakeAdapter.inquiryQueue.push('SUCCESS');
+    expect((await service.inquiry(COMPANY, cancelInvoice.id)).status).toBe('SUCCESS');
+
+    // AFTER authority-confirmed cancellation: the original is CANCELLED and
+    // its quantity is freed — a new MAIN over the same loading succeeds
+    const freedOriginal = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } });
+    expect(freedOriginal.status).toBe('CANCELLED');
+    const newMain = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR);
+    const newMainLine = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: newMain.id } });
+    expect(newMainLine.quantity.toString()).toBe('50'); // full loaded quantity re-issuable
+  });
+
+  itif('p8-32 اصلاحی carries its OWN full corrected amounts (not a delta)', async () => {
+    const { doc, line } = await makeDoc('50');
+    const main = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: [{ salesLineId: line.id, sstid: '2710000138624' }] }, ACTOR);
+    const mainTaxid = 'C2C2C2C2C2C2C2C2C2C2C2';
+    await prisma.salesTaxInvoice.update({ where: { id: main.id }, data: { taxid: mainTaxid } });
+
+    // اصلاحی for a PARTIAL quantity (5 of the 50 issued) — the corrective
+    // invoice carries the FULL corrected amounts for its own quantities
+    // (official model: اصلاحی = the corrected invoice, not a delta voucher)
+    const corrective = await service.createFromSalesDocument(COMPANY, {
+      salesDocumentId: doc.id,
+      subject: 'CORRECTIVE',
+      relatedTaxid: mainTaxid,
+      lineOverrides: [{ salesLineId: line.id, quantity: '5' }],
+      lineSstids: [{ salesLineId: line.id, sstid: '2710000138624' }],
+    }, ACTOR);
+    expect(corrective.relatedTaxid).toBe(mainTaxid);
+    expect(corrective.inty).toBe(1); // inherited from the reference
+
+    // independent line math (official formulas + قطع): prdis=TRUNC(5×123.45)=617;
+    // dis=TRUNC(23.45×5/999)=0; adis=617; vam=TRUNC(617×9%)=55; tsstam=672
+    const cLine = await prisma.salesTaxInvoiceLine.findFirstOrThrow({ where: { salesTaxInvoiceId: corrective.id } });
+    expect(cLine.quantity.toString()).toBe('5');
+    expect(cLine.prdis.toString()).toBe('617');
+    expect(cLine.dis.toString()).toBe('0');
+    expect(cLine.adis.toString()).toBe('617');
+    expect(cLine.vam.toString()).toBe('55');
+    expect(cLine.tsstam.toString()).toBe('672');
+    // header relations hold independently of the original invoice
+    expect(corrective.subtotal.toString()).toBe('617');
+    expect(corrective.taxTotal.toString()).toBe('55');
+    expect(corrective.grandTotal.toString()).toBe('672');
+    // irtaxid is present in the payload header (official requirement)
+    const payloadInvoice = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: corrective.id } });
+    expect(payloadInvoice.relatedTaxid).toBe(mainTaxid);
   });});

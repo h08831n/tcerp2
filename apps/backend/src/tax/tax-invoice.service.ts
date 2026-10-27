@@ -365,6 +365,10 @@ export class TaxInvoiceService {
     companyId: string,
     invoiceId: string,
   ): Promise<'SUBMITTED' | 'SUCCESS' | 'FAILED'> {
+    const invoiceMeta = await this.prisma.salesTaxInvoice.findUniqueOrThrow({
+      where: { id: invoiceId },
+      select: { subject: true, relatedTaxid: true },
+    });
     const pending = await this.prisma.salesTaxInvoiceSubmission.findMany({
       where: { invoiceId, companyId, status: 'PENDING' },
       orderBy: { attempt: 'desc' },
@@ -404,6 +408,10 @@ export class TaxInvoiceService {
                   taxResult: result.taxResult || null,
                 },
               });
+              // ابطالی confirmed → free the referenced original's quantity
+              if (invoiceMeta.subject === 'CANCEL') {
+                await this.cancelReferencedOriginal(companyId, invoiceMeta.relatedTaxid);
+              }
             } else if (isLatest && result.status === 'FAILED') {
               await tx.salesTaxInvoice.update({
                 where: { id: invoiceId },
@@ -795,6 +803,11 @@ export class TaxInvoiceService {
               taxResult: result.taxResult || null,
             },
           });
+          // ابطالی confirmed at the authority → the referenced original is
+          // now officially cancelled (its issuance quantity is freed)
+          if (invoice.subject === 'CANCEL') {
+            await this.cancelReferencedOriginal(companyId, invoice.relatedTaxid);
+          }
         } else {
           await tx.salesTaxInvoice.update({
             where: { id: invoiceId },
@@ -824,6 +837,23 @@ export class TaxInvoiceService {
       // synchronous best-effort lookup; callers may pre-resolve
     }
     return buyer.economicCode ? 1 : 2;
+  }
+
+  /** CANCEL-subject lifecycle (seventeenth review): when an ابطالی invoice
+   *  reaches SUCCESS at the authority, the REFERENCED original invoice is
+   *  now officially cancelled — mark it CANCELLED (atomic, company-scoped)
+   *  so the loading-based issuance cap frees its quantity. Before the
+   *  authority confirms (PENDING/IN_PROGRESS) or if the cancellation fails,
+   *  the original stays consumed. */
+  private async cancelReferencedOriginal(
+    companyId: string,
+    relatedTaxid: string | null,
+  ): Promise<void> {
+    if (!relatedTaxid) return;
+    await this.prisma.salesTaxInvoice.updateMany({
+      where: { companyId, taxid: relatedTaxid, status: { not: 'CANCELLED' } },
+      data: { status: 'CANCELLED', moadianStatus: 'CANCELLED', moadianError: null },
+    });
   }
 
   // ─── Moadian payload (official template mapping) ─────────────────────────
