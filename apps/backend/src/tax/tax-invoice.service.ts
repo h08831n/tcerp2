@@ -410,7 +410,7 @@ export class TaxInvoiceService {
               });
               // ابطالی confirmed → free the referenced original's quantity
               if (invoiceMeta.subject === 'CANCEL') {
-                await this.cancelReferencedOriginal(companyId, invoiceMeta.relatedTaxid);
+                await this.cancelReferencedOriginal(tx, companyId, invoiceMeta.relatedTaxid);
               }
             } else if (isLatest && result.status === 'FAILED') {
               await tx.salesTaxInvoice.update({
@@ -442,7 +442,7 @@ export class TaxInvoiceService {
     // parent invoice (ninth review #2).
     const invoiceRow = await this.prisma.salesTaxInvoice.findUniqueOrThrow({
       where: { id: invoiceId },
-      select: { status: true, confirmationReferenceId: true, taxResult: true },
+      select: { status: true, subject: true, relatedTaxid: true, confirmationReferenceId: true, taxResult: true },
     });
     const latestAny = await this.prisma.salesTaxInvoiceSubmission.findFirst({
       where: { invoiceId, companyId },
@@ -461,21 +461,38 @@ export class TaxInvoiceService {
     }
     if (latestAny.status === 'SUCCESS') {
       // an ACCEPTED attempt exists — repair any stale invoice status and
-      // NEVER unlock a new send over an accepted uid
+      // NEVER unlock a new send over an accepted uid. For an ابطالی invoice
+      // the repair and the referenced-original cancellation commit TOGETHER
+      // (eighteenth review #3): a torn SUCCESS-without-cancellation state is
+      // reconciled here idempotently, without any new submission.
+      const repairSuccess = async (tx: Prisma.TransactionClient | PrismaService) => {
+        await tx.salesTaxInvoice.update({
+          where: { id: invoiceId },
+          data: {
+            status: 'SUCCESS',
+            moadianStatus: 'SUCCESS',
+            moadianError: null,
+            confirmationReferenceId: latestAny.confirmationReferenceId || invoiceRow.confirmationReferenceId || null,
+            taxResult: latestAny.taxResult || invoiceRow.taxResult || null,
+          },
+        });
+        if (invoiceRow.subject === 'CANCEL') {
+          await this.cancelReferencedOriginal(tx, companyId, invoiceRow.relatedTaxid);
+        }
+      };
       if (invoiceRow.status !== 'SUCCESS') {
         try {
-          await this.prisma.salesTaxInvoice.update({
-            where: { id: invoiceId },
-            data: {
-              status: 'SUCCESS',
-              moadianStatus: 'SUCCESS',
-              moadianError: null,
-              confirmationReferenceId: latestAny.confirmationReferenceId || invoiceRow.confirmationReferenceId || null,
-              taxResult: latestAny.taxResult || invoiceRow.taxResult || null,
-            },
-          });
+          await this.prisma.$transaction(repairSuccess);
         } catch {
           return 'SUBMITTED'; // repair failed → inconclusive; never retry over an accepted uid
+        }
+      } else {
+        // status already repaired by an earlier recovery — the referenced
+        // original cancellation is idempotent and safe to re-apply
+        try {
+          await repairSuccess(this.prisma);
+        } catch {
+          // leave as-is; the next recovery re-applies (idempotent)
         }
       }
       return 'SUCCESS';
@@ -806,7 +823,7 @@ export class TaxInvoiceService {
           // ابطالی confirmed at the authority → the referenced original is
           // now officially cancelled (its issuance quantity is freed)
           if (invoice.subject === 'CANCEL') {
-            await this.cancelReferencedOriginal(companyId, invoice.relatedTaxid);
+            await this.cancelReferencedOriginal(tx, companyId, invoice.relatedTaxid);
           }
         } else {
           await tx.salesTaxInvoice.update({
@@ -845,14 +862,22 @@ export class TaxInvoiceService {
    *  so the loading-based issuance cap frees its quantity. Before the
    *  authority confirms (PENDING/IN_PROGRESS) or if the cancellation fails,
    *  the original stays consumed. */
+  /** tx: the CALLER's transaction-scoped client — the referenced-original
+   *  cancellation commits or rolls back together with the cancellation
+   *  invoice + submission state (eighteenth review). `moadianStatus` is NOT
+   *  touched: its documented values are PENDING/SUCCESS/FAILED (last
+   *  inquiry) — the original's own acceptance state stays intact; the
+   *  internal lifecycle state lives in `status = CANCELLED`. Company-scoped
+   *  and taxid-scoped: an external/missing reference touches nothing. */
   private async cancelReferencedOriginal(
+    tx: Prisma.TransactionClient | PrismaService,
     companyId: string,
     relatedTaxid: string | null,
   ): Promise<void> {
     if (!relatedTaxid) return;
-    await this.prisma.salesTaxInvoice.updateMany({
+    await tx.salesTaxInvoice.updateMany({
       where: { companyId, taxid: relatedTaxid, status: { not: 'CANCELLED' } },
-      data: { status: 'CANCELLED', moadianStatus: 'CANCELLED', moadianError: null },
+      data: { status: 'CANCELLED' },
     });
   }
 
