@@ -480,20 +480,15 @@ export class TaxInvoiceService {
           await this.cancelReferencedOriginal(tx, companyId, invoiceRow.relatedTaxid);
         }
       };
-      if (invoiceRow.status !== 'SUCCESS') {
-        try {
-          await this.prisma.$transaction(repairSuccess);
-        } catch {
-          return 'SUBMITTED'; // repair failed → inconclusive; never retry over an accepted uid
-        }
-      } else {
-        // status already repaired by an earlier recovery — the referenced
-        // original cancellation is idempotent and safe to re-apply
-        try {
-          await repairSuccess(this.prisma);
-        } catch {
-          // leave as-is; the next recovery re-applies (idempotent)
-        }
+      // BOTH branches run through a Prisma transaction (nineteenth review):
+      // the invoice repair and the referenced-original cancellation commit or
+      // roll back together — a persistence failure is INCONCLUSIVE
+      // ('SUBMITTED'), never a completed recovery and never an authorization
+      // to re-submit; the authority's persisted SUCCESS record stays intact
+      try {
+        await this.prisma.$transaction(repairSuccess);
+      } catch {
+        return 'SUBMITTED';
       }
       return 'SUCCESS';
     }
@@ -574,6 +569,27 @@ export class TaxInvoiceService {
       });
       authoritativeFailure = row.status === 'FAILED';
     }
+    // PRE-GATE reconciliation (nineteenth review): an already-SUCCESS ابطالی
+    // invoice may still owe the referenced-original cancellation (a legacy
+    // torn state from before the transactional fix). send() itself is gated
+    // for SUCCESS invoices, so the idempotent recovery runs here first — the
+    // cap frees even though the redundant send is then rejected by the gate.
+    if (invoice.status === 'SUCCESS' && invoice.subject === 'CANCEL' && invoice.relatedTaxid) {
+      const cancelHistory = await this.prisma.salesTaxInvoiceSubmission.count({
+        where: { invoiceId, companyId },
+      });
+      if (cancelHistory > 0) {
+        const verified = await this.recoverPending(companyId, invoiceId);
+        if (verified === 'SUBMITTED') {
+          // the referenced-original update failed -> inconclusive; the caller
+          // retries recovery later (idempotent)
+          return { status: 'SUBMITTED' as const, awaitingInquiry: true };
+        }
+        // verified 'SUCCESS': the reconciliation committed - fall through to
+        // the gate, which rejects the redundant send of an accepted invoice
+      }
+    }
+
     // strict sendable gate: a SUBMITTED invoice always goes through
     // inquiry() first (p8-04 contract) — send() can never bypass the
     // authority's unresolved verdict, so no duplicate can be created

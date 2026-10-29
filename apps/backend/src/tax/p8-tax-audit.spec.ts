@@ -1494,21 +1494,25 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
           });
         }) as never);
       fakeAdapter.inquiryQueue.push('SUCCESS');
-      await expect(service.inquiry(COMPANY, cancelInvoice.id)).rejects.toThrow('INJECTED');
-      txSpy.mockRestore();
-      expect(injectionHits).toBe(1); // the hook WAS reached, on the original's updateMany
-
-      // FULL rollback: cancellation submission stays PENDING, the cancel
-      // invoice stays SUBMITTED, the referenced original is untouched
-      const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
-        where: { invoiceId: cancelInvoice.id },
-        orderBy: { attempt: 'desc' },
-      });
-      expect(submission.status).toBe('PENDING');
-      const cancelRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: cancelInvoice.id } });
-      expect(cancelRow.status).toBe('SUBMITTED');
-      const originalRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } });
-      expect(originalRow.status).not.toBe('CANCELLED'); // remains consumed until confirmed
+      // the spy is ALWAYS restored — even when the expected rejection does
+      // not happen (nineteenth review #3: test isolation)
+      try {
+        await expect(service.inquiry(COMPANY, cancelInvoice.id)).rejects.toThrow('INJECTED');
+        expect(injectionHits).toBe(1); // the hook WAS reached, on the original's updateMany
+        // FULL rollback: cancellation submission stays PENDING, the cancel
+        // invoice stays SUBMITTED, the referenced original is untouched
+        const submission = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+          where: { invoiceId: cancelInvoice.id },
+          orderBy: { attempt: 'desc' },
+        });
+        expect(submission.status).toBe('PENDING');
+        const cancelRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: cancelInvoice.id } });
+        expect(cancelRow.status).toBe('SUBMITTED');
+        const originalRow = await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } });
+        expect(originalRow.status).not.toBe('CANCELLED'); // remains consumed until confirmed
+      } finally {
+        txSpy.mockRestore();
+      }
 
       // retry WITHOUT injection: everything applies together
       fakeAdapter.inquiryQueue.push('SUCCESS');
@@ -1653,4 +1657,126 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
     // the ACTUAL serialized header carries irtaxid = the original's taxid
     expect(payload.header.irtaxid).toBe(mainTaxid);
     expect(payload.header.ins).toBe(2); // subject اصلاحی
-  });});
+  });
+
+  // nineteenth review — the EXACT missing branch: an already-SUCCESS
+  // cancellation invoice whose referenced original is NOT yet cancelled, with
+  // the referenced-original update failing INSIDE the repair transaction.
+  itif(
+    'p8-35 already-SUCCESS recovery: referenced-original failure is inconclusive (SUBMITTED), rollback, no resend; then commits and is idempotent',
+    async () => {
+      const { doc, line } = await makeDoc('50');
+      const sstid = [{ salesLineId: line.id, sstid: '2710000138624' }];
+      const main = await service.createFromSalesDocument(COMPANY, { salesDocumentId: doc.id, lineSstids: sstid }, ACTOR);
+      const mainTaxid = 'I2I2I2I2I2I2I2I2I2I2I2';
+      await prisma.salesTaxInvoice.update({ where: { id: main.id }, data: { taxid: mainTaxid } });
+      await service.send(COMPANY, main.id, ACTOR);
+      fakeAdapter.inquiryQueue.push('SUCCESS');
+      await service.inquiry(COMPANY, main.id);
+
+      const cancelInvoice = await service.createFromSalesDocument(COMPANY, {
+        salesDocumentId: doc.id,
+        subject: 'CANCEL',
+        relatedTaxid: mainTaxid,
+        lineSstids: sstid,
+      }, ACTOR);
+      await service.send(COMPANY, cancelInvoice.id, ACTOR);
+      // the target branch state: cancellation invoice ALREADY SUCCESS and the
+      // submission ALREADY SUCCESS, but the referenced original NOT cancelled
+      // (a legacy torn state) — recovery must run the transactional repair
+      await prisma.salesTaxInvoiceSubmission.updateMany({
+        where: { invoiceId: cancelInvoice.id },
+        data: { status: 'SUCCESS', confirmationReferenceId: 'conf-35' },
+      });
+      await prisma.salesTaxInvoice.update({
+        where: { id: cancelInvoice.id },
+        data: { status: 'SUCCESS', moadianStatus: 'SUCCESS' },
+      });
+      expect(
+        (await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } })).status,
+      ).not.toBe('CANCELLED');
+      const enqueuedBefore = fakeAdapter.enqueued.length;
+      const submissionsBefore = await prisma.salesTaxInvoiceSubmission.count({
+        where: { invoiceId: cancelInvoice.id },
+      });
+
+      // inject a failure into the referenced-original updateMany INSIDE the
+      // repair transaction; the spy is ALWAYS restored (isolation)
+      const realTransaction = prisma.$transaction.bind(prisma);
+      let injectionHits = 0;
+      const txSpy = jest
+        .spyOn(prisma, '$transaction')
+        .mockImplementationOnce((async (arg: unknown) => {
+          return realTransaction(async (tx: Prisma.TransactionClient) => {
+            const failingTx = new Proxy(tx, {
+              get(target, prop) {
+                if (prop === 'salesTaxInvoice') {
+                  return new Proxy(target.salesTaxInvoice, {
+                    get(t, p) {
+                      if (p === 'updateMany') {
+                        return (...args: unknown[]) => {
+                          injectionHits += 1;
+                          return Promise.reject(new Error('INJECTED: original-cancel failure'));
+                        };
+                      }
+                      const v = Reflect.get(t, p, t);
+                      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+                    },
+                  });
+                }
+                return Reflect.get(target, prop);
+              },
+            });
+            return (arg as (tx: Prisma.TransactionClient) => unknown)(failingTx);
+          });
+        }) as never);
+      let recoveryResult: Awaited<ReturnType<typeof service.send>>;
+      try {
+        // send() on the SUCCESS ابطالی first runs the pre-gate reconciliation,
+        // which invokes recoverPending — the invoiceRow.status === 'SUCCESS'
+        // branch with NO pending submissions
+        recoveryResult = await service.send(COMPANY, cancelInvoice.id, ACTOR);
+      } finally {
+        txSpy.mockRestore();
+      }
+      expect(injectionHits).toBe(1); // the hook executed on updateMany
+      expect(recoveryResult.status).toBe('SUBMITTED'); // INCONCLUSIVE — not a completed repair
+      expect(recoveryResult.awaitingInquiry).toBe(true);
+      // no new uid/submission, no enqueue, authority SUCCESS record intact
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+      expect(
+        await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: cancelInvoice.id } }),
+      ).toBe(submissionsBefore);
+      const persisted = await prisma.salesTaxInvoiceSubmission.findFirstOrThrow({
+        where: { invoiceId: cancelInvoice.id },
+      });
+      expect(persisted.status).toBe('SUCCESS');
+      // the referenced original is STILL not cancelled (transaction rolled back)
+      expect(
+        (await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } })).status,
+      ).not.toBe('CANCELLED');
+
+      // remove the injection: the same recovery path now commits the repair
+      // (via the pre-gate reconciliation), then the sendability gate rejects
+      // the redundant send of an already-accepted invoice
+      await expect(service.send(COMPANY, cancelInvoice.id, ACTOR)).rejects.toThrow(
+        'TAX_INVOICE_NOT_SENDABLE',
+      );
+      expect(
+        (await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } })).status,
+      ).toBe('CANCELLED'); // freed only now
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore); // still no resend
+
+      // repeated recovery stays idempotent — no further state change or enqueue
+      await expect(service.send(COMPANY, cancelInvoice.id, ACTOR)).rejects.toThrow(
+        'TAX_INVOICE_NOT_SENDABLE',
+      );
+      expect(fakeAdapter.enqueued.length).toBe(enqueuedBefore);
+      expect(
+        await prisma.salesTaxInvoiceSubmission.count({ where: { invoiceId: cancelInvoice.id } }),
+      ).toBe(submissionsBefore);
+      expect(
+        (await prisma.salesTaxInvoice.findUniqueOrThrow({ where: { id: main.id } })).status,
+      ).toBe('CANCELLED');
+    },
+  );});
