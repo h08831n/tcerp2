@@ -74,6 +74,8 @@ model Company {
   fileAttachments    FileAttachment[]
   parties            Party[]
   timelineEvents     TimelineEvent[]
+  activities         Activity[]
+  activityTypes      ActivityType[]
   productCategories  ProductCategory[]
   brands             Brand[]
   uomCategories      UomCategory[]
@@ -373,6 +375,79 @@ model TimelineEvent {
   @@map("timeline_events")
 }
 
+// ─────────────────────────── Phase 9A: Activities ───────────────────────────
+// Generic Activity Engine (REQUIREMENTS §49): attachable to any important
+// entity via (relatedEntityType, relatedEntityId), created by USER or SYSTEM
+// (Workflow/Automation), company-scoped, audited. Completed activities are
+// LOCKED for normal users — manager override requires activities.override +
+// a reason and is audited.
+
+enum ActivityPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum ActivityStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+model ActivityType {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  code      String // unique per company (e.g. CALL, MEETING, PRICE_FOLLOW_UP)
+  nameFa    String   @map("name_fa")
+  color     String? // UI accent
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company    Company    @relation(fields: [companyId], references: [id])
+  activities Activity[]
+
+  @@unique([companyId, code])
+  @@index([companyId, active])
+  @@map("activity_types")
+}
+
+model Activity {
+  id                String           @id @default(uuid()) @db.Uuid
+  companyId         String           @map("company_id") @db.Uuid
+  typeId            String           @map("type_id") @db.Uuid
+  title             String
+  description       String?
+  relatedEntityType String           @map("related_entity_type")
+  relatedEntityId   String           @map("related_entity_id") @db.Uuid
+  // creator: USER (with id) or SYSTEM (Workflow/Automation — no fake user)
+  createdByType     String           @default("USER") @map("created_by_type")
+  createdById       String?          @map("created_by_id") @db.Uuid
+  assignedToId      String?          @map("assigned_to_id") @db.Uuid
+  priority          ActivityPriority @default(NORMAL)
+  scheduledDate     DateTime?        @map("scheduled_date") @db.Timestamptz(6)
+  dueDate           DateTime?        @map("due_date") @db.Timestamptz(6)
+  status            ActivityStatus   @default(PENDING)
+  completedAt       DateTime?        @map("completed_at") @db.Timestamptz(6)
+  completedById     String?          @map("completed_by_id") @db.Uuid
+  // manager override bookkeeping: who unlocked/edited a completed activity
+  lastOverrideById  String?          @map("last_override_by_id") @db.Uuid
+  lastOverrideReason String?         @map("last_override_reason")
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company     Company      @relation(fields: [companyId], references: [id])
+  type        ActivityType @relation(fields: [typeId], references: [id])
+  assignedTo  User?        @relation("ActivityAssignee", fields: [assignedToId], references: [id])
+  completedBy User?        @relation("ActivityCompleter", fields: [completedById], references: [id])
+
+  @@index([companyId, assignedToId, status, dueDate])
+  @@index([companyId, relatedEntityType, relatedEntityId])
+  @@index([companyId, dueDate])
+  @@map("activities")
+}
+
 // ───────────────────────── Identity & Access ─────────────────────────
 
 enum UserStatus {
@@ -414,6 +489,8 @@ model User {
   salesDocuments  SalesDocument[] @relation("SalesSalesperson")
   purchaseDocuments PurchaseDocument[] @relation("PurchaseBuyer")
   priceRequests   PriceRequest[] @relation("PriceRequester")
+  activitiesAssigned Activity[] @relation("ActivityAssignee")
+  activitiesCompleted Activity[] @relation("ActivityCompleter")
 
   @@index([status])
   @@map("users")

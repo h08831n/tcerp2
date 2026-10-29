@@ -1,5 +1,31 @@
 # PROJECT_PROGRESS
 
+## Phase 9 — Activities, Workflow & Automation (IN PROGRESS)
+
+- **9A (DONE — pending review)**: Activity Engine + Central Calendar +
+  Unified Timeline hooks. `ActivityType`/`Activity` models (migration
+  `20241028000000_phase9a_activities`), permissions activities.view/view_all/
+  create/edit/delete/override seeded into roles, ActivitiesModule wired into
+  AppModule. Endpoints: POST /activities/calendar (layers
+  activities/checks/payments/approvals), CRUD + complete/cancel + types
+  management. Completed activities LOCKED for normal users; override requires
+  activities.override + reason, audited. SYSTEM creation idempotent. Timeline
+  events ACTIVITY_CREATED/COMPLETED/OVERRIDDEN/UPDATED written on the related
+  entity (dedup for completion). Frontend: /activities + /calendar (Jalali
+  month grid, layer toggles, create-from-calendar). Tests p9a-01..12.
+  Migration applied to tcerp_test and CI only.
+- **9B (planned)**: Workflow State Machine + Approval Engine (single/
+  role-based/sequential), timers, escalation, reopen/rollback. Design doc
+  pending; WorkflowDefinition/WorkflowState/WorkflowInstance/WorkflowTimer
+  models already exist in schema (unused — to be wired in 9B).
+- **9C (planned)**: Advanced Automation Engine (nested conditions, delays,
+  recurring, idempotency keys, retry, dry run, versioning) on top of the
+  existing AutomationRule + queue worker.
+- **9D (planned)**: Notification Center + SMS templates/placeholders + send
+  logs + retry on top of existing Notification/NotificationRule.
+- **Backlog (unchanged)**: real Moadian sandbox connection + credentials.
+
+
 ## Completed
 
 ### Phase 1 — Architecture & Repository Setup

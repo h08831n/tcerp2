@@ -12,6 +12,7 @@ import { UsersModule } from './users/users.module';
 import { RolesModule } from './roles/roles.module';
 import { TeamsModule } from './teams/teams.module';
 import { SettingsModule } from './settings/settings.module';
+import { ActivitiesModule } from './activities/activities.module';
 import { SequencesModule } from './sequences/sequences.module';
 import { QueueModule } from './queue/queue.module';
 import { FilesModule } from './files/files.module';
@@ -63,6 +64,7 @@ import { HealthModule } from './health/health.module';
     RolesModule,
     TeamsModule,
     SettingsModule,
+    ActivitiesModule,
     SequencesModule,
     FilesModule,
     AccountingModule,

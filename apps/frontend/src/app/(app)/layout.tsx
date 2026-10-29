@@ -43,7 +43,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: "رویدادها و قواعد", href: "/accounting/events", icon: <NavIcon d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" /> },
   { label: "فاکتور مالیاتی", href: "/tax-invoices", icon: <NavIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M9 13h6M9 17h4" /> },
   { label: "مؤدیان", href: "#", icon: <NavIcon d="M9 12l2 2 4-4M12 22a10 10 0 100-20 10 10 0 000 20z" /> },
-  { label: "فعالیت‌ها", href: "#", icon: <NavIcon d="M22 12h-4l-3 9L9 3l-3 9H2" /> },
+  { label: "فعالیت‌ها", href: "/activities", icon: <NavIcon d="M22 12h-4l-3 9L9 3l-3 9H2" /> },
+  { label: "تقویم", href: "/calendar", icon: <NavIcon d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /> },
   { label: "گزارش‌ها", href: "#", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
   { label: "تنظیمات", href: "#", icon: <NavIcon d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 00-2-1.2L14.5 2h-5L9 4.5a7.4 7.4 0 00-2 1.2l-2.5-1-2 3.5L4.6 9.8a7.4 7.4 0 000 2.4L2.5 13.8l2 3.5 2.5-1a7.4 7.4 0 002 1.2L9.5 20h5l.4-2.5a7.4 7.4 0 002-1.2l2.5 1 2-3.5-2.1-1.6c.1-.4.1-.8.1-1.2z" /> },
 ];
@@ -59,6 +60,8 @@ const TITLES: Record<string, string> = {
   "/accounting/fiscal-years": "سال مالی",
   "/accounting/events": "رویدادها و قواعد ثبت",
   "/tax-invoices": "صورتحساب‌های مالیاتی",
+  "/activities": "فعالیت‌ها",
+  "/calendar": "تقویم مرکزی",
   "/dashboard": "داشبورد",
   "/parties": "مشتریان و تامین‌کنندگان",
   "/parties/new": "ثبت مشتری جدید",

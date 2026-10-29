@@ -78,6 +78,13 @@ const PERMISSIONS: PermissionSeed[] = [
   // tax
   { code: 'tax.view', module: 'tax', action: 'view', description: 'View tax definitions and allocations' },
   { code: 'tax.create', module: 'tax', action: 'create', description: 'Create tax definitions' },
+  // Phase 9A: activities
+  { code: 'activities.view', module: 'activities', action: 'view', description: 'View activities (own records unless activities.view_all)' },
+  { code: 'activities.view_all', module: 'activities', action: 'view_all', description: 'View all company activities' },
+  { code: 'activities.create', module: 'activities', action: 'create', description: 'Create activities' },
+  { code: 'activities.edit', module: 'activities', action: 'edit', description: 'Edit own pending activities' },
+  { code: 'activities.delete', module: 'activities', action: 'delete', description: 'Delete activities' },
+  { code: 'activities.override', module: 'activities', action: 'override', description: 'Override completed activities (reason required, audited)' },
   { code: 'tax.edit', module: 'tax', action: 'edit', description: 'Edit tax definitions / create allocations' },
   { code: 'tax.submit', module: 'tax', action: 'submit', description: 'Send tax invoices to Moadian / register purchase invoices' },
   // supplier product mapping
@@ -212,6 +219,7 @@ const ROLE_DEFS: {
       'sales.view', 'sales.create', 'sales.edit',
       'price_request.view', 'price_request.create',
       'pricing.view',
+      'activities.view', 'activities.create', 'activities.edit',
     ],
   },
   {
@@ -228,6 +236,7 @@ const ROLE_DEFS: {
       'loading.reverse',
       'loading.driver_info.release', 'loading.view_all', 'approvals.decide',
       'inventory.view',
+      'activities.view', 'activities.create', 'activities.edit', 'activities.view_all', 'activities.override', 'activities.delete',
       'parties.view', 'parties.create', 'parties.edit',
       'parties.phone.manage', 'parties.contact.manage', 'timeline.view',
       'parties.archive', 'parties.owner.change', 'parties.score.compute', 'parties.scope.team',
