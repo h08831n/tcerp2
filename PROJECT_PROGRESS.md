@@ -102,6 +102,34 @@
 - **Backlog (unchanged)**: real Moadian sandbox connection + credentials.
 
 
+## Phase 10 — Management Reports & Dashboard (Gate F, FIRST SLICE DONE — pending review)
+
+- **Dashboard + reports + global search (DONE)**: ReportsModule with
+  SQL-aggregated read-only endpoints, all company-scoped and gated by the new
+  `reports.view` permission (admin + 4 manager roles; NOT operational roles):
+  /reports/dashboard (sales open/completed, purchase open/completed, loadings
+  today + pending-driver-release + reversed, inactive-60d count, negative-
+  stock variant count — all over the OPERATIONAL sources of truth, never tax
+  invoices); /reports/sales-performance (per salesperson incl. delivered qty
+  via CONFIRMED loading allocations → sales lines);
+  /reports/purchase-performance (per supplier incl. received qty from
+  CONFIRMED GRN lines); /reports/inactive-customers (60-day window, capped
+  200, never-purchased first); /reports/pending-orders?olderThanDays (whole-
+  set totals + 50-item preview); /reports/negative-stock (internal-balance
+  CASE identical to the inventory module); /reports/search (global, LIMIT 5
+  per entity, LIKE-escaped, parameterized). Day-boundary fix: dashboard
+  «today» uses LOCAL midnight (UTC-midnight day-keys pushed the Iranian
+  afternoon into yesterday — caught by g10-01). Frontend: dashboard rebuilt
+  from the shell (6 KPI cards, pending-orders + inactive tables, graceful
+  degradation without reports.view) + Ctrl+K command palette (debounced
+  global search, grouped results, navigation). Tests g10-01..08 (delta
+  assertions on the shared company, isolated company for the capped inactive
+  list, cross-company search isolation, seed contract). Doc:
+  docs/13-management-reports.md. Deferred: debt report, win/loss offers,
+  per-warehouse drill-down, saved views (documented).
+
+
+
 ## Completed
 
 ### Phase 1 — Architecture & Repository Setup
