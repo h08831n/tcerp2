@@ -19,6 +19,7 @@ import { INTEGRATION_COMPANY_ID } from './integration';
 import { PriceRequestsService } from '../price-request/price-requests.service';
 import { DailyPriceTodayPriceProvider } from '../pricing/daily-price-today.provider';
 import { TimelineService } from '../parties/timeline.service';
+import { ActivityService } from '../activities/activity.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { SalesDocumentsService } from '../sales/sales-documents.service';
 import { PurchaseDocumentsService } from '../purchase/purchase-documents.service';
@@ -102,12 +103,20 @@ export function automationService(
 ): AutomationService {
   const resolvedQueue = queue ?? makeQueueService(prisma);
   const notifications = new NotificationService(prisma as never, resolvedQueue);
+  const audit = makeAudit(prisma);
+  const timeline = new TimelineService(prisma as never);
+  const activityService = new ActivityService(
+    prisma as never,
+    timeline,
+    audit,
+  );
   return new AutomationService(
     prisma as never,
-    makeAudit(prisma),
+    audit,
     resolvedQueue,
     publishing,
     notifications,
+    activityService,
   );
 }
 

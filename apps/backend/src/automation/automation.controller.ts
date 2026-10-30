@@ -6,6 +6,7 @@ import {
   AutomationRunQueryDto,
   CreateAutomationRuleDto,
   DailyScanRunDto,
+  DryRunDto,
   ManualRunDto,
   UpdateAutomationRuleDto,
 } from './automation.dto';
@@ -103,6 +104,23 @@ export class AutomationController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     return this.automationService.manualRun(companyId, id, dto);
+  }
+
+  /**
+   * Dry run (Phase 9C): evaluate the rule against an event and report what
+   * the action WOULD do — strictly read-only (no runs, batches, jobs,
+   * notifications, activities). Used to validate a rule before enabling it.
+   */
+  @Post('rules/:id/dry-run')
+  @RequirePermissions('automation.view')
+  async dryRunRule(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: DryRunDto,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.automationService.dryRun(companyId, id, dto);
   }
 
   /** Manual daily-scan run across this company's enabled daily rules. */

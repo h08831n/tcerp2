@@ -19,7 +19,8 @@ import {
   fetchAutomationRules,
   fetchAutomationRuns,
   isDayBasedTrigger,
-  runAutomationRule,
+  dryRunAutomationRule, runAutomationRule,
+  type AutomationDryRunResult,
   scanSummaryLine,
   triggerConfigSummary,
   updateAutomationRule,
@@ -132,6 +133,14 @@ export default function AutomationPage() {
   const [running, setRunning] = useState(false);
   const [runModalError, setRunModalError] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<{ rule: AutomationRuleDto; result: ManualRunResult } | null>(
+    null,
+  );
+
+  // Dry run (Phase 9C)
+  const [dryRunTarget, setDryRunTarget] = useState<ManualRunTarget | null>(null);
+  const [dryRunning, setDryRunning] = useState(false);
+  const [dryRunModalError, setDryRunModalError] = useState<string | null>(null);
+  const [dryRunResult, setDryRunResult] = useState<{ rule: AutomationRuleDto; result: AutomationDryRunResult } | null>(
     null,
   );
 
@@ -301,6 +310,35 @@ export default function AutomationPage() {
     }
   }
 
+  // ── dry run (Phase 9C: read-only preview) ──
+
+  function openDryRun(rule: AutomationRuleDto) {
+    setDryRunModalError(null);
+    setDryRunResult(null);
+    setDryRunTarget({ rule, variant: null });
+  }
+
+  async function executeDryRun() {
+    if (!dryRunTarget || dryRunning) return;
+    const { rule, variant } = dryRunTarget;
+    if (rule.triggerType === "PRICE_UPDATED" && !variant) {
+      setDryRunModalError("برای قاعده به‌روزرسانی قیمت، انتخاب محصول (variant) الزامی است.");
+      return;
+    }
+    setDryRunning(true);
+    setDryRunModalError(null);
+    try {
+      const result = await dryRunAutomationRule(rule.id, {
+        ...(variant ? { entityId: variant.variantId } : {}),
+      });
+      setDryRunResult({ rule, result });
+    } catch (err) {
+      setDryRunModalError(automationErrorMessage(err));
+    } finally {
+      setDryRunning(false);
+    }
+  }
+
   // Ctrl+S saves the open editor.
   function handleFormKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
@@ -391,6 +429,14 @@ export default function AutomationPage() {
               aria-label={`اجرای دستی ${row.nameFa}`}
             >
               اجرای دستی
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => openDryRun(row)}
+              aria-label={`پیش‌نمایش اجرا ${row.nameFa}`}
+            >
+              پیش‌نمایش
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setForm(openEditForm(row))}>
               ویرایش
@@ -597,6 +643,82 @@ export default function AutomationPage() {
         )}
       </Modal>
 
+      {/* Dry-run modal (Phase 9C: read-only preview) */}
+      <Modal
+        open={dryRunTarget !== null && dryRunResult === null}
+        title={`پیش‌نمایش اجرا — ${dryRunTarget?.rule.nameFa ?? ""}`}
+        onClose={() => setDryRunTarget(null)}
+        small
+        footer={
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setDryRunTarget(null)}>
+              انصراف (Esc)
+            </Button>
+            <Button size="sm" onClick={() => void executeDryRun()} disabled={dryRunning}>
+              {dryRunning ? "در حال ارزیابی…" : "ارزیابی بدون اثر"}
+            </Button>
+          </>
+        }
+      >
+        {dryRunTarget && (
+          <div className="space-y-3">
+            {dryRunModalError && (
+              <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {dryRunModalError}
+              </div>
+            )}
+            <p className="text-sm text-slate-700">
+              قاعده بدون هیچ اثری ارزیابی می‌شود — هیچ اجرا، انتشار، پیام یا فعالیتی ثبت نمی‌گردد.
+            </p>
+            {dryRunTarget.rule.triggerType === "PRICE_UPDATED" && (
+              <VariantSelector
+                value={dryRunTarget.variant}
+                onChange={(variant) => setDryRunTarget({ ...dryRunTarget, variant })}
+              />
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Dry-run result */}
+      <Modal
+        open={dryRunResult !== null}
+        title={`نتیجه پیش‌نمایش — ${dryRunResult?.rule.nameFa ?? ""}`}
+        onClose={() => {
+          setDryRunResult(null);
+          setDryRunTarget(null);
+        }}
+        footer={
+          <Button size="sm" onClick={() => { setDryRunResult(null); setDryRunTarget(null); }}>
+            بستن
+          </Button>
+        }
+      >
+        {dryRunResult && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-slate-600">شرط‌ها:</span>
+              {dryRunResult.result.matched ? (
+                <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">برقرار</span>
+              ) : (
+                <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">برقرار نشد</span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-3 text-xs text-slate-600">
+              <span>تأخیر اجرا: {dryRunResult.result.policy.delayMinutes} دقیقه</span>
+              <span>حداکثر تلاش: {dryRunResult.result.policy.maxAttempts}</span>
+              <span>فاصله تلاش مجدد: {dryRunResult.result.policy.retryDelayMinutes} دقیقه</span>
+            </div>
+            <pre
+              dir="ltr"
+              className="max-h-64 overflow-auto rounded-md bg-slate-50 p-3 text-left font-mono text-[11px] leading-5 text-slate-700"
+            >
+              {JSON.stringify(dryRunResult.result.wouldDo, null, 2)}
+            </pre>
+          </div>
+        )}
+      </Modal>
+
       {/* Manual run modal */}
       <Modal
         open={runTarget !== null}
@@ -769,7 +891,14 @@ export default function AutomationPage() {
                   {runs.map((run) => (
                     <li key={run.id} className="rounded-lg border border-slate-200 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <RunStatusBadge status={run.status} />
+                        <div className="flex items-center gap-1.5">
+                          <RunStatusBadge status={run.status} />
+                          {(run.attempts ?? 0) > 1 && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">
+                              تلاش {run.attempts}
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[11px] tabular-nums text-slate-400">
                           {jalaliDateTime(run.createdAt)}
                           {run.finishedAt ? ` → ${jalaliDateTime(run.finishedAt)}` : ""}

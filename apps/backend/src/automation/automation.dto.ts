@@ -94,3 +94,16 @@ export class DailyScanRunDto {
   @IsString()
   date?: string;
 }
+
+export class DryRunDto {
+  /** Record to preview against: variantId (PRICE_UPDATED), partyId
+   * (CUSTOMER_INACTIVE_DAYS), documentId (QUOTATION_PENDING_DAYS). */
+  @IsOptional()
+  @IsUUID()
+  entityId?: string;
+
+  /** Preview date for daily rules (defaults to today). */
+  @IsOptional()
+  @IsString()
+  date?: string;
+}

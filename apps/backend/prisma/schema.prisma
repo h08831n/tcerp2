@@ -2330,6 +2330,7 @@ model AutomationRun {
   ruleVersion    Int      @map("rule_version")
   triggerPayload Json?    @map("trigger_payload")
   status         String // SUCCESS | FAILED | SKIPPED
+  attempts       Int      @default(0) // Phase 9C: bounded durable retry budget counter
   conditionsResult Json?  @map("conditions_result")
   error          String?
   idempotencyKey String?  @unique @map("idempotency_key")

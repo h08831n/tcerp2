@@ -56,9 +56,29 @@
   misalignments repaired (sentAt Timestamptz map, attempt default,
   allocation FKs); stock_movements source FK stays seed-dropped
   (polymorphic source by design).
-- **9C (planned)**: Advanced Automation Engine (nested conditions, delays,
-  recurring, idempotency keys, retry, dry run, versioning) on top of the
-  existing AutomationRule + queue worker.
+- **9C (DONE — pending review)**: Automation Engine hardening on the Phase 5
+  foundation (audited: nested all/any conditions, audiences, idempotency keys,
+  versioning and run history already present). Migration
+  `20241031100000_phase9c_automation_retry` (automation_runs.attempts).
+  Bounded DURABLE retry: attempts counter on the run row (counted on every
+  execution), policy actionConfig.retry {maxAttempts<=10, delayMinutes},
+  failed runs reset PENDING + `automation-retry:{runId}:{attempt}` queue
+  delivery (automation.run jobs now maxAttempts:1 — retries owned by the
+  durable row, visible in history; exhausted budget = terminal FAILED).
+  Execution delay: triggerConfig.delayMinutes parks PENDING runs with a
+  SCHEDULED delivery on all three paths (event / manual / scans). Dry run:
+  POST /automation/rules/:id/dry-run builds the real event, evaluates
+  conditions and previews wouldDo per action — strictly side-effect-free
+  (audience preview capped at 20 with presence flags, no mobile numbers).
+  CREATE_ACTIVITY now creates a REAL activity via the 9A engine
+  (createSystemActivity, idempotent activity:{runKey}, party/document
+  related-entity derivation, AUTOMATION_ACTIVITY_NO_RELATED_ENTITY for bare
+  events). P1 fix: removed leftover DEBUG console.log leaking party IDs +
+  mobiles in the SMS audience action; manualRun returns the final row.
+  Frontend /automation: dry-run modal (eval + wouldDo JSON + policy) +
+  attempts badge on runs. Tests: p9c-01..06; p5-13 updated to the real-
+  activity contract; automation suites 16/16 green. Doc:
+  docs/11-automation.md.
 - **9D (planned)**: Notification Center + SMS templates/placeholders + send
   logs + retry on top of existing Notification/NotificationRule.
 - **Backlog (unchanged)**: real Moadian sandbox connection + credentials.

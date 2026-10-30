@@ -190,6 +190,8 @@ export interface AutomationRunDto {
   ruleVersion: number;
   triggerPayload: Record<string, unknown> | null;
   status: string;
+  /** Phase 9C: execution attempts on the durable retry budget. */
+  attempts?: number;
   conditionsResult: Record<string, unknown> | null;
   error: string | null;
   idempotencyKey: string | null;
@@ -251,6 +253,25 @@ export function runAutomationRule(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** Phase 9C dry run: evaluate the rule and preview its action — read-only. */
+export function dryRunAutomationRule(
+  ruleId: string,
+  body: ManualRunBody = {},
+): Promise<AutomationDryRunResult> {
+  return apiJson<AutomationDryRunResult>(`/automation/rules/${ruleId}/dry-run`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export interface AutomationDryRunResult {
+  matched: boolean;
+  conditionsResult: boolean;
+  event: Record<string, unknown>;
+  policy: { delayMinutes: number; maxAttempts: number; retryDelayMinutes: number };
+  wouldDo: Record<string, unknown>;
 }
 
 export function runDailyScan(date?: string): Promise<{ date: string | null; summaries: ScanRuleSummary[] }> {

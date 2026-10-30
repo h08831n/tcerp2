@@ -15,6 +15,7 @@ import {
 } from '../notifications/notifications.service';
 import { PriceUpdatedHook } from '../pricing/daily-price.service';
 import { dayKeyOf, parseDayKey, todayKey } from '../pricing/day';
+import { ActivityService } from '../activities/activity.service';
 
 function toJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
@@ -36,6 +37,42 @@ export interface ScanRuleSummary {
   executed: number;
   skippedDuplicates: number;
   conditionSkipped: number;
+}
+
+/** Per-rule execution policy (Phase 9C): delay before first run + bounded retries. */
+export interface AutomationExecutionPolicy {
+  /** Wait N minutes after a matched event before executing the action. */
+  delayMinutes: number;
+  /** Total execution attempts (first + retries). Default 3, max 10. */
+  maxAttempts: number;
+  /** Minutes between retries. Default 5. */
+  retryDelayMinutes: number;
+}
+
+const DEFAULT_POLICY: AutomationExecutionPolicy = {
+  delayMinutes: 0,
+  maxAttempts: 3,
+  retryDelayMinutes: 5,
+};
+
+/** Read the execution policy off a rule's triggerConfig (delay) and actionConfig (retry). */
+export function executionPolicyOf(rule: {
+  triggerConfig?: unknown;
+  actionConfig?: unknown;
+}): AutomationExecutionPolicy {
+  const trigger = (rule.triggerConfig ?? {}) as { delayMinutes?: unknown };
+  const action = (rule.actionConfig ?? {}) as {
+    retry?: { maxAttempts?: unknown; delayMinutes?: unknown };
+  };
+  const clampInt = (v: unknown, min: number, max: number, fallback: number): number => {
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n >= min ? Math.min(n, max) : fallback;
+  };
+  return {
+    delayMinutes: clampInt(trigger.delayMinutes, 0, 60 * 24 * 7, DEFAULT_POLICY.delayMinutes),
+    maxAttempts: clampInt(action.retry?.maxAttempts, 1, 10, DEFAULT_POLICY.maxAttempts),
+    retryDelayMinutes: clampInt(action.retry?.delayMinutes, 1, 60 * 24, DEFAULT_POLICY.retryDelayMinutes),
+  };
 }
 
 // ───────────────────── SEND_SMS audience (p5c extension point) ─────────────────────
@@ -108,6 +145,7 @@ export class AutomationService implements PriceUpdatedHook {
     private readonly queueService: QueueService,
     private readonly publishingService: PublishingService,
     private readonly notificationService: NotificationService,
+    private readonly activityService: ActivityService,
   ) {}
 
   // ───────────────────── PRICE_UPDATED trigger ─────────────────────
@@ -136,12 +174,17 @@ export class AutomationService implements PriceUpdatedHook {
       const run = await this.tryCreateRun(rule, key, event, matched);
       if (run.status === 'SKIPPED') continue; // duplicate event — no double publish
       if (!matched) continue; // run row already records conditionsResult.matched=false
+      const policy = executionPolicyOf(rule);
       await this.queueService.enqueue({
         jobType: 'automation.run',
         companyId,
         payload: { runId: run.id },
         idempotencyKey: key,
         priority: 'HIGH',
+        // ONE delivery per event — retries are owned by the DURABLE run row
+        // (attempts counter + bounded policy), not by queue redelivery.
+        maxAttempts: 1,
+        delayMs: policy.delayMinutes * 60_000,
       });
     }
   }
@@ -156,6 +199,13 @@ export class AutomationService implements PriceUpdatedHook {
     });
     if (!run || run.status !== 'PENDING') return run ?? null; // idempotent re-run
 
+    // Count EVERY execution attempt (success or failure) — attempts is the
+    // observable retry budget on the run row.
+    await this.prisma.automationRun.update({
+      where: { id: run.id },
+      data: { attempts: { increment: 1 } },
+    });
+
     const rule = run.rule;
     const companyId = rule.companyId;
     const event = (run.triggerPayload ?? {}) as Record<string, unknown>;
@@ -169,9 +219,11 @@ export class AutomationService implements PriceUpdatedHook {
           result = await this.actionCreateNotification(rule, companyId, event, run.id);
           break;
         case 'CREATE_ACTIVITY':
-          // No Activity model in the Phase 5 schema yet — a follow-up reminder
-          // notification tagged `automation_activity` is created instead.
-          result = await this.actionCreateNotification(rule, companyId, event, run.id, true);
+          // Phase 9C: the Activity engine exists (Phase 9A) — the action now
+          // creates a REAL system activity (idempotent via the run's
+          // idempotency key), falling back to a tagged notification only when
+          // the event carries no workflow-compatible related entity.
+          result = await this.actionCreateActivity(rule, companyId, event, run);
           break;
         case 'SEND_SMS':
           result = await this.actionSendSms(rule, companyId, event, run);
@@ -192,9 +244,36 @@ export class AutomationService implements PriceUpdatedHook {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`Automation run ${run.id} failed: ${message}`);
+      const fresh = await this.prisma.automationRun.findUniqueOrThrow({
+        where: { id: run.id },
+        select: { attempts: true },
+      });
+      const attempts = fresh.attempts;
+      const policy = executionPolicyOf(rule);
+      if (attempts < policy.maxAttempts) {
+        // Bounded DURABLE retry: the run row resets to PENDING and a follow-up
+        // queue job re-executes it after the retry delay. The attempts counter
+        // (persisted before scheduling) makes the budget crash-safe — a redelivered
+        // or repeated failure keeps counting the SAME row, never respawning.
+        await this.prisma.automationRun.update({
+          where: { id: run.id },
+          data: { attempts, status: 'PENDING', error: message, finishedAt: null },
+        });
+        await this.queueService.enqueue({
+          jobType: 'automation.run',
+          companyId,
+          payload: { runId: run.id },
+          idempotencyKey: `automation-retry:${run.id}:${attempts}`,
+          maxAttempts: 1,
+          delayMs: policy.retryDelayMinutes * 60_000,
+        }).catch((enqueueError) =>
+          this.logger.error(`Retry enqueue failed for run ${run.id}: ${String(enqueueError)}`),
+        );
+        return this.prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } });
+      }
       return await this.prisma.automationRun.update({
         where: { id: run.id },
-        data: { status: 'FAILED', finishedAt: new Date(), error: message },
+        data: { attempts, status: 'FAILED', finishedAt: new Date(), error: message },
       });
     }
   }
@@ -254,6 +333,62 @@ export class AutomationService implements PriceUpdatedHook {
       relatedEntityId: runId,
     });
     return { notifications: notifications.length, userIds };
+  }
+
+  /**
+   * CREATE_ACTIVITY (Phase 9C): a REAL Activity row via the 9A engine's
+   * SYSTEM creation — idempotent per run (`activity:{run.idempotencyKey}`),
+   * so a retried run never duplicates the follow-up. The related entity is
+   * derived from the event payload (partyId/documentId/variantId); events
+   * without one degrade to a standalone reminder activity. A failed activity
+   * creation propagates (run FAILED → bounded retry), never silently lost.
+   */
+  private async actionCreateActivity(
+    rule: AutomationRule,
+    companyId: string,
+    event: Record<string, unknown>,
+    run: AutomationRun,
+  ) {
+    const actionConfig = (rule.actionConfig ?? {}) as {
+      title?: string;
+      description?: string;
+      typeCode?: string;
+      days?: number;
+      assignedToOwner?: boolean;
+    };
+    const related = this.relatedEntityOf(event);
+    if (!related) {
+      // An activity must attach to a real business entity — price events and
+      // bare manual runs carry none; use CREATE_NOTIFICATION there instead.
+      throw new ValidationError('AUTOMATION_ACTIVITY_NO_RELATED_ENTITY', {
+        hint: 'CREATE_ACTIVITY rules need a party/document event (daily scans).',
+      });
+    }
+    const dueDate = actionConfig.days
+      ? new Date(Date.now() + actionConfig.days * 24 * 60 * 60 * 1000)
+      : undefined;
+    const outcome = await this.activityService.createSystemActivity(companyId, {
+      typeCode: actionConfig.typeCode ?? 'FOLLOW_UP',
+      title: interpolate(actionConfig.title ?? rule.nameFa, event),
+      description: actionConfig.description ? interpolate(actionConfig.description, event) : undefined,
+      relatedEntityType: related.entityType,
+      relatedEntityId: related.entityId,
+      assignedToId: actionConfig.assignedToOwner === false ? undefined : this.ownerOf(event),
+      dueDate,
+      idempotencyKey: `activity:${run.idempotencyKey ?? run.id}`,
+    });
+    return { activityId: outcome.activityId, created: outcome.created, related };
+  }
+
+  /** (entityType, entityId) + owner carried by the scan/event payloads. */
+  private relatedEntityOf(event: Record<string, unknown>): { entityType: string; entityId: string } | null {
+    if (typeof event.partyId === 'string' && event.partyId) return { entityType: 'party', entityId: event.partyId };
+    if (typeof event.documentId === 'string' && event.documentId) return { entityType: 'sales_document', entityId: event.documentId };
+    return null;
+  }
+
+  private ownerOf(event: Record<string, unknown>): string | undefined {
+    return typeof event.recordOwnerId === 'string' && event.recordOwnerId ? event.recordOwnerId : undefined;
   }
 
   // ───────────────────── SEND_SMS audience resolution (p5c) ─────────────────────
@@ -361,8 +496,6 @@ export class AutomationService implements PriceUpdatedHook {
         ? (event.audienceMembers as SmsAudienceMember[])
         : await this.resolveAudience(companyId, audience as SmsAudienceConfig);
       const members = resolved.slice(0, SMS_AUDIENCE_CAP);
-      // eslint-disable-next-line no-console
-      console.log('DEBUG-SCAN members:', JSON.stringify(members.map((m) => ({ p: m.partyId.slice(0, 8), m: m.mobile }))));
       const keyBase = run.idempotencyKey ?? run.id;
       let queued = 0;
       let skippedNoMobile = 0;
@@ -633,6 +766,23 @@ export class AutomationService implements PriceUpdatedHook {
       });
       return 'condition-skipped';
     }
+    const policy = executionPolicyOf(rule);
+    if (policy.delayMinutes > 0) {
+      // Delayed scan execution: the run stays PENDING and the queue drives it
+      // after the delay — the same durable `automation.run` path as events
+      // (retries included). Idempotency is owned by the run row, so the job
+      // key is per-run.
+      await this.queueService.enqueue({
+        jobType: 'automation.run',
+        companyId: rule.companyId,
+        payload: { runId: run.id },
+        idempotencyKey: `auto-run:${run.id}`,
+        priority: 'HIGH',
+        maxAttempts: 1,
+        delayMs: policy.delayMinutes * 60_000,
+      });
+      return 'executed';
+    }
     await this.executeRun(run.id);
     return 'executed';
   }
@@ -726,12 +876,15 @@ export class AutomationService implements PriceUpdatedHook {
       const matched = this.evaluateRule(rule, event as unknown as Record<string, unknown>);
       const run = await this.tryCreateRun(rule, key, event, matched);
       if (run.status === 'PENDING' && matched) {
+        const policy = executionPolicyOf(rule);
         await this.queueService.enqueue({
           jobType: 'automation.run',
           companyId,
           payload: { runId: run.id },
           idempotencyKey: key,
           priority: 'HIGH',
+          maxAttempts: 1,
+          delayMs: policy.delayMinutes * 60_000,
         });
       }
       return { runs: [run] };
@@ -791,9 +944,26 @@ export class AutomationService implements PriceUpdatedHook {
     const matched = this.evaluateRule(rule, event);
     const run = await this.tryCreateRun(rule, key, event, matched);
     if (run.status === 'PENDING' && matched) {
-      await this.executeRun(run.id);
+      const policy = executionPolicyOf(rule);
+      if (policy.delayMinutes > 0) {
+        // Delayed execution: durable PENDING run + one queue delivery (the
+        // run row owns idempotency; the retry policy rides on executeRun).
+        await this.queueService.enqueue({
+          jobType: 'automation.run',
+          companyId,
+          payload: { runId: run.id },
+          idempotencyKey: `auto-run:${run.id}`,
+          priority: 'HIGH',
+          maxAttempts: 1,
+          delayMs: policy.delayMinutes * 60_000,
+        });
+      } else {
+        await this.executeRun(run.id);
+      }
     }
-    return { runs: [run] };
+    // Re-read AFTER execution — the caller gets the final status, not the
+    // pre-execution snapshot.
+    return { runs: [await this.prisma.automationRun.findUniqueOrThrow({ where: { id: run.id } })] };
   }
 
   private async summarizeSingle(
@@ -809,6 +979,186 @@ export class AutomationService implements PriceUpdatedHook {
       skippedDuplicates: outcome === 'duplicate' ? 1 : 0,
       conditionSkipped: outcome === 'condition-skipped' ? 1 : 0,
     };
+  }
+
+  /**
+   * Dry run (Phase 9C): build the SAME event a real run would use, evaluate
+   * the rule's conditions and compute what the action WOULD do — WITHOUT any
+   * side effect (no run rows, no batches, no jobs, no notifications, no
+   * activities). Used by the /rules/:id/dry-run endpoint to validate rules
+   * before enabling them.
+   */
+  async dryRun(
+    companyId: string,
+    ruleId: string,
+    input: { entityId?: string; date?: string },
+  ): Promise<{
+    matched: boolean;
+    conditionsResult: boolean;
+    event: Record<string, unknown>;
+    policy: AutomationExecutionPolicy;
+    wouldDo: Record<string, unknown>;
+  }> {
+    const rule = await this.prisma.automationRule.findFirst({ where: { id: ruleId, companyId } });
+    if (!rule) throw new NotFoundError('Automation rule not found', { ruleId });
+    const event = await this.buildEventFor(companyId, rule, input);
+    const matched = this.evaluateRule(rule, event);
+    const policy = executionPolicyOf(rule);
+    const wouldDo = matched
+      ? await this.wouldDoOf(companyId, rule, event)
+      : { action: rule.actionType, skipped: 'CONDITION_NOT_MATCHED' };
+    return { matched, conditionsResult: matched, event, policy, wouldDo };
+  }
+
+  /** The exact event a real run would see (shared by manualRun + dryRun). */
+  private async buildEventFor(
+    companyId: string,
+    rule: AutomationRule,
+    input: { entityId?: string; date?: string },
+  ): Promise<Record<string, unknown>> {
+    const dateKey = input.date ?? todayKey();
+    if (rule.triggerType === 'PRICE_UPDATED') {
+      if (!input.entityId) throw new NotFoundError('entityId (variantId) is required for PRICE_UPDATED rules');
+      const variant = await this.prisma.productVariant.findFirst({
+        where: { id: input.entityId, companyId },
+        select: { id: true, sku: true, template: { select: { categoryId: true, brandId: true } } },
+      });
+      if (!variant) throw new NotFoundError('Product variant not found', { variantId: input.entityId });
+      const price = await this.prisma.dailyPrice.findFirst({
+        where: { companyId, productVariantId: variant.id },
+        orderBy: [{ date: 'desc' }, { updatedAt: 'desc' }],
+      });
+      return {
+        variantId: variant.id,
+        variantSku: variant.sku,
+        categoryId: variant.template.categoryId,
+        brandId: variant.template.brandId,
+        uomId: price?.uomId ?? null,
+        price: price?.price.toString() ?? null,
+        previousPrice: null,
+        priceChanged: true,
+        date: price ? dayKeyOf(price.date) : dateKey,
+        source: price?.source ?? 'MANUAL',
+      };
+    }
+    if (rule.triggerType === 'CUSTOMER_INACTIVE_DAYS' && input.entityId) {
+      const customer = await this.prisma.party.findFirst({
+        where: { id: input.entityId, companyId },
+        select: { id: true, nameFa: true, ownerUserId: true },
+      });
+      if (!customer) throw new NotFoundError('Party not found', { partyId: input.entityId });
+      return {
+        partyId: customer.id,
+        partyName: customer.nameFa,
+        inactive: true,
+        daysSinceLastPurchase: null,
+        recordOwnerId: customer.ownerUserId ?? '',
+        date: dateKey,
+      };
+    }
+    if (rule.triggerType === 'QUOTATION_PENDING_DAYS' && input.entityId) {
+      const quotation = await this.prisma.salesDocument.findFirst({
+        where: { id: input.entityId, companyId },
+        select: { id: true, documentNumber: true, status: true, documentDate: true, customerPartyId: true, salespersonUserId: true },
+      });
+      if (!quotation) throw new NotFoundError('Sales document not found', { documentId: input.entityId });
+      return {
+        documentId: quotation.id,
+        documentNumber: quotation.documentNumber,
+        documentStatus: quotation.status,
+        quotationPending: true,
+        ageDays: null,
+        customerPartyId: quotation.customerPartyId,
+        recordOwnerId: quotation.salespersonUserId,
+        date: dateKey,
+      };
+    }
+    // Scan rules without an entityId: audience summary / aggregate event.
+    if (rule.actionType === 'SEND_SMS' && hasAudience(rule)) {
+      const audience = ((rule.actionConfig ?? {}) as { audience?: SmsAudienceConfig }).audience;
+      const members = await this.resolveAudience(companyId, audience as SmsAudienceConfig);
+      return { date: dateKey, scanType: 'SMS_AUDIENCE', audienceType: audience?.type, audienceCount: members.length };
+    }
+    return { entityId: input.entityId ?? null, date: dateKey };
+  }
+
+  /** What the action WOULD do — read-only computations only. */
+  private async wouldDoOf(
+    companyId: string,
+    rule: AutomationRule,
+    event: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    switch (rule.actionType) {
+      case 'PUBLISH_PRICE': {
+        const actionConfig = (rule.actionConfig ?? {}) as { channels?: PublishChannel[] };
+        const triggerConfig = (rule.triggerConfig ?? {}) as { channels?: PublishChannel[] };
+        const channels = actionConfig.channels?.length
+          ? actionConfig.channels
+          : triggerConfig.channels?.length
+            ? triggerConfig.channels
+            : ['WEBSITE' as PublishChannel];
+        return {
+          action: 'PUBLISH_PRICE',
+          batch: {
+            priceDate: String(event.date ?? todayKey()),
+            channels,
+            variantIds: [event.variantId],
+          },
+        };
+      }
+      case 'SEND_SMS': {
+        const actionConfig = (rule.actionConfig ?? {}) as { text?: string; audience?: SmsAudienceConfig };
+        if (hasAudience(rule)) {
+          const resolved = await this.resolveAudience(companyId, actionConfig.audience as SmsAudienceConfig);
+          const members = resolved.slice(0, SMS_AUDIENCE_CAP);
+          return {
+            action: 'SEND_SMS',
+            audienceType: actionConfig.audience?.type,
+            audienceResolved: resolved.length,
+            wouldQueue: members.filter((m) => m.mobile).length,
+            skippedNoMobile: members.filter((m) => !m.mobile).length,
+            cap: SMS_AUDIENCE_CAP,
+            // At most 20 members in the preview — presence flags, no mobile numbers.
+            preview: members.slice(0, 20).map((m) => ({ partyId: m.partyId, nameFa: m.nameFa, hasMobile: Boolean(m.mobile) })),
+          };
+        }
+        return {
+          action: 'SEND_SMS',
+          to: String(event.mobile ?? '') || null,
+          text: interpolate(actionConfig.text ?? rule.nameFa, event),
+        };
+      }
+      case 'CREATE_NOTIFICATION': {
+        const actionConfig = (rule.actionConfig ?? {}) as {
+          title?: string;
+          body?: string;
+          recipients?: RecipientConfig[];
+        };
+        const recipients = actionConfig.recipients?.length
+          ? actionConfig.recipients
+          : [{ type: 'RECORD_OWNER' as const, value: '' }];
+        const userIds = await this.notificationService.resolveRecipients(companyId, recipients, event);
+        return {
+          action: 'CREATE_NOTIFICATION',
+          recipientCount: userIds.length,
+          title: interpolate(actionConfig.title ?? rule.nameFa, event),
+          body: interpolate(actionConfig.body ?? '', event),
+        };
+      }
+      case 'CREATE_ACTIVITY': {
+        const actionConfig = (rule.actionConfig ?? {}) as { title?: string; typeCode?: string; days?: number };
+        const related = this.relatedEntityOf(event);
+        return {
+          action: 'CREATE_ACTIVITY',
+          typeCode: actionConfig.typeCode ?? 'FOLLOW_UP',
+          title: interpolate(actionConfig.title ?? rule.nameFa, event),
+          related: related ?? null,
+          dueInDays: actionConfig.days ?? null,
+        };
+      }
+      default:
+        return { action: rule.actionType };
+    }
   }
 
   /** Schedule the next self-perpetuating daily scan (06:00 local). */

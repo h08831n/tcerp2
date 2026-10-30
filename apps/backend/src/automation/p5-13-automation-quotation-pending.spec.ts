@@ -78,12 +78,20 @@ describeIntegration('p5-13 automation-quotation-pending', () => {
     expect(run.idempotencyKey).toBe(`daily:${ruleId}:${todayKey()}:${documentId}`);
     expect((run.triggerPayload as { documentNumber: string }).documentNumber).toContain('P5SD-');
 
-    // CREATE_ACTIVITY reminder (no Activity model in Phase 5 → tagged
-    // notification) reaches the salesperson (record owner).
-    const reminder = await prisma.notification.findFirstOrThrow({
-      where: { userId: actorId, relatedEntityId: run.id, relatedEntityType: 'automation_activity' },
+    // CREATE_ACTIVITY (Phase 9C contract): a REAL Activity row via the 9A
+    // engine's SYSTEM creation — idempotent per run key, related to the
+    // quotation, assigned to the salesperson (record owner).
+    const activity = await prisma.activity.findFirstOrThrow({
+      where: {
+        companyId: INTEGRATION_COMPANY_ID,
+        idempotencyKey: `activity:${run.idempotencyKey}`,
+      },
     });
-    expect(reminder.title).toContain('پیگیری');
+    expect(activity.title).toContain('پیگیری');
+    expect(activity.createdByType).toBe('SYSTEM');
+    expect(activity.relatedEntityType).toBe('sales_document');
+    expect(activity.relatedEntityId).toBe(documentId);
+    expect(activity.assignedToId).toBe(actorId);
 
     runsAfterFirstScan = await prisma.automationRun.count({ where: { ruleId } });
   });
@@ -97,16 +105,20 @@ describeIntegration('p5-13 automation-quotation-pending', () => {
     });
     expect(runCount).toBe(1);
 
-    // No NEW runs for the rule, and THIS document's run has ONE reminder.
+    // No NEW runs for the rule, and THIS document still has exactly ONE
+    // follow-up activity (run-level idempotency survived the re-scan).
     expect(await prisma.automationRun.count({ where: { ruleId } })).toBe(runsAfterFirstScan);
     expect(
-      await prisma.notification.count({
-        where: { userId: actorId, relatedEntityType: 'automation_activity', relatedEntityId: runId },
+      await prisma.activity.count({
+        where: { companyId: INTEGRATION_COMPANY_ID, relatedEntityType: 'sales_document', relatedEntityId: documentId },
       }),
     ).toBe(1);
   });
 
   afterAll(async () => {
+    await prisma.activity.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, idempotencyKey: { startsWith: 'activity:daily:' } },
+    });
     await prisma.notification.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, relatedEntityType: { in: ['automation_run', 'automation_activity'] } } });
     await prisma.queueJob.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, jobType: { in: ['automation.run', 'sms.send'] } } });
     await prisma.automationRun.deleteMany({ where: { ruleId } });
