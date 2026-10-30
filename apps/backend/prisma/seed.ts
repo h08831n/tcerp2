@@ -110,8 +110,15 @@ const PERMISSIONS: PermissionSeed[] = [
   // inventory (Phase 6)
   { code: 'inventory.view', module: 'inventory', action: 'view', description: 'View computed stock, stock movements and warehouses' },
   { code: 'inventory.warehouses.manage', module: 'inventory', action: 'warehouses.manage', description: 'Manage warehouses (at most one default per company)' },
-  // approvals (Phase 6 lean approval engine — loading debt gate)
+  // approvals (Phase 6 lean approval engine — loading debt gate; Phase 9B
+  // generalization adds request-side and scope permissions)
   { code: 'approvals.decide', module: 'approvals', action: 'decide', description: 'Decide approval requests (approve / reject)' },
+  { code: 'approvals.request', module: 'approvals', action: 'request', description: 'Create / cancel own approval requests (OWN list scope)' },
+  { code: 'approvals.view_all', module: 'approvals', action: 'view_all', description: 'View all approval requests regardless of requester (list scope ALL)' },
+  // workflow engine (Phase 9B, Gate E: state machine + approval-gated transitions)
+  { code: 'workflow.view', module: 'workflow', action: 'view', description: 'View workflow definitions, instances and execution logs' },
+  { code: 'workflow.start', module: 'workflow', action: 'start', description: 'Start workflow instances and execute permitted transitions' },
+  { code: 'workflow.admin', module: 'workflow', action: 'admin', description: 'Manage workflow definitions (states, transitions, conditions)' },
   // workflow timers
   { code: 'workflowtimer.view', module: 'workflowtimer', action: 'view', description: 'View workflow timers' },
   { code: 'workflowtimer.edit', module: 'workflowtimer', action: 'edit', description: 'Schedule / cancel workflow timers' },
@@ -220,6 +227,7 @@ const ROLE_DEFS: {
       'price_request.view', 'price_request.create',
       'pricing.view',
       'activities.view', 'activities.create', 'activities.edit',
+      'approvals.request',
     ],
   },
   {
@@ -235,6 +243,9 @@ const ROLE_DEFS: {
       'loading.view', 'loading.create', 'loading.edit', 'loading.confirm', 'loading.cancel',
       'loading.reverse',
       'loading.driver_info.release', 'loading.view_all', 'approvals.decide',
+      'approvals.request', 'approvals.view_all',
+      // Phase 9B: managers operate workflow instances and see definitions.
+      'workflow.view', 'workflow.start',
       'inventory.view',
       'activities.view', 'activities.create', 'activities.edit', 'activities.view_all', 'activities.override', 'activities.delete',
       'parties.view', 'parties.create', 'parties.edit',
@@ -266,7 +277,7 @@ const ROLE_DEFS: {
       'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit', 'goods_receipt.confirm', 'goods_receipt.reverse',
       'inventory.view',
       'price_request.view', 'price_request.create', 'price_request.manage_offers',
-      'allocations.manage'],
+      'allocations.manage', 'approvals.request'],
   },
   {
     code: 'accountant',
@@ -276,7 +287,7 @@ const ROLE_DEFS: {
     // powers — financial reports, fiscal calendar, posting rules. Never grant
     // accounting.* to operational roles by default.
     permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit',
-      'sales.view', 'purchase.view', 'tax.submit',
+      'sales.view', 'purchase.view', 'tax.submit', 'approvals.request',
       'accounting.report', 'accounting.fiscal.manage', 'accounting.posting.manage'],
   },
   {

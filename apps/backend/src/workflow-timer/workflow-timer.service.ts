@@ -67,6 +67,8 @@ export interface ActionContext {
   companyId: string;
   entityType: string;
   entityId: string;
+  /** The driving workflow instance (entityId is the BUSINESS entity). */
+  workflowInstanceId: string;
   notifications: NotificationService;
 }
 
@@ -209,6 +211,7 @@ export class WorkflowTimerService {
       companyId: definition?.companyId ?? '',
       entityType: instance.entityType,
       entityId: instance.entityId,
+      workflowInstanceId: instance.id,
       notifications: this.notifications,
     });
 

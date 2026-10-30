@@ -1,17 +1,21 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ApprovalRequest, ApprovalStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { TimelineService } from '../parties/timeline.service';
 import { NotificationService } from '../notifications/notifications.service';
-import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
+import { ApprovalDecisionBus, ApprovalDecision } from './approval-decision.bus';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
-import { ApprovalQueryDto } from './approvals.dto';
+import { ApprovalQueryDto, CreateApprovalDto } from './approvals.dto';
 
 export const APPROVAL_MESSAGES = {
   alreadyDecided: 'APPROVAL_ALREADY_DECIDED',
   unknownEntityType: 'APPROVAL_UNKNOWN_ENTITY_TYPE',
+  pendingExists: 'APPROVAL_PENDING_EXISTS',
+  notCancellable: 'APPROVAL_NOT_CANCELLABLE',
+  forbidden: 'APPROVAL_FORBIDDEN',
 } as const;
 
 /**
@@ -20,38 +24,62 @@ export const APPROVAL_MESSAGES = {
  * every producer registers its entity here so decisions can assert the
  * target actually exists IN THE COMPANY. Adding a new approvable entity is
  * a one-line map entry (next: purchase orders, claims, …).
+ *
+ * `workflow_instance` is deliberately ABSENT from the public map: workflow-
+ * gated approvals are created internally by the workflow engine (source =
+ * WORKFLOW) which validates its own instance; the generic create endpoint
+ * rejects that type so users cannot forge engine approvals.
  */
 export const APPROVAL_ENTITY_TYPES = ['loading', 'goods_receipt'] as const;
 export type ApprovalEntityType = (typeof APPROVAL_ENTITY_TYPES)[number];
+export const WORKFLOW_APPROVAL_ENTITY_TYPE = 'workflow_instance';
+
+/** Viewer record-scope (mirrors the activities engine): scopeAll = decide/view_all. */
+export interface ApprovalViewer {
+  userId: string;
+  scopeAll: boolean;
+}
 
 /**
- * Lean approval engine (Phase 6, REQUIREMENTS §51 subset + domain boundaries
- * "Debt gate"): single-decision requests, currently used by the Loading debt
- * gate (`RELEASE_DRIVER_INFO`). One PENDING request → one decision (APPROVED |
- * REJECTED); re-deciding is a 409. Every decision is audited atomically and
- * the requester is notified.
+ * Approval engine (Phase 6 lean + Phase 9B generalization, REQUIREMENTS §27):
+ * single-decision requests usable for ANY registered entity type — the
+ * loading debt gate (`RELEASE_DRIVER_INFO`), goods receipts, and workflow-
+ * gated transitions. One PENDING request → one decision (APPROVED |
+ * REJECTED | CANCELLED); re-deciding is a 409 decided by an atomic
+ * `updateMany` guard, so two concurrent deciders can never both win.
  *
- * Loading-specific effect: an APPROVED `RELEASE_DRIVER_INFO` decision clears
- * `loadings.driver_info_restricted` in the SAME transaction (a REJECTED
- * decision leaves the restriction in place). This is done here — through
- * Prisma directly, without importing LoadingModule — so the generic decide
- * endpoint and the loading release endpoint share one implementation.
+ * Every lifecycle mutation is audited ATOMICALLY with its ApprovalEvent
+ * history row; the requester is notified after commit (best effort — a
+ * failed notification never un-decides an approval). After a decision
+ * commits, the ApprovalDecisionBus lets the workflow engine resume.
  */
 @Injectable()
 export class ApprovalRequestService {
+  private readonly logger = new Logger('ApprovalRequestService');
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly timeline: TimelineService,
     private readonly notifications: NotificationService,
+    private readonly decisionBus: ApprovalDecisionBus,
   ) {}
 
-  async list(companyId: string, query: ApprovalQueryDto): Promise<Paginated<ApprovalRequest>> {
+  async list(
+    companyId: string,
+    query: ApprovalQueryDto,
+    viewer: ApprovalViewer,
+  ): Promise<Paginated<ApprovalRequest>> {
     const where: Prisma.ApprovalRequestWhereInput = {
       companyId,
       status: query.status,
       approvalType: query.approvalType,
       entityType: query.entityType,
+      // OWN scope: requesters see their own requests and requests routed to
+      // them; decide/view_all holders see the whole company.
+      ...(viewer.scopeAll
+        ? {}
+        : { OR: [{ requestedBy: viewer.userId }, { approverId: viewer.userId }] }),
     };
     const [items, total] = await Promise.all([
       this.prisma.approvalRequest.findMany({
@@ -65,10 +93,26 @@ export class ApprovalRequestService {
     return { items, total, page: query.page, pageSize: query.pageSize };
   }
 
-  async getById(companyId: string, id: string): Promise<ApprovalRequest> {
-    const approval = await this.prisma.approvalRequest.findUnique({ where: { id } });
+  async getById(
+    companyId: string,
+    id: string,
+    viewer?: ApprovalViewer,
+  ): Promise<ApprovalRequest & { events: Array<{ id: string; kind: string; note: string | null; createdAt: Date; actorUserId: string | null }> }> {
+    const approval = await this.prisma.approvalRequest.findUnique({
+      where: { id },
+      include: {
+        events: {
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, kind: true, note: true, createdAt: true, actorUserId: true },
+        },
+      },
+    });
     if (!approval || approval.companyId !== companyId) {
       throw new NotFoundError('Approval request not found', { id });
+    }
+    if (viewer && !viewer.scopeAll) {
+      const involved = approval.requestedBy === viewer.userId || approval.approverId === viewer.userId;
+      if (!involved) throw new NotFoundError('Approval request not found', { id });
     }
     return approval;
   }
@@ -102,7 +146,7 @@ export class ApprovalRequestService {
     tx?: Prisma.TransactionClient,
   ): Promise<void> {
     const db = tx ?? this.prisma;
-    switch (entityType as ApprovalEntityType) {
+    switch (entityType as string) {
       case 'loading': {
         const row = await db.loading.findFirst({ where: { id: entityId, companyId }, select: { id: true } });
         if (!row) throw new NotFoundError('Approval entity not found', { entityType, entityId });
@@ -113,21 +157,242 @@ export class ApprovalRequestService {
         if (!row) throw new NotFoundError('Approval entity not found', { entityType, entityId });
         return;
       }
+      case WORKFLOW_APPROVAL_ENTITY_TYPE: {
+        const row = await db.workflowInstance.findFirst({
+          where: { id: entityId, definition: { companyId } },
+          select: { id: true },
+        });
+        if (!row) throw new NotFoundError('Approval entity not found', { entityType, entityId });
+        return;
+      }
       default:
         throw new ValidationError(APPROVAL_MESSAGES.unknownEntityType, { entityType });
     }
   }
 
   /**
-   * Decide a PENDING request (APPROVED | REJECTED). Atomic: decision + audit
-   * (+ the loading driver-info release + its timeline event) commit together;
-   * the requester notification follows the commit (best effort — a failed
-   * notification never un-decides an approval).
+   * Generic request creation (Phase 9B): any user holding approvals.request
+   * (or approvals.decide) may request an approval for a registered entity.
+   * Duplicate prevention is a DATABASE guarantee — the partial unique index
+   * `approval_requests_one_pending_per_entity` rejects a second PENDING
+   * request for the same (company, entity, type), including under concurrent
+   * calls (P2002 → 409 APPROVAL_PENDING_EXISTS).
+   */
+  async create(
+    companyId: string,
+    input: CreateApprovalDto & { notifyRoles?: string[] },
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<ApprovalRequest> {
+    if (
+      input.entityType === WORKFLOW_APPROVAL_ENTITY_TYPE ||
+      !(APPROVAL_ENTITY_TYPES as readonly string[]).includes(input.entityType)
+    ) {
+      throw new ValidationError(APPROVAL_MESSAGES.unknownEntityType, { entityType: input.entityType });
+    }
+    await this.assertEntityExists(companyId, input.entityType, input.entityId);
+    const dueAt = input.dueAt ? new Date(input.dueAt) : undefined;
+    if (dueAt && !(dueAt.getTime() > Date.now())) {
+      throw new ValidationError('APPROVAL_DUE_AT_MUST_BE_FUTURE', { dueAt: input.dueAt });
+    }
+    const notifyRoles = input.notifyRoles ?? ['sales_manager'];
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      let approval;
+      try {
+        approval = await tx.approvalRequest.create({
+          data: {
+            companyId,
+            entityType: input.entityType,
+            entityId: input.entityId,
+            approvalType: input.approvalType,
+            requestedBy: actor.id,
+            status: ApprovalStatus.PENDING,
+            reason: input.reason,
+            dueAt,
+            source: 'MANUAL',
+          },
+        });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new ConflictError(APPROVAL_MESSAGES.pendingExists, {
+            entityType: input.entityType,
+            entityId: input.entityId,
+            approvalType: input.approvalType,
+          });
+        }
+        throw error;
+      }
+      await tx.approvalEvent.create({
+        data: {
+          requestId: approval.id,
+          kind: 'REQUESTED',
+          actorUserId: actor.id,
+          note: input.reason ?? null,
+          data: { approvalType: input.approvalType, entityType: input.entityType } as Prisma.InputJsonValue,
+        },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'approval_request',
+        entityId: approval.id,
+        action: 'APPROVAL_REQUESTED',
+        companyId,
+        actor,
+        newValues: {
+          entityType: approval.entityType,
+          approvalType: approval.approvalType,
+          entityId: approval.entityId,
+        },
+        reason: input.reason,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return approval;
+    });
+
+    await this.notifyApprovers(companyId, created, notifyRoles);
+    return created;
+  }
+
+  /**
+   * Engine-internal creation (source=WORKFLOW): runs INSIDE the caller's
+   * transaction so the approval commits atomically with the transition's
+   * APPROVAL_REQUESTED log. Duplicate PENDING requests are impossible via
+   * the same partial unique index (concurrent retries of the same
+   * transition reconcile through P2002 → ConflictError).
+   */
+  async createForWorkflow(
+    tx: Prisma.TransactionClient,
+    input: {
+      companyId: string;
+      workflowInstanceId: string;
+      approvalType: string;
+      requestedById?: string;
+      reason?: string;
+      dueAt?: Date;
+    },
+  ): Promise<ApprovalRequest> {
+    try {
+      const approval = await tx.approvalRequest.create({
+        data: {
+          companyId: input.companyId,
+          entityType: WORKFLOW_APPROVAL_ENTITY_TYPE,
+          entityId: input.workflowInstanceId,
+          approvalType: input.approvalType,
+          requestedBy: input.requestedById,
+          status: ApprovalStatus.PENDING,
+          reason: input.reason,
+          dueAt: input.dueAt,
+          source: 'WORKFLOW',
+          workflowInstanceId: input.workflowInstanceId,
+        },
+      });
+      await tx.approvalEvent.create({
+        data: {
+          requestId: approval.id,
+          kind: 'REQUESTED',
+          actorUserId: input.requestedById ?? null,
+          note: input.reason ?? null,
+          data: { approvalType: input.approvalType, source: 'WORKFLOW' } as Prisma.InputJsonValue,
+        },
+      });
+      return approval;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictError(APPROVAL_MESSAGES.pendingExists, { workflowInstanceId: input.workflowInstanceId });
+      }
+      throw error;
+    }
+  }
+
+  private async notifyApprovers(
+    companyId: string,
+    approval: ApprovalRequest,
+    roles: string[],
+  ): Promise<void> {
+    const recipients = roles.filter((r) => typeof r === 'string' && r.length > 0);
+    if (recipients.length === 0) return;
+    try {
+      const userIds = await this.notifications.resolveRecipients(
+        companyId,
+        recipients.map((role) => ({ type: 'ROLE' as const, value: role })),
+        {},
+      );
+      if (userIds.length === 0) return;
+      await this.notifications.createNotifications(userIds, {
+        companyId,
+        title: 'درخواست تایید جدید',
+        body: `درخواست ${approval.approvalType} ثبت شد و در انتظار تصمیم است.`,
+        relatedEntityType: approval.entityType,
+        relatedEntityId: approval.entityId,
+        priority: 'HIGH',
+      });
+    } catch (error) {
+      this.logger.warn(`Approver notification failed for ${approval.id}: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Cancel a PENDING request: the requester (or a decide holder) withdraws
+   * it. Atomic: status flip + ApprovalEvent + audit commit together.
+   */
+  async cancel(
+    companyId: string,
+    id: string,
+    actor: { id: string; username: string },
+    canDecide: boolean,
+    ctx: RequestContext,
+    reason?: string,
+  ): Promise<ApprovalRequest> {
+    const existing = await this.getById(companyId, id);
+    if (!canDecide && existing.requestedBy !== actor.id) {
+      throw new ForbiddenError(APPROVAL_MESSAGES.forbidden, { id });
+    }
+    if (existing.status !== ApprovalStatus.PENDING) {
+      throw new ConflictError(APPROVAL_MESSAGES.notCancellable, { id, status: existing.status });
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const cancelled = await tx.approvalRequest.update({
+        where: { id: existing.id },
+        data: { status: ApprovalStatus.CANCELLED },
+      });
+      await tx.approvalEvent.create({
+        data: {
+          requestId: cancelled.id,
+          kind: 'CANCELLED',
+          actorUserId: actor.id,
+          note: reason ?? null,
+        },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'approval_request',
+        entityId: cancelled.id,
+        action: 'APPROVAL_CANCELLED',
+        companyId,
+        actor,
+        oldValues: { status: existing.status },
+        newValues: { status: cancelled.status },
+        reason,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return cancelled;
+    });
+  }
+
+  /**
+   * Decide a PENDING request (APPROVED | REJECTED). Concurrency: the flip is
+   * an atomic conditional updateMany on status=PENDING — two simultaneous
+   * deciders reconcile (exactly one wins, the loser gets 409). Atomic:
+   * decision + ApprovalEvent + audit (+ the loading driver-info release +
+   * its timeline event) commit together; the requester notification and the
+   * decision bus follow the commit (best effort — a failed notification
+   * never un-decides an approval).
    */
   async decide(
     companyId: string,
     id: string,
-    input: { decision: 'APPROVED' | 'REJECTED'; note?: string },
+    input: { decision: ApprovalDecision; note?: string },
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<ApprovalRequest> {
@@ -143,14 +408,29 @@ export class ApprovalRequestService {
     await this.assertEntityExists(companyId, existing.entityType, existing.entityId);
 
     const decision = await this.prisma.$transaction(async (tx) => {
-      const approval = await tx.approvalRequest.update({
-        where: { id: existing.id },
+      const flipped = await tx.approvalRequest.updateMany({
+        where: { id: existing.id, status: ApprovalStatus.PENDING },
         data: {
           status: input.decision,
           decidedBy: actor.id,
           decidedAt: new Date(),
           decisionNote: input.note,
           approverId: actor.id,
+        },
+      });
+      if (flipped.count !== 1) {
+        // Concurrent decide already flipped it.
+        throw new ConflictError(APPROVAL_MESSAGES.alreadyDecided, { id });
+      }
+      const approval = await tx.approvalRequest.findUniqueOrThrow({ where: { id: existing.id } });
+
+      await tx.approvalEvent.create({
+        data: {
+          requestId: approval.id,
+          kind: 'DECIDED',
+          actorUserId: actor.id,
+          note: input.note ?? null,
+          data: { decision: input.decision } as Prisma.InputJsonValue,
         },
       });
 
@@ -207,6 +487,9 @@ export class ApprovalRequestService {
         relatedEntityId: decision.entityId,
       });
     }
+    // Downstream automations (workflow resume). Committed-decision contract:
+    // the bus never throws outwards and never un-decides.
+    await this.decisionBus.emit(decision, input.decision);
     return decision;
   }
 }

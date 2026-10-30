@@ -10,6 +10,7 @@ import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.ser
 import { JournalService } from '../accounting/journal.service';
 import { AccountingEventService } from '../accounting/accounting-event.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
+import { ApprovalDecisionBus } from '../approvals/approval-decision.bus';
 import { NotificationService } from '../notifications/notifications.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { StockQueryDto, MovementQueryDto } from '../inventory/inventory.dto';
@@ -101,7 +102,7 @@ export function approvalRequestService(prisma: PrismaClient): ApprovalRequestSer
   const audit = new AuditService(prisma as never);
   const timeline = new TimelineService(prisma as never);
   const notifications = new NotificationService(prisma as never, makeQueueService(prisma));
-  return new ApprovalRequestService(prisma as never, audit, timeline, notifications);
+  return new ApprovalRequestService(prisma as never, audit, timeline, notifications, new ApprovalDecisionBus());
 }
 
 export function relationService(prisma: PrismaClient): DocumentRelationService {

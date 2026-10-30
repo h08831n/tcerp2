@@ -18,6 +18,7 @@ import { InventoryService } from '../inventory/inventory.service';
 import { NormalizationService } from '../inventory/normalization.service';
 import { PurchaseFulfillmentService } from '../purchase/purchase-fulfillment.service';
 import { ApprovalRequestService } from '../approvals/approvals.service';
+import { ApprovalDecisionBus } from '../approvals/approval-decision.bus';
 import { NotificationService } from '../notifications/notifications.service';
 import { QueueService } from '../queue/queue.service';
 import { QueueHandlerRegistry } from '../queue/queue.handlers';
@@ -47,7 +48,7 @@ describeIntegration('g6-22 loading-update-audit-rollback', () => {
         removeJob: async () => undefined,
       } as never),
     );
-    const approvals = new ApprovalRequestService(prisma as never, audit, timeline, notifications);
+    const approvals = new ApprovalRequestService(prisma as never, audit, timeline, notifications, new ApprovalDecisionBus());
     return new LoadingService(
       prisma as never,
       audit,

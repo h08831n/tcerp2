@@ -9,49 +9,94 @@ import {
   Req,
 } from '@nestjs/common';
 import { Request } from 'express';
-import { ApprovalRequestService } from './approvals.service';
-import { ApprovalQueryDto, DecideApprovalDto } from './approvals.dto';
+import { ApprovalRequestService, ApprovalViewer } from './approvals.service';
+import {
+  ApprovalQueryDto,
+  CancelApprovalDto,
+  CreateApprovalDto,
+  DecideApprovalDto,
+} from './approvals.dto';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequestContext } from '../auth/auth.service';
 import { CompanyContextService } from '../companies/company-context.service';
+import { PermissionsService } from '../permissions/permissions.service';
+import { ForbiddenError } from '../common/errors';
 
 /**
- * Lean approval endpoints (Phase 6). The whole surface is gated by
- * `approvals.decide` — approvers are exactly the roles holding it
- * (sales_manager / admin via the seed).
+ * Generalized approval endpoints (Phase 6 lean + Phase 9B). The decision
+ * surface stays `approvals.decide`-gated; the request surface is open to
+ * `approvals.request` holders; list/detail scope is ALL for decide/view_all
+ * holders and OWN (requestedBy/approverId) otherwise. Since
+ * RequirePermissions is ALL-of semantics, any-of surfaces resolve the
+ * effective permission set explicitly (same pattern as the activities
+ * controller).
  */
 @Controller('approvals')
 export class ApprovalsController {
   constructor(
     private readonly approvals: ApprovalRequestService,
     private readonly companyContext: CompanyContextService,
+    private readonly permissionsService: PermissionsService,
   ) {}
 
   private ctx(request: Request): RequestContext {
     return { ip: request.ip, userAgent: request.headers['user-agent'] };
   }
 
+  private async viewer(
+    userId: string,
+    companyId: string,
+  ): Promise<ApprovalViewer> {
+    const effective = await this.permissionsService.getEffectivePermissions(userId, companyId);
+    const scopeAll =
+      effective.has('approvals.decide') || effective.has('approvals.view_all');
+    if (!scopeAll && !effective.has('approvals.request')) {
+      throw new ForbiddenError('APPROVAL_VIEW_FORBIDDEN');
+    }
+    return { userId, scopeAll };
+  }
+
   @Get()
-  @RequirePermissions('approvals.decide')
   async list(
     @Query() query: ApprovalQueryDto,
     @CurrentUser() user: { id: string },
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.approvals.list(companyId, query);
+    return this.approvals.list(companyId, query, await this.viewer(user.id, companyId));
   }
 
   @Get(':id')
-  @RequirePermissions('approvals.decide')
   async getById(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: { id: string },
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.approvals.getById(companyId, id);
+    return this.approvals.getById(companyId, id, await this.viewer(user.id, companyId));
+  }
+
+  @Post()
+  async create(
+    @Body() dto: CreateApprovalDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.approvals.create(
+      companyId,
+      {
+        entityType: dto.entityType,
+        entityId: dto.entityId,
+        approvalType: dto.approvalType,
+        reason: dto.reason,
+        dueAt: dto.dueAt,
+        notifyRoles: dto.approverRoles,
+      },
+      actor,
+      this.ctx(request),
+    );
   }
 
   @Post(':id/decide')
@@ -69,6 +114,25 @@ export class ApprovalsController {
       { decision: dto.decision, note: dto.note },
       actor,
       this.ctx(request),
+    );
+  }
+
+  @Post(':id/cancel')
+  async cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CancelApprovalDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const effective = await this.permissionsService.getEffectivePermissions(actor.id, companyId);
+    return this.approvals.cancel(
+      companyId,
+      id,
+      actor,
+      effective.has('approvals.decide'),
+      this.ctx(request),
+      dto.reason,
     );
   }
 }

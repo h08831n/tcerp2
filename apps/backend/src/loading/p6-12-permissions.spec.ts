@@ -149,10 +149,15 @@ describeIntegration('p6-12 permissions', () => {
     expect(requiredOf(GoodsReceiptController.prototype, 'reverse')).toEqual(['goods_receipt.reverse']);
     expect(requiredOf(GoodsReceiptController.prototype, 'cancel')).toEqual(['goods_receipt.edit']);
 
-    // Approvals + purchase receive
-    expect(requiredOf(ApprovalsController.prototype, 'list')).toEqual(['approvals.decide']);
-    expect(requiredOf(ApprovalsController.prototype, 'getById')).toEqual(['approvals.decide']);
+    // Approvals (Phase 9B generalization): decide stays decorator-gated;
+    // list/getById/create/cancel resolve the effective set in-controller
+    // (ALL scope for decide/view_all holders, OWN scope for requesters), so
+    // they carry NO route decorator — the service-level checks are covered
+    // by p9b-approval-engine.spec.ts. Guarding the absence of a decorator
+    // here would silently re-narrow the surface, so only decide is asserted.
     expect(requiredOf(ApprovalsController.prototype, 'decide')).toEqual(['approvals.decide']);
+    expect(requiredOf(ApprovalsController.prototype, 'list')).toEqual([]);
+    expect(requiredOf(ApprovalsController.prototype, 'getById')).toEqual([]);
     expect(requiredOf(PurchaseController.prototype, 'receive')).toEqual(['purchase.edit']);
   });
 

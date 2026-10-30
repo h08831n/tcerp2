@@ -259,10 +259,12 @@ describe('p8 — Tax invoices & Moadian (hermetic live DB)', () => {
       const steps: Array<[string, () => Promise<unknown>]> = [
         ['submission', () => prismaService.salesTaxInvoiceSubmission.deleteMany({ where: { companyId: COMPANY } })],
         ['taxLine', () => prismaService.salesTaxInvoiceLine.deleteMany({ where: { companyId: COMPANY } })],
-        ['taxInvoice', () => prismaService.salesTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
-        ['purchaseTaxInvoice', () => prismaService.purchaseTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
+        // Allocation rows BEFORE the invoices: the Phase 9B alignment added
+        // the physical allocation→invoice FKs the schema always declared.
         ['salesAllocation', () => prismaService.salesTaxInvoiceOrderAllocation.deleteMany({ where: { companyId: COMPANY } })],
         ['purchaseAllocation', () => prismaService.purchaseTaxInvoiceOrderAllocation.deleteMany({ where: { companyId: COMPANY } })],
+        ['taxInvoice', () => prismaService.salesTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
+        ['purchaseTaxInvoice', () => prismaService.purchaseTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
         ['loadingAllocation', () => prismaService.loadingAllocation.deleteMany({ where: { companyId: COMPANY } })],
         ['loadingLine', () => prismaService.loadingLine.deleteMany({ where: { loading: { companyId: COMPANY } } })],
         ['loading', () => prismaService.loading.deleteMany({ where: { companyId: COMPANY } })],

@@ -19,10 +19,43 @@
   timeline rollback on failure, PATCH/DELETE routes implemented, completed
   activities not deletable.
   Migration applied to tcerp_test and CI only.
-- **9B (planned)**: Workflow State Machine + Approval Engine (single/
-  role-based/sequential), timers, escalation, reopen/rollback. Design doc
-  pending; WorkflowDefinition/WorkflowState/WorkflowInstance/WorkflowTimer
-  models already exist in schema (unused — to be wired in 9B).
+- **9B (DONE — pending review)**: Workflow State Machine + generalized
+  Approval Engine (Gate E core). Migration `20241030100000_phase9b_workflow_engine`
+  (workflow_transitions, workflow_execution_logs, approval_events, instance
+  version/context, state initial/final/slaHours, approval dueAt/escalation/
+  source/workflowInstanceId, PARTIAL UNIQUE one-PENDING-per-entity) and
+  `20241030102000_phase9b_allocation_fk_alignment` (backfills the two
+  allocation→invoice FKs the schema declared; p8 spec cleanups reordered).
+  Engine: definitions with nested states/transitions (exactly-one-initial,
+  ≥1 final, no self-loops, validated condition trees; structure immutable,
+  PATCH only name/entityType/isActive); instances idempotent per
+  unique(definition, entityType, entityId); per-transition requiredPermission
+  checked server-side; structured conditions (all/any, eq ne gt gte lt lte in
+  notIn contains, dot paths, numeric-only ordering); optimistic-concurrency
+  state flips (two concurrent transitions → exactly one wins, loser 409);
+  final states complete atomically; append-only execution log; audit-failure
+  rolls the whole flip back. Approval-gated transitions PARK the instance
+  (PENDING ApprovalRequest source=WORKFLOW + escalation timer with slaHours)
+  and RESUME through the one-way ApprovalDecisionBus after the decision
+  commits (APPROVED applies the parked transition idempotently with durable
+  workflow.resume retry; REJECTED keeps the instance ACTIVE; a moved-on
+  instance skips cleanly). Escalation timer bumps level + notifies roles +
+  TIMER_FIRED log via the real processDue path. Approvals generalized:
+  generic create (registry loading/goods_receipt; workflow_instance
+  engine-internal), cancel (requester or decide-holder), OWN/ALL list scope
+  (approvals.view_all), concurrent-decide reconciliation via conditional
+  updateMany, append-only approval_events history, Phase 6 loading release
+  effect preserved (regression-tested). Permissions workflow.view/start/admin
+  + approvals.request/view_all seeded. Frontend: /workflow (definitions
+  create dialog, instances, detail modal with transitions/logs/cancel,
+  start-instance dialog) + /approvals extended (filter, note on decision,
+  cancel, history, create-request modal). Tests: p9b-workflow-engine
+  (w9b-01..14), p9b-approval-engine (a-01..06), workflow-conditions unit (7);
+  full integration 827/827 green, unit 455 pass/0 fail. Doc:
+  docs/10-workflow-approvals.md. Local only: pre-existing schema/migration
+  misalignments repaired (sentAt Timestamptz map, attempt default,
+  allocation FKs); stock_movements source FK stays seed-dropped
+  (polymorphic source by design).
 - **9C (planned)**: Advanced Automation Engine (nested conditions, delays,
   recurring, idempotency keys, retry, dry run, versioning) on top of the
   existing AutomationRule + queue worker.

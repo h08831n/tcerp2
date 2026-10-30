@@ -34,6 +34,7 @@ import { GoodsReceiptModule } from './goods-receipt/goods-receipt.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
+import { WorkflowModule } from './workflow/workflow.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PortalModule } from './portal/portal.module';
 import { IntegrationsModule } from './integrations/integrations.module';
@@ -85,6 +86,7 @@ import { HealthModule } from './health/health.module';
     GoodsReceiptModule,
     ApprovalsModule,
     WorkflowTimerModule,
+    WorkflowModule,
     NotificationsModule,
     PortalModule,
     IntegrationsModule,

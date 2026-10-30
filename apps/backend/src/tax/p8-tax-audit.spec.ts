@@ -183,8 +183,10 @@ describe('p8a — Critical Tax Audit (payload, over-invoicing, unknown outcomes)
       const steps: Array<[string, () => Promise<unknown>]> = [
         ['submission', () => prisma.salesTaxInvoiceSubmission.deleteMany({ where: { companyId: COMPANY } })],
         ['taxLine', () => prisma.salesTaxInvoiceLine.deleteMany({ where: { companyId: COMPANY } })],
-        ['taxInvoice', () => prisma.salesTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
+        // Allocation rows BEFORE the invoice (Phase 9B added the physical
+        // allocation→invoice FK the schema always declared).
         ['salesAllocation', () => prisma.salesTaxInvoiceOrderAllocation.deleteMany({ where: { companyId: COMPANY } })],
+        ['taxInvoice', () => prisma.salesTaxInvoice.deleteMany({ where: { companyId: COMPANY } })],
         ['loadingAllocation', () => prisma.loadingAllocation.deleteMany({ where: { companyId: COMPANY } })],
         ['loadingLine', () => prisma.loadingLine.deleteMany({ where: { loading: { companyId: COMPANY } } })],
         ['loading', () => prisma.loading.deleteMany({ where: { companyId: COMPANY } })],

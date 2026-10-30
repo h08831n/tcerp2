@@ -904,29 +904,60 @@ model WorkflowDefinition {
   code      String
   name      String
   entityType String  @map("entity_type") // SALES_DOCUMENT | PURCHASE | LOADING | ...
+  isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company   Company            @relation(fields: [companyId], references: [id])
-  states    WorkflowState[]
-  instances WorkflowInstance[]
+  company     Company            @relation(fields: [companyId], references: [id])
+  states      WorkflowState[]
+  transitions WorkflowTransition[]
+  instances   WorkflowInstance[]
 
   @@unique([companyId, code])
   @@map("workflow_definitions")
 }
 
 model WorkflowState {
-  id           String @id @default(uuid()) @db.Uuid
-  definitionId String @map("definition_id") @db.Uuid
+  id           String  @id @default(uuid()) @db.Uuid
+  definitionId String  @map("definition_id") @db.Uuid
   code         String
   name         String
+  isInitial    Boolean @default(false) @map("is_initial")
+  isFinal      Boolean @default(false) @map("is_final")
+  slaHours     Int?    @map("sla_hours") // time-in-state budget for reminders/escalation
 
   definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
   instances  WorkflowInstance[]
   timers     WorkflowTimer[]
+  outgoing   WorkflowTransition[] @relation("WorkflowTransitionFrom")
+  incoming   WorkflowTransition[] @relation("WorkflowTransitionTo")
 
   @@unique([definitionId, code])
   @@map("workflow_states")
+}
+
+model WorkflowTransition {
+  id                 String  @id @default(uuid()) @db.Uuid
+  definitionId       String  @map("definition_id") @db.Uuid
+  code               String
+  name               String
+  fromStateId        String  @map("from_state_id") @db.Uuid
+  toStateId          String  @map("to_state_id") @db.Uuid
+  requiredPermission String? @map("required_permission") // extra permission beyond workflow.start
+  conditionJson      Json?   @map("condition_json") // structured condition evaluated against instance.context
+  requiresApproval   Boolean @default(false) @map("requires_approval")
+  approvalType       String? @map("approval_type") // ApprovalRequest.approvalType when requiresApproval
+  slaHours           Int?    @map("sla_hours") // approval budget → escalation timer
+  actionsJson        Json?   @map("actions_json") // post-transition actions [{type:'notify',...}]
+
+  definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  fromState  WorkflowState      @relation("WorkflowTransitionFrom", fields: [fromStateId], references: [id])
+  toState    WorkflowState      @relation("WorkflowTransitionTo", fields: [toStateId], references: [id])
+  logs       WorkflowExecutionLog[]
+
+  @@unique([definitionId, code])
+  @@index([fromStateId])
+  @@map("workflow_transitions")
 }
 
 model WorkflowInstance {
@@ -936,16 +967,40 @@ model WorkflowInstance {
   entityType     String   @map("entity_type")
   entityId       String   @map("entity_id")
   status         String   @default("ACTIVE") // ACTIVE | COMPLETED | CANCELLED
+  version        Int      @default(1) // optimistic concurrency for transitions
+  context        Json? // business payload for condition evaluation
+  createdBy      String?  @map("created_by") @db.Uuid
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   definition WorkflowDefinition @relation(fields: [definitionId], references: [id])
   currentState WorkflowState?   @relation(fields: [currentStateId], references: [id])
   timers WorkflowTimer[]
+  logs   WorkflowExecutionLog[]
+  approvals ApprovalRequest[]
 
   @@unique([definitionId, entityType, entityId])
   @@index([entityType, entityId])
   @@map("workflow_instances")
+}
+
+model WorkflowExecutionLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  instanceId   String   @map("instance_id") @db.Uuid
+  kind         String // STARTED | TRANSITION | APPROVAL_REQUESTED | APPROVAL_DECIDED | TIMER_FIRED | CANCELLED | FAILED
+  transitionId String?  @map("transition_id") @db.Uuid
+  fromStateId  String?  @map("from_state_id") @db.Uuid
+  toStateId    String?  @map("to_state_id") @db.Uuid
+  actorUserId  String?  @map("actor_user_id") @db.Uuid // null = system
+  note         String?
+  data         Json?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  instance   WorkflowInstance    @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  transition WorkflowTransition? @relation(fields: [transitionId], references: [id])
+
+  @@index([instanceId, createdAt])
+  @@map("workflow_execution_logs")
 }
 
 model WorkflowTimer {
@@ -1172,7 +1227,7 @@ model SalesTaxInvoiceSubmission {
   confirmationReferenceId String? @map("confirmation_reference_id")
   taxResult   String? @map("tax_result")
   payloadSnapshot Json @map("payload_snapshot") // exact packet body sent
-  sentAt      DateTime @default(now()) @map("sent_at")
+  sentAt      DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
   inquiredAt  DateTime? @map("inquired_at") @db.Timestamptz(6)
 
   invoice SalesTaxInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
@@ -1252,7 +1307,7 @@ model MoadianDiagnosticAttempt {
   id            String   @id @default(uuid()) @db.Uuid
   runId         String   @map("run_id") @db.Uuid
   companyId     String   @map("company_id") @db.Uuid
-  attempt       Int
+  attempt       Int            @default(1)
   uid           String   @unique @map("uid")
   retry         Boolean  @default(false) @map("retry")
   status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
@@ -2613,13 +2668,39 @@ model ApprovalRequest {
   decisionNote String?       @map("decision_note")
   decidedBy   String?        @map("decided_by") @db.Uuid
   decidedAt   DateTime?      @map("decided_at") @db.Timestamptz(6)
+  // Phase 9B generalization: due date + escalation counter, provenance
+  // (MANUAL = user-created via API, WORKFLOW = approval-gated transition),
+  // and an optional back-reference to the driving workflow instance.
+  dueAt            DateTime? @map("due_at") @db.Timestamptz(6)
+  escalationLevel  Int       @default(0) @map("escalation_level")
+  source           String    @default("MANUAL") // MANUAL | WORKFLOW
+  workflowInstanceId String? @map("workflow_instance_id") @db.Uuid
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company  Company  @relation(fields: [companyId], references: [id])
+  workflowInstance WorkflowInstance? @relation(fields: [workflowInstanceId], references: [id])
+  events   ApprovalEvent[]
 
   @@index([companyId, status, createdAt])
   @@index([entityType, entityId])
   @@map("approval_requests")
+}
+
+// Append-only decision history (REQUIREMENTS §27: تاریخچه) — every lifecycle
+// event of an approval request is recorded atomically with the mutation.
+model ApprovalEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  requestId   String   @map("request_id") @db.Uuid
+  kind        String // REQUESTED | DECIDED | CANCELLED | ESCALATED
+  actorUserId String?  @map("actor_user_id") @db.Uuid // null = system (timer)
+  note        String?
+  data        Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
+  @@map("approval_events")
 }
 
 // Header + lines: one bill of lading may carry several products; each line
