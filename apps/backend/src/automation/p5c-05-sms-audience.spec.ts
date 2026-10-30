@@ -182,8 +182,8 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     });
 
     const smsJobsFor = () =>
-      prisma.queueJob.count({
-        where: { companyId: COMPANY, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
+      prisma.smsMessage.count({
+        where: { companyId: COMPANY, source: 'AUTOMATION', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
       });
 
     // The company is shared — resolve the audience first and assert
@@ -205,28 +205,37 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
     expect(summaries[0].candidates).toBe(members.length);
     expect(summaries[0].executed).toBe(1);
 
-    const jobs = await prisma.queueJob.findMany({
-      where: { companyId: COMPANY, jobType: 'sms.send', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
+    // Phase 9D contract: the action enqueues through SmsService — one durable
+    // SmsMessage row (source AUTOMATION) per member, idempotencyKey preserved
+    // as `sms:daily:{ruleId}:{date}:audience:{partyId}`; the queue job is
+    // `sms-job:{messageId}` carrying the row's id.
+    const messages = await prisma.smsMessage.findMany({
+      where: { companyId: COMPANY, source: 'AUTOMATION', idempotencyKey: { startsWith: `sms:daily:${rule.id}:` } },
     });
-    expect(jobs).toHaveLength(members.filter((m: SmsAudienceMember) => m.mobile).length);
-    const targets = jobs.map((job) => (job.payload as { to: string }).to).sort();
+    expect(messages).toHaveLength(members.filter((m: SmsAudienceMember) => m.mobile).length);
+    const targets = messages.map((m) => m.to).sort();
     for (const mobile of myTargets) {
       expect(targets).toContain(mobile);
     }
-    // One job per member party, keyed into the run's idempotency chain.
-    const keyedParties = jobs.map((job) => (job.idempotencyKey ?? '').split(':').pop());
+    // One message per member party, keyed into the run's idempotency chain.
+    const keyedParties = messages.map((m) => m.idempotencyKey.split(':').pop());
     for (const id of [inactiveBuyerId, oldBuyerId, neverBuyerId]) {
       expect(keyedParties).toContain(id);
     }
     for (const id of [inactiveBuyerId, oldBuyerId, neverBuyerId]) {
-      const job = jobs.find((j) => (j.idempotencyKey ?? '').endsWith(`:${id}`));
-      const payload = job?.payload as { to: string; text: string };
-      expect(payload.text).toContain('سلام');
+      const message = messages.find((m) => m.idempotencyKey.endsWith(`:${id}`));
+      expect(message?.text).toContain('سلام');
       const party = await prisma.party.findUniqueOrThrow({ where: { id }, select: { nameFa: true } });
-      expect(payload.text).toContain(party.nameFa);
+      expect(message?.text).toContain(party.nameFa);
+      expect(message?.status).toBe('QUEUED');
+      const job = await prisma.queueJob.findFirst({
+        where: { companyId: COMPANY, jobType: 'sms.send', idempotencyKey: `sms-job:${message!.id}` },
+      });
+      expect(job).not.toBeNull();
+      expect((job?.payload as { smsMessageId?: string }).smsMessageId).toBe(message!.id);
     }
 
-    // Idempotency: a same-date re-run creates NO new jobs.
+    // Idempotency: a same-date re-run creates NO new messages.
     const before = await smsJobsFor();
     const rerun = await automation.dailyScan({
       companyId: COMPANY,
@@ -238,6 +247,8 @@ describeIntegration('p5c-05 sms audience resolution + scan', () => {
   });
 
   afterAll(async () => {
+    await prisma.smsMessage.deleteMany({ where: { companyId: COMPANY, idempotencyKey: { startsWith: `sms:daily:${''}` } } }).catch(() => undefined);
+    await prisma.smsMessage.deleteMany({ where: { companyId: COMPANY, source: 'AUTOMATION', idempotencyKey: { startsWith: 'sms:daily:' } } }).catch(() => undefined);
     await prisma.queueJob.deleteMany({ where: { companyId: COMPANY, jobType: 'sms.send' } });
     await prisma.automationRun.deleteMany({ where: { rule: { code: `P5C05-${marker}` } } });
     await prisma.automationRule.deleteMany({ where: { code: `P5C05-${marker}` } });

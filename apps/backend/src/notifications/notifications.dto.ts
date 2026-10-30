@@ -37,6 +37,11 @@ export class CreateNotificationRuleDto {
   @IsObject()
   delayConfig?: Record<string, unknown>;
 
+  /** Phase 9D SMS channel policy: {templateCode?, text?, partyIds?, usePayloadParty?, vars?}. */
+  @IsOptional()
+  @IsObject()
+  smsConfig?: Record<string, unknown>;
+
   @IsOptional()
   @IsIn(['CRITICAL', 'HIGH', 'NORMAL', 'LOW'])
   priority?: 'CRITICAL' | 'HIGH' | 'NORMAL' | 'LOW';
@@ -69,6 +74,11 @@ export class UpdateNotificationRuleDto {
   @IsObject()
   delayConfig?: Record<string, unknown>;
 
+  /** Phase 9D SMS channel policy: {templateCode?, text?, partyIds?, usePayloadParty?, vars?}. */
+  @IsOptional()
+  @IsObject()
+  smsConfig?: Record<string, unknown>;
+
   @IsOptional()
   @IsIn(['CRITICAL', 'HIGH', 'NORMAL', 'LOW'])
   priority?: 'CRITICAL' | 'HIGH' | 'NORMAL' | 'LOW';
@@ -95,4 +105,85 @@ export class NotificationQueryDto extends PaginationDto {
   @IsOptional()
   @IsBoolean()
   includePlatform?: boolean;
+}
+
+// ─────────────── Phase 9D: SMS center DTOs ───────────────
+
+export class CreateSmsTemplateDto {
+  @IsString()
+  @MaxLength(60)
+  code!: string;
+
+  @IsString()
+  @MaxLength(120)
+  nameFa!: string;
+
+  /** {var} placeholders resolved from the event payload / explicit vars. */
+  @IsString()
+  @MaxLength(600)
+  bodyTemplate!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
+export class UpdateSmsTemplateDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  nameFa?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(600)
+  bodyTemplate?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
+export class SendSmsDto {
+  /** Destination mobile (any Iranian format — canonicalized server-side). */
+  @IsString()
+  to!: string;
+
+  /** Literal text (interpolated with vars) when no templateCode. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(600)
+  text?: string;
+
+  /** Send via a stored template instead of literal text. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  templateCode?: string;
+
+  /** Interpolation variables (merged over an empty object). */
+  @IsOptional()
+  @IsObject()
+  vars?: Record<string, unknown>;
+
+  /** Optional related party recorded on the log row. */
+  @IsOptional()
+  @IsUUID()
+  partyId?: string;
+
+  /** Optional dedup key: the same key reconciles to ONE message (client retries). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  idempotencyKey?: string;
+}
+
+export class SmsMessageQueryDto extends PaginationDto {
+  @IsOptional()
+  @IsIn(['QUEUED', 'SENT', 'FAILED'])
+  status?: 'QUEUED' | 'SENT' | 'FAILED';
+
+  @IsOptional()
+  @IsIn(['AUTOMATION', 'NOTIFICATION_RULE', 'MANUAL'])
+  source?: 'AUTOMATION' | 'NOTIFICATION_RULE' | 'MANUAL';
 }

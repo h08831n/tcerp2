@@ -10,6 +10,8 @@ import { Paginated } from '../common/dto/pagination.dto';
 import { QueueService } from '../queue/queue.service';
 import { QueueHandler } from '../queue/queue.handlers';
 import { CreateNotificationRuleDto, UpdateNotificationRuleDto } from './notifications.dto';
+import { RuleSmsConfig, SmsService } from './sms.service';
+import { Optional } from '@nestjs/common';
 
 export type RecipientConfig = {
   type: 'ROLE' | 'USER' | 'RECORD_OWNER';
@@ -36,9 +38,16 @@ export interface DispatchOptions {
  */
 @Injectable()
 export class NotificationService {
+  /**
+   * Phase 9D SMS channel executor — OPTIONAL so hand-built unit/integration
+   * instances (specs pass 2 args) keep compiling; production wiring always
+   * provides it (NotificationsModule providers). The SMS branch no-ops when
+   * absent.
+   */
   constructor(
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
+    @Optional() private readonly sms?: SmsService,
   ) {}
 
   async resolveRecipients(
@@ -159,26 +168,60 @@ export class NotificationService {
     );
 
     for (const rule of matching) {
-      const recipients = (rule.recipientConfig as unknown as RecipientConfig[]) ?? [];
       const delayMinutes = Number(
         (rule.delayConfig as { delayMinutes?: number } | null)?.delayMinutes ?? 0,
       );
-      const resolved = await this.resolveRecipients(rule.companyId, recipients, payload);
-      // The notification carries the RULE's company (dispatch event context).
-      const ruleBase = { ...base, companyId: rule.companyId };
-      if (delayMinutes > 0) {
-        // Delayed delivery: durable queue job; the handler creates the rows.
-        await this.queueService.enqueue({
-          jobType: 'notification.dispatch',
-          companyId: rule.companyId,
-          payload: { userIds: resolved, base: ruleBase },
-          delayMs: delayMinutes * 60_000,
-        });
-      } else {
-        await this.createNotifications(resolved, ruleBase);
+      const channels = Array.isArray(rule.channels) ? (rule.channels as string[]) : ['IN_APP'];
+
+      // IN_APP: recipient-config driven (ROLE / USER / RECORD_OWNER → users).
+      if (channels.includes('IN_APP')) {
+        const recipients = (rule.recipientConfig as unknown as RecipientConfig[]) ?? [];
+        const resolved = await this.resolveRecipients(rule.companyId, recipients, payload);
+        // The notification carries the RULE's company (dispatch event context).
+        const ruleBase = { ...base, companyId: rule.companyId };
+        if (delayMinutes > 0) {
+          // Delayed delivery: durable queue job; the handler creates the rows.
+          await this.queueService.enqueue({
+            jobType: 'notification.dispatch',
+            companyId: rule.companyId,
+            payload: { userIds: resolved, base: ruleBase },
+            delayMs: delayMinutes * 60_000,
+          });
+        } else {
+          await this.createNotifications(resolved, ruleBase);
+        }
+      }
+
+      // SMS (Phase 9D): party-mobile driven — the rule's smsConfig renders a
+      // template/literal text against the payload and texts the event's
+      // party (plus explicit partyIds). Dedup is the SmsMessage unique
+      // idempotencyKey; the delay rides on the sms.send delivery.
+      if (channels.includes('SMS') && this.sms) {
+        await this.sms.dispatchForRule(rule, event, payload, delayMinutes);
       }
     }
     return matching.length;
+  }
+
+  /**
+   * Mark ONE of the current user's UNREAD notifications READ (ownership
+   * enforced by the conditional update — a foreign id matches zero rows).
+   */
+  async markRead(userId: string, notificationId: string): Promise<boolean> {
+    const flipped = await this.prisma.notification.updateMany({
+      where: { id: notificationId, userId, status: 'UNREAD' },
+      data: { status: 'READ', readAt: new Date() },
+    });
+    return flipped.count === 1;
+  }
+
+  /** Mark every UNREAD notification of the user (optionally per company) READ. */
+  async markAllRead(userId: string, companyId?: string): Promise<number> {
+    const flipped = await this.prisma.notification.updateMany({
+      where: { userId, status: 'UNREAD', ...(companyId ? { companyId } : {}) },
+      data: { status: 'READ', readAt: new Date() },
+    });
+    return flipped.count;
   }
 }
 
@@ -249,6 +292,9 @@ export class NotificationRuleService {
         recipientConfig: dto.recipientConfig as Prisma.InputJsonValue,
         channels: dto.channels as Prisma.InputJsonValue,
         delayConfig: dto.delayConfig as Prisma.InputJsonValue | undefined,
+        smsConfig: (dto as { smsConfig?: Record<string, unknown> }).smsConfig as
+          | Prisma.InputJsonValue
+          | undefined,
         priority: dto.priority ?? 'NORMAL',
         enabled: dto.enabled ?? true,
       },
@@ -282,6 +328,9 @@ export class NotificationRuleService {
         recipientConfig: dto.recipientConfig as Prisma.InputJsonValue | undefined,
         channels: dto.channels as Prisma.InputJsonValue | undefined,
         delayConfig: dto.delayConfig as Prisma.InputJsonValue | undefined,
+        smsConfig: (dto as { smsConfig?: Record<string, unknown> }).smsConfig as
+          | Prisma.InputJsonValue
+          | undefined,
         priority: dto.priority,
         enabled: dto.enabled,
       },

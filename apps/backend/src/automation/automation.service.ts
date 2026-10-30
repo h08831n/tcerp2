@@ -13,6 +13,7 @@ import {
   NotificationService,
   RecipientConfig,
 } from '../notifications/notifications.service';
+import { SmsService } from '../notifications/sms.service';
 import { PriceUpdatedHook } from '../pricing/daily-price.service';
 import { dayKeyOf, parseDayKey, todayKey } from '../pricing/day';
 import { ActivityService } from '../activities/activity.service';
@@ -146,6 +147,7 @@ export class AutomationService implements PriceUpdatedHook {
     private readonly publishingService: PublishingService,
     private readonly notificationService: NotificationService,
     private readonly activityService: ActivityService,
+    private readonly smsService: SmsService,
   ) {}
 
   // ───────────────────── PRICE_UPDATED trigger ─────────────────────
@@ -517,12 +519,14 @@ export class AutomationService implements PriceUpdatedHook {
           recordOwnerId: member.ownerUserId ?? '',
         };
         delete memberEvent.audienceMembers;
-        await this.queueService.enqueue({
-          jobType: 'sms.send',
-          companyId,
-          payload: { companyId, to: member.mobile, text: interpolate(actionConfig.text ?? rule.nameFa, memberEvent) },
+        await this.smsService.enqueueSend(companyId, {
+          to: member.mobile,
+          text: interpolate(actionConfig.text ?? rule.nameFa, memberEvent),
+          source: 'AUTOMATION',
+          sourceId: run.id,
+          partyId: member.partyId,
+          // Same dedup key as the pre-9D raw enqueue: re-runs reconcile.
           idempotencyKey: `sms:${keyBase}:${member.partyId}`,
-          priority: 'HIGH',
         });
         queued += 1;
       }
@@ -539,12 +543,13 @@ export class AutomationService implements PriceUpdatedHook {
     const to = String(event.mobile ?? '') || null;
     if (!to) return { queued: false, reason: 'NO_MOBILE' };
     const text = interpolate(actionConfig.text ?? rule.nameFa, event);
-    await this.queueService.enqueue({
-      jobType: 'sms.send',
-      companyId,
-      payload: { companyId, to, text },
+    await this.smsService.enqueueSend(companyId, {
+      to,
+      text,
+      source: 'AUTOMATION',
+      sourceId: run.id,
+      partyId: typeof event.partyId === 'string' ? event.partyId : undefined,
       idempotencyKey: `sms:${run.idempotencyKey ?? run.id}`,
-      priority: 'HIGH',
     });
     return { queued: true, to };
   }

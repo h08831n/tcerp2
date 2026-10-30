@@ -53,6 +53,8 @@ model Company {
   integrationConfigs IntegrationConfig[]
   notificationRules  NotificationRule[]
   notifications      Notification[]
+  smsTemplates       SmsTemplate[]
+  smsMessages        SmsMessage[]
   queueJobs          QueueJob[]
   bankAccounts       BankAccount[]
   chartOfAccounts    ChartOfAccount[]
@@ -884,6 +886,10 @@ model NotificationRule {
   recipientConfig Json          @map("recipient_config") // [{type: RECORD_OWNER|ROLE|USER, value}]
   channels        Json // [IN_APP, SMS]
   delayConfig     Json?         @map("delay_config") // {"delayMinutes":0,"jitter":...}
+  // Phase 9D: SMS channel policy — {templateCode?, text?, partyIds?,
+  // usePayloadParty?(default true)}. IN_APP ignores it; SMS resolves party
+  // mobiles and renders template/text with the event payload.
+  smsConfig       Json?         @map("sms_config")
   priority        QueuePriority @default(NORMAL)
   enabled         Boolean       @default(true)
   createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -894,6 +900,64 @@ model NotificationRule {
   @@unique([companyId, code])
   @@index([event, enabled])
   @@map("notification_rules")
+}
+
+// ─────────────── Phase 9D: SMS center (templates + send log) ───────────────
+// Every outbound SMS is a durable row created AT ENQUEUE time (QUEUED) and
+// flipped by the `sms.send` handler (SENT / FAILED + provider response) —
+// the send report is the log itself, resend = a fresh row.
+
+enum SmsMessageStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum SmsMessageSource {
+  AUTOMATION
+  NOTIFICATION_RULE
+  MANUAL
+}
+
+model SmsTemplate {
+  id           String   @id @default(uuid()) @db.Uuid
+  companyId    String   @map("company_id") @db.Uuid
+  code         String
+  nameFa       String   @map("name_fa")
+  bodyTemplate String   @map("body_template") // {var} placeholders from the event payload
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, code])
+  @@map("sms_templates")
+}
+
+model SmsMessage {
+  id               String           @id @default(uuid()) @db.Uuid
+  companyId        String           @map("company_id") @db.Uuid
+  to               String // canonical 09XXXXXXXXX
+  text             String
+  status           SmsMessageStatus @default(QUEUED)
+  source           SmsMessageSource
+  sourceId         String?          @map("source_id") // automation run id / rule id / requester id
+  templateCode     String?          @map("template_code")
+  partyId          String?          @map("party_id") @db.Uuid
+  error            String?
+  providerResponse Json?            @map("provider_response")
+  queuedJobId      String?          @map("queued_job_id") @db.Uuid
+  idempotencyKey   String           @unique @map("idempotency_key")
+  requestedById    String?          @map("requested_by_id") @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  sentAt           DateTime?        @map("sent_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, createdAt])
+  @@index([companyId, status])
+  @@map("sms_messages")
 }
 
 // ─────────────────── Workflow (foundation for timers) ───────────────────

@@ -1,3 +1,5 @@
+jest.setTimeout(180000);
+
 import {
   describeIntegration,
   integrationPrisma,

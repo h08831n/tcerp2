@@ -79,8 +79,26 @@
   attempts badge on runs. Tests: p9c-01..06; p5-13 updated to the real-
   activity contract; automation suites 16/16 green. Doc:
   docs/11-automation.md.
-- **9D (planned)**: Notification Center + SMS templates/placeholders + send
-  logs + retry on top of existing Notification/NotificationRule.
+- **9D (DONE — pending review)**: Notification Center + SMS. Migration
+  `20241101100000_phase9d_notification_sms` (sms_templates, sms_messages with
+  durable QUEUED/SENT/FAILED log + unique idempotency_key,
+  notification_rules.sms_config). The rules' SMS channel now WORKS:
+  dispatchRulesForEvent honors channels — IN_APP as before + SMS via
+  SmsService.dispatchForRule (party mobiles from payload.partyId +
+  smsConfig.partyIds, templateCode/literal text render, eventKey dedup
+  `notification-sms:{rule}:{party}:{eventKey}`, rule delay on the sms.send
+  delivery). SmsService.enqueueSend canonicalizes mobiles
+  (normalizeIranMobile), persists the QUEUED row first (P2002 = existing row
+  is the authority — no second job), one sms.send delivery (maxAttempts 3)
+  flips the SAME row SENT/FAILED with provider response (SmsSendHandler
+  write-back). Manual send (opt-in client dedup key) + resend of FAILED rows
+  as fresh rows + send report GET /notifications/sms + templates CRUD.
+  Inbox: POST /:id/read + /read-all (ownership-guarded), GET list resolves
+  the caller's company server-side. Automation SEND_SMS switched to the
+  logged path (source AUTOMATION, same dedup keys). Frontend /notifications
+  page (inbox + SMS center + rules tabs) + nav. Tests p9d-01..06; p5c-05
+  updated to the durable-log contract; automation suites 22/22; full
+  integration green. Doc: docs/12-notifications-sms.md.
 - **Backlog (unchanged)**: real Moadian sandbox connection + credentials.
 
 

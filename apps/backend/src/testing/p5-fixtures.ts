@@ -20,6 +20,7 @@ import { PriceRequestsService } from '../price-request/price-requests.service';
 import { DailyPriceTodayPriceProvider } from '../pricing/daily-price-today.provider';
 import { TimelineService } from '../parties/timeline.service';
 import { ActivityService } from '../activities/activity.service';
+import { SmsService } from '../notifications/sms.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { SalesDocumentsService } from '../sales/sales-documents.service';
 import { PurchaseDocumentsService } from '../purchase/purchase-documents.service';
@@ -110,6 +111,7 @@ export function automationService(
     timeline,
     audit,
   );
+  const smsService = new SmsService(prisma as never, resolvedQueue, audit);
   return new AutomationService(
     prisma as never,
     audit,
@@ -117,6 +119,7 @@ export function automationService(
     publishing,
     notifications,
     activityService,
+    smsService,
   );
 }
 
