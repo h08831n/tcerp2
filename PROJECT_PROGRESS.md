@@ -12,7 +12,12 @@
   activities.override + reason, audited. SYSTEM creation idempotent. Timeline
   events ACTIVITY_CREATED/COMPLETED/OVERRIDDEN/UPDATED written on the related
   entity (dedup for completion). Frontend: /activities + /calendar (Jalali
-  month grid, layer toggles, create-from-calendar). Tests p9a-01..12.
+  month grid, layer toggles, create-from-calendar). Tests p9a-01..12 + correction gate p9a-correction/p9c-01..04: OWN-scope
+  record authz (stranger UUID access = NotFound), financial calendar layers
+  gated by treasury.view, SYSTEM idempotency DB-enforced via unique(companyId,
+  idempotency_key) migration 20241029000000 (concurrent same-key test), audit/
+  timeline rollback on failure, PATCH/DELETE routes implemented, completed
+  activities not deletable.
   Migration applied to tcerp_test and CI only.
 - **9B (planned)**: Workflow State Machine + Approval Engine (single/
   role-based/sequential), timers, escalation, reopen/rollback. Design doc

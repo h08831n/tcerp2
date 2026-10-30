@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import {
   IsArray,
   IsDateString,
@@ -306,6 +306,41 @@ export class ActivitiesController {
     return { status: 'CANCELLED' };
   }
 
+  @Patch(':id')
+  @RequirePermissions('activities.edit')
+  async update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateActivityDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const { companyId, canOverride } = await this.actorScope(actor, request);
+    await this.activities.update(
+      companyId,
+      id,
+      {
+        ...dto,
+        scheduledDate: dto.scheduledDate ? new Date(dto.scheduledDate) : undefined,
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
+      },
+      actor,
+      canOverride,
+    );
+    return { status: 'UPDATED' };
+  }
+
+  @Delete(':id')
+  @RequirePermissions('activities.delete')
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    await this.activities.delete(companyId, id, actor);
+    return { status: 'DELETED' };
+  }
+
   @Post('calendar')
   @RequirePermissions('activities.view')
   async calendar(
@@ -316,6 +351,8 @@ export class ActivitiesController {
     const { companyId, canOverride } = await this.actorScope(actor, request);
     const effective = await this.permissionsService.getEffectivePermissions(actor.id, companyId);
     const scopeAll = effective.has('activities.view_all');
+    const canSeeFinancial = effective.has('treasury.view'); // checks/payments amounts
+    const canSeeApprovals = effective.has('approvals.decide') || scopeAll;
     const from = new Date(dto.from);
     const to = new Date(dto.to);
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
@@ -327,6 +364,8 @@ export class ActivitiesController {
       to,
       layers,
       assignedToId: scopeAll ? dto.assignedToId : actor.id,
+      canSeeFinancial,
+      canSeeApprovals,
     });
   }
 }

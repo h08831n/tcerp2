@@ -37,6 +37,24 @@ Timeline). وضعیت: **پیاده‌سازی‌شده (9A)**.
 activities/checks/payments/approvals. هر لایه فقط خواندنی است (projection از
 ماژول‌های موجود)؛ حذف لایه داده را تغییر نمی‌دهد. سقف ۵۰۰ ردیف در هر لایه.
 
+## اصلاحات دروازه پذیرش 9A (2026-10-30)
+
+- **اعتبارسنجی رکورد-محور**: OWN-scope کاربران فقط فعالیت‌های
+  assignedTo/createdBy خود را می‌بینند/تغییر می‌دهند؛ دسترسی با UUID чужی
+  NotFound برمی‌گرداند (بدون افشای وجود). view_all فقط با مجوز.
+- **لایه‌های مالی تقویم**: لایه‌های checks/payments نیازمند `treasury.view`
+  هستند و بدون آن برگردانده نمی‌شوند؛ لایه approvals نیازمند
+  `approvals.decide` یا view_all. p9a-correction این جداسازی را تست می‌کند.
+- **SYSTEM idempotency DB-enforced**: ستون `idempotency_key` با
+  unique(companyId, key) (migration `20241029000000`) — تزریق هم‌زمان دو
+  trigger هم‌کلید دقیقاً یک فعالیت می‌سازد (p9c-03) و کلیدهای متمایز هرگز
+  ادغام نمی‌شوند (p9c-04).
+- **اتمی بودن همه mutations**: activity + timeline + audit در یک
+  $transaction با `AuditService.recordTx` — شکست هر سه را با هم برمی‌گرداند
+  (p9a-02/p9c-02 rollback tests).
+- **حذف فعالیت COMPLETED ممنوع**: `ACTIVITY_COMPLETED_NOT_DELETABLE` —
+  تاریخچه حفظ می‌شود؛ اصلاح فقط با override.
+
 ## مجوزها
 
 activities.view / view_all / create / edit / delete / override. بدون

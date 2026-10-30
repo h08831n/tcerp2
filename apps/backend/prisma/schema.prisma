@@ -434,6 +434,10 @@ model Activity {
   // manager override bookkeeping: who unlocked/edited a completed activity
   lastOverrideById  String?          @map("last_override_by_id") @db.Uuid
   lastOverrideReason String?         @map("last_override_reason")
+  // SYSTEM idempotency: (companyId, idempotencyKey) unique — a repeated
+  // automation/trigger key can never create a second activity, even
+  // concurrently (DB-enforced). NULL for USER-created activities.
+  idempotencyKey    String?          @map("idempotency_key")
   createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -445,6 +449,7 @@ model Activity {
   @@index([companyId, assignedToId, status, dueDate])
   @@index([companyId, relatedEntityType, relatedEntityId])
   @@index([companyId, dueDate])
+  @@unique([companyId, idempotencyKey])
   @@map("activities")
 }
 

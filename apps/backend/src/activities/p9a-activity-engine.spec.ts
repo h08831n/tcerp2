@@ -238,7 +238,7 @@ describe('p9a — Activity Engine (Phase 9A)', () => {
     }, ACTOR);
     const dayFrom = new Date(day.getTime() - 3600 * 1000);
     const dayTo = new Date(day.getTime() + 3600 * 1000);
-    const cal = await service.calendar(COMPANY_A, { from: dayFrom, to: dayTo, layers: ['activities'] });
+    const cal = await service.calendar(COMPANY_A, { from: dayFrom, to: dayTo, layers: ['activities'], canSeeFinancial: true, canSeeApprovals: true });
     const activities = cal.layers.activities as Array<{ title: string }>;
     expect(activities.some((a) => a.title === 'در بازه روز')).toBe(true);
     expect(activities.some((a) => a.title === 'خارج بازه')).toBe(false);
@@ -247,9 +247,9 @@ describe('p9a — Activity Engine (Phase 9A)', () => {
   itif('p9a-08 calendar layers filter: disabling a layer only hides it (data untouched)', async () => {
     const from = new Date(Date.now() - 3600 * 1000);
     const to = new Date(Date.now() + 3600 * 1000);
-    const withChecks = await service.calendar(COMPANY_A, { from, to, layers: ['activities', 'checks'] });
+    const withChecks = await service.calendar(COMPANY_A, { from, to, layers: ['activities', 'checks'], canSeeFinancial: true, canSeeApprovals: true });
     expect('checks' in withChecks.layers).toBe(true);
-    const withoutChecks = await service.calendar(COMPANY_A, { from, to, layers: ['activities'] });
+    const withoutChecks = await service.calendar(COMPANY_A, { from, to, layers: ['activities'], canSeeFinancial: true, canSeeApprovals: true });
     expect('checks' in withoutChecks.layers).toBe(false);
     // underlying check rows were not touched by the layer toggle
     const checks = await prisma.check.findMany({ where: { companyId: COMPANY_A } });
