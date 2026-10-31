@@ -9,6 +9,7 @@ import { AuditAction } from '../audit/audit.dto';
 import { ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { BankTransferService } from './bank-transfer.service';
+import { TimelineService } from '../parties/timeline.service';
 
 export interface CreateTreasuryDocInput {
   bankAccountId: string;
@@ -30,6 +31,7 @@ export class ReceiptService {
     private readonly statement: BankStatementService,
     private readonly auditService: AuditService,
     private readonly transfers: BankTransferService,
+    private readonly timeline: TimelineService,
   ) {}
 
   async create(
@@ -104,6 +106,18 @@ export class ReceiptService {
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });
+      if (input.partyId) {
+        await this.timeline.record(trx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: input.partyId,
+          type: 'RECEIPT_CREATED',
+          title: 'ثبت دریافت',
+          description: input.description ?? `رسید ${receiptNumber}`,
+          data: { receiptId: receipt.id, receiptNumber, amount },
+          actorUserId: actor.id,
+        });
+      }
       return saved;
     });
   }
@@ -121,6 +135,7 @@ export class PaymentService {
     private readonly statement: BankStatementService,
     private readonly auditService: AuditService,
     private readonly transfers: BankTransferService,
+    private readonly timeline: TimelineService,
   ) {}
 
   async create(
@@ -195,6 +210,18 @@ export class PaymentService {
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });
+      if (input.partyId) {
+        await this.timeline.record(trx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: input.partyId,
+          type: 'PAYMENT_CREATED',
+          title: 'ثبت پرداخت',
+          description: input.description ?? `پرداخت ${paymentNumber}`,
+          data: { paymentId: payment.id, paymentNumber, amount },
+          actorUserId: actor.id,
+        });
+      }
       return saved;
     });
   }

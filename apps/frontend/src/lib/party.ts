@@ -207,6 +207,8 @@ export interface TimelineItemDto {
   title: string;
   description?: string | null;
   actorType?: string | null;
+  /** JSON payload — carries the related entity ids used for navigation. */
+  data?: Record<string, unknown> | null;
   createdAt: string;
 }
 

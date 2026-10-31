@@ -17,7 +17,7 @@ import { ContactsTab } from "@/components/parties/contacts-tab";
 import { AddressesTab } from "@/components/parties/addresses-tab";
 import { ScoreTab } from "@/components/parties/score-tab";
 import { FinancialTab } from "@/components/parties/financial-tab";
-import { TimelineTab } from "@/components/parties/timeline-tab";
+import { PartyTimelineSidebar } from "@/components/parties/party-timeline-sidebar";
 import { RoleBadge, ScoreBadge, StatusBadge, TypeBadge } from "@/components/parties/badges";
 import { faDigits, jalali } from "@/lib/format";
 import {
@@ -37,7 +37,6 @@ const TABS = [
   { key: "addresses", label: "آدرس‌ها" },
   { key: "score", label: "امتیاز" },
   { key: "financial", label: "مسئولیت مالی" },
-  { key: "timeline", label: "تایم‌لاین" },
   { key: "files", label: "فایل‌ها" },
 ] as const;
 
@@ -144,115 +143,121 @@ export default function PartyDetailPage() {
   const activeIndex = TABS.findIndex((tab) => tab.key === activeTab);
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg font-bold text-slate-800">{party.nameFa}</h2>
-              <TypeBadge type={party.type} />
-              <StatusBadge archived={Boolean(party.archivedAt)} />
+    // RTL grid: first column (content) sits on the right, the always-visible
+    // timeline sidebar occupies the second column on the LEFT.
+    <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="min-w-0 space-y-4">
+        {/* Header */}
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold text-slate-800">{party.nameFa}</h2>
+                <TypeBadge type={party.type} />
+                <StatusBadge archived={Boolean(party.archivedAt)} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                {party.internalCode && (
+                  <span>کد داخلی: <span dir="ltr">{faDigits(party.internalCode)}</span></span>
+                )}
+                <span>مالک: {ownerDisplayName(party.owner)}</span>
+                <span>نسخه: {faDigits(party.version)}</span>
+                <span>ایجاد: {party.createdAt ? jalali(party.createdAt) : "—"}</span>
+                {party.archivedAt && <span>بایگانی: {jalali(party.archivedAt)}</span>}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <ScoreBadge score={party.score} level={party.scoreLevel} />
+                {party.roles.map((entry) => (
+                  <RoleBadge key={entry.role} role={entry.role} />
+                ))}
+              </div>
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-              {party.internalCode && (
-                <span>کد داخلی: <span dir="ltr">{faDigits(party.internalCode)}</span></span>
-              )}
-              <span>مالک: {ownerDisplayName(party.owner)}</span>
-              <span>نسخه: {faDigits(party.version)}</span>
-              <span>ایجاد: {party.createdAt ? jalali(party.createdAt) : "—"}</span>
-              {party.archivedAt && <span>بایگانی: {jalali(party.archivedAt)}</span>}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <ScoreBadge score={party.score} level={party.scoreLevel} />
-              {party.roles.map((entry) => (
-                <RoleBadge key={entry.role} role={entry.role} />
-              ))}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link href="/parties" tabIndex={-1}>
-              <Button variant="ghost" size="sm">بازگشت</Button>
-            </Link>
-            <Button
-              variant={party.archivedAt ? "secondary" : "danger"}
-              size="sm"
-              onClick={handleArchiveToggle}
-              disabled={archiving}
-            >
-              {archiving ? "…" : party.archivedAt ? "بازگردانی از بایگانی" : "بایگانی رکورد"}
-            </Button>
-          </div>
-        </div>
-        {actionError && (
-          <div role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-            {actionError}
-          </div>
-        )}
-      </div>
-
-      {/* Tabs */}
-      <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-        <div
-          role="tablist"
-          aria-label="بخش‌های پرونده"
-          onKeyDown={handleTablistKeyDown}
-          className="flex flex-wrap gap-1 overflow-x-auto border-b border-slate-200 bg-slate-50/70 px-2 pt-2"
-        >
-          {TABS.map((tab, index) => {
-            const selected = tab.key === activeTab;
-            return (
-              <button
-                key={tab.key}
-                ref={(el) => {
-                  tabRefs.current[index] = el;
-                }}
-                type="button"
-                role="tab"
-                id={`tab-${tab.key}`}
-                aria-selected={selected}
-                aria-controls={`panel-${tab.key}`}
-                tabIndex={index === activeIndex ? 0 : -1}
-                onClick={() => setActiveTab(tab.key)}
-                className={`-mb-px rounded-t-md border-b-2 px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
-                  selected
-                    ? "border-primary-600 bg-white text-primary-700"
-                    : "border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-                }`}
+            <div className="flex items-center gap-2">
+              <Link href="/parties" tabIndex={-1}>
+                <Button variant="ghost" size="sm">بازگشت</Button>
+              </Link>
+              <Button
+                variant={party.archivedAt ? "secondary" : "danger"}
+                size="sm"
+                onClick={handleArchiveToggle}
+                disabled={archiving}
               >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div
-          role="tabpanel"
-          id={`panel-${activeTab}`}
-          aria-labelledby={`tab-${activeTab}`}
-          className="p-4"
-        >
-          {activeTab === "general" && <GeneralTab party={party} onChanged={onChanged} />}
-          {activeTab === "phones" && <PhonesTab party={party} onChanged={onChanged} />}
-          {activeTab === "roles" && <RolesTab party={party} onChanged={onChanged} />}
-          {activeTab === "contacts" && <ContactsTab party={party} onChanged={onChanged} />}
-          {activeTab === "addresses" && <AddressesTab party={party} onChanged={onChanged} />}
-          {activeTab === "score" && <ScoreTab party={party} onChanged={onChanged} />}
-          {activeTab === "financial" && <FinancialTab party={party} />}
-          {activeTab === "timeline" && <TimelineTab party={party} />}
-          {activeTab === "files" && (
-            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
-                strokeLinecap="round" strokeLinejoin="round" className="h-10 w-10 text-slate-300"
-                aria-hidden="true">
-                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M9 13h6M9 17h4" />
-              </svg>
-              <p className="mt-3 text-sm font-medium text-slate-500">به‌زودی — Phase 3B</p>
-              <p className="mt-1 text-xs text-slate-400">مدیریت فایل‌ها و پیوست‌های پرونده</p>
+                {archiving ? "…" : party.archivedAt ? "بازگردانی از بایگانی" : "بایگانی رکورد"}
+              </Button>
+            </div>
+          </div>
+          {actionError && (
+            <div role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+              {actionError}
             </div>
           )}
         </div>
+
+        {/* Tabs */}
+        <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div
+            role="tablist"
+            aria-label="بخش‌های پرونده"
+            onKeyDown={handleTablistKeyDown}
+            className="flex flex-wrap gap-1 overflow-x-auto border-b border-slate-200 bg-slate-50/70 px-2 pt-2"
+          >
+            {TABS.map((tab, index) => {
+              const selected = tab.key === activeTab;
+              return (
+                <button
+                  key={tab.key}
+                  ref={(el) => {
+                    tabRefs.current[index] = el;
+                  }}
+                  type="button"
+                  role="tab"
+                  id={`tab-${tab.key}`}
+                  aria-selected={selected}
+                  aria-controls={`panel-${tab.key}`}
+                  tabIndex={index === activeIndex ? 0 : -1}
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`-mb-px rounded-t-md border-b-2 px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+                    selected
+                      ? "border-primary-600 bg-white text-primary-700"
+                      : "border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div
+            role="tabpanel"
+            id={`panel-${activeTab}`}
+            aria-labelledby={`tab-${activeTab}`}
+            className="p-4"
+          >
+            {activeTab === "general" && <GeneralTab party={party} onChanged={onChanged} />}
+            {activeTab === "phones" && <PhonesTab party={party} onChanged={onChanged} />}
+            {activeTab === "roles" && <RolesTab party={party} onChanged={onChanged} />}
+            {activeTab === "contacts" && <ContactsTab party={party} onChanged={onChanged} />}
+            {activeTab === "addresses" && <AddressesTab party={party} onChanged={onChanged} />}
+            {activeTab === "score" && <ScoreTab party={party} onChanged={onChanged} />}
+            {activeTab === "financial" && <FinancialTab party={party} />}
+            {activeTab === "files" && (
+              <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+                  strokeLinecap="round" strokeLinejoin="round" className="h-10 w-10 text-slate-300"
+                  aria-hidden="true">
+                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M9 13h6M9 17h4" />
+                </svg>
+                <p className="mt-3 text-sm font-medium text-slate-500">به‌زودی — Phase 3B</p>
+                <p className="mt-1 text-xs text-slate-400">مدیریت فایل‌ها و پیوست‌های پرونده</p>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+
+      {/* Always-visible timeline (left column in RTL) */}
+      <PartyTimelineSidebar partyId={party.id} refreshToken={party.version} />
     </div>
   );
 }

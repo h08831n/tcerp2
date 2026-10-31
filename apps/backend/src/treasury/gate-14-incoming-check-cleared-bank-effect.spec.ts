@@ -85,6 +85,7 @@ describe('14 incoming-check-cleared-bank-effect', () => {
       statement as never,
       audit as never,
       transfers as never,
+      { record: async () => ({}) } as never,
     );
     return { service, trx, createdChecks, checkUpdates, createdEntries, createdLines, prisma, journal, audit };
   }

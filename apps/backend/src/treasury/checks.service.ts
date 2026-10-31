@@ -9,6 +9,7 @@ import { AuditAction } from '../audit/audit.dto';
 import { NotFoundError, ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { BankTransferService } from './bank-transfer.service';
+import { TimelineService } from '../parties/timeline.service';
 
 export interface RegisterCheckInput {
   checkNumber: string;
@@ -60,6 +61,7 @@ export class ChecksService {
     private readonly statement: BankStatementService,
     private readonly auditService: AuditService,
     private readonly transfers: BankTransferService,
+    private readonly timeline: TimelineService,
   ) {}
 
   async getById(companyId: string, id: string): Promise<Check> {
@@ -106,6 +108,18 @@ export class ChecksService {
       ip: ctx.ip,
       userAgent: ctx.userAgent,
     });
+    if (input.partyId) {
+      await this.timeline.record(this.prisma, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: input.partyId,
+        type: 'CHECK_REGISTERED',
+        title: check.direction === 'INCOMING' ? 'ثبت چک دریافتی' : 'ثبت چک پرداختی',
+        description: input.description ?? `چک ${input.checkNumber}`,
+        data: { checkId: check.id, checkNumber: input.checkNumber, amount, direction: check.direction },
+        actorUserId: actor.id,
+      });
+    }
     // No journal entry, no statement line — by design.
     return check;
   }
@@ -147,6 +161,18 @@ export class ChecksService {
         ip: opts.ctx?.ip,
         userAgent: opts.ctx?.userAgent,
       });
+      if (check.partyId) {
+        await this.timeline.record(this.prisma, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: check.partyId,
+          type: 'CHECK_STATUS_CHANGED',
+          title: 'تغییر وضعیت چک',
+          description: `${check.checkNumber}: ${check.status} → ${to}`,
+          data: { checkId: check.id, checkNumber: check.checkNumber, from: check.status, to },
+          actorUserId: opts.actor.id,
+        });
+      }
     }
     return updated;
   }
@@ -202,6 +228,18 @@ export class ChecksService {
           ip: opts.ctx?.ip,
           userAgent: opts.ctx?.userAgent,
         });
+        if (check.partyId) {
+          await this.timeline.record(trx, {
+            companyId: check.companyId,
+            entityType: 'PARTY',
+            entityId: check.partyId,
+            type: 'CHECK_STATUS_CHANGED',
+            title: 'وصول چک دریافتی',
+            description: `چک ${check.checkNumber} وصول شد`,
+            data: { checkId: check.id, checkNumber: check.checkNumber, from: check.status, to: 'CLEARED' },
+            actorUserId: opts.actor.id,
+          });
+        }
       }
       return updated;
     });
@@ -258,6 +296,18 @@ export class ChecksService {
           ip: opts.ctx?.ip,
           userAgent: opts.ctx?.userAgent,
         });
+        if (check.partyId) {
+          await this.timeline.record(trx, {
+            companyId: check.companyId,
+            entityType: 'PARTY',
+            entityId: check.partyId,
+            type: 'CHECK_STATUS_CHANGED',
+            title: 'پرداخت چک پرداختی',
+            description: `چک ${check.checkNumber} پرداخت شد`,
+            data: { checkId: check.id, checkNumber: check.checkNumber, from: check.status, to: 'PAID' },
+            actorUserId: opts.actor.id,
+          });
+        }
       }
       return updated;
     });
