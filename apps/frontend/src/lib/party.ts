@@ -260,8 +260,8 @@ export function fetchParties(query: PartyListQuery): Promise<PartyListResponse> 
   if (query.type) params.set("type", query.type);
   if (query.role) params.set("role", query.role);
   if (query.archived !== undefined) params.set("archived", String(query.archived));
-  if (query.sort) params.set("sort", query.sort);
-  if (query.dir) params.set("dir", query.dir);
+  if (query.sort) params.set("sortBy", query.sort);
+  if (query.dir) params.set("sortDir", query.dir);
   return apiJson<PartyListResponse>(`/parties?${params.toString()}`);
 }
 
