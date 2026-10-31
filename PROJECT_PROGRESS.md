@@ -224,6 +224,14 @@
   computed totals. Tests g11-14 (grouping 3-lines, DRAFT creation with totals,
   non-consecutive repeat → run-time DUPLICATE, unknown phone → row FAILED).
 
+- **Gate G slice 6 (DONE — pending review)**: full load test — g11-15 (5000-row
+  party import 100% OK in ~87s ~57 rows/s on dev Docker; constant throughput vs
+  1500-row smoke, no degradation with job growth) + g11-16 (two CONCURRENT import
+  jobs 100 rows each: 100/100 partition exact, zero failures, no cross-
+  contamination — per-row transactions carry no shared state). Gate G scale gate
+  closed; deferred remains only external monitoring wiring + backup/restore drill
+  (HELD for final review per owner instruction).
+
 
 
 ## Completed
