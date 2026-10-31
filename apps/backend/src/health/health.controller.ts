@@ -63,7 +63,7 @@ export class HealthController {
     } else {
       try {
         const pong = await Promise.race([
-          connection.ping(),
+          connection.ping().catch(() => undefined),
           new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
         ]);
         payload.redis = pong === 'PONG' ? 'up' : 'down';

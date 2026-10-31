@@ -3,6 +3,7 @@ import { AppConfig, CONFIG } from '../config/configuration';
 import { QueueBullmqService } from './queue-bullmq.service';
 import { QueueBullmqWorker } from './queue-bullmq.worker';
 import { WorkerService } from './worker.service';
+import { QueuePollingStarter } from './queue-polling-starter';
 
 /**
  * Chooses the queue runtime driver at boot (REQUIREMENTS correction gate):
@@ -20,7 +21,24 @@ export class QueueWorkerManager implements OnApplicationBootstrap {
     private readonly bullmq: QueueBullmqService,
     private readonly bullmqWorker: QueueBullmqWorker,
     private readonly dbWorker: WorkerService,
+    private readonly pollingStarter: QueuePollingStarter,
   ) {}
+
+  private dbWorkerStarted = false;
+
+  /**
+   * Start the DB-polling worker at most once (idempotent). Used by the boot
+   * path AND by QueueService.enqueue when BullMQ/Redis times out mid-run —
+   * the Redis-outage drill (final review) showed enqueue hanging forever
+   * because the bullmq add retried indefinitely while the fallback worker
+   * was never started (driver chosen at boot).
+   */
+  ensureDbWorker(): void {
+    if (this.dbWorkerStarted) return;
+    this.dbWorkerStarted = true;
+    this.dbWorker.start();
+    this.pollingStarter.register(() => this.ensureDbWorker());
+  }
 
   async onApplicationBootstrap(): Promise<void> {
     if (this.config.NODE_ENV === 'test') {
@@ -30,7 +48,7 @@ export class QueueWorkerManager implements OnApplicationBootstrap {
 
     const driver = this.config.QUEUE_DRIVER;
     if (driver === 'db') {
-      this.dbWorker.start();
+      this.ensureDbWorker();
       return;
     }
 
@@ -43,6 +61,6 @@ export class QueueWorkerManager implements OnApplicationBootstrap {
       return;
     }
     this.logger.warn('Redis unavailable — falling back to DB-polling queue driver');
-    this.dbWorker.start();
+    this.ensureDbWorker();
   }
 }

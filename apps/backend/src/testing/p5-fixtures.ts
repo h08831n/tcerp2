@@ -49,7 +49,7 @@ export function makeQueueService(prisma: PrismaClient): QueueService {
     add: async () => false,
     removeJob: async () => undefined,
   };
-  return new QueueService(prisma as never, new QueueHandlerRegistry(), bullmqStub as never);
+  return new QueueService(prisma as never, new QueueHandlerRegistry(), bullmqStub as never, { ensureDbWorker: () => undefined, start: () => undefined } as never);
 }
 
 export function makeAudit(prisma: PrismaClient): AuditService {

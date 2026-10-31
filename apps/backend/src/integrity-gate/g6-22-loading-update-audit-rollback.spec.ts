@@ -43,10 +43,15 @@ describeIntegration('g6-22 loading-update-audit-rollback', () => {
     const relations = new DocumentRelationService(prisma as never, audit);
     const notifications = new NotificationService(
       prisma as never,
-      new QueueService(prisma as never, new QueueHandlerRegistry(), {
-        add: async () => false,
-        removeJob: async () => undefined,
-      } as never),
+      new QueueService(
+        prisma as never,
+        new QueueHandlerRegistry(),
+        {
+          add: async () => false,
+          removeJob: async () => undefined,
+        } as never,
+        { ensureDbWorker: () => undefined } as never,
+      ),
     );
     const approvals = new ApprovalRequestService(prisma as never, audit, timeline, notifications, new ApprovalDecisionBus());
     return new LoadingService(

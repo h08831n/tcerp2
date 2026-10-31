@@ -23,7 +23,7 @@ describeIntegration('corr-06 null-scoped-unique (live DB)', () => {
   const prisma = integrationPrisma();
   // BullMQ producer stub: unavailable → the DB-polling path (no Redis needed).
   const bullmq = { add: jest.fn(async () => false), removeJob: jest.fn(async () => undefined) };
-  const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never);
+  const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never, { ensureDbWorker: () => undefined, start: () => undefined } as never);
 
   const jobKeysUsed: string[] = [];
   const createdCompanies: string[] = [];

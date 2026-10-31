@@ -5,6 +5,7 @@ import { QueueHandlerRegistry, QueueHandler, testEchoHandler } from './queue.han
 import { QueueBullmqService } from './queue-bullmq.service';
 import { QueueBullmqWorker } from './queue-bullmq.worker';
 import { WorkerService } from './worker.service';
+import { QueuePollingStarter } from './queue-polling-starter';
 import { QueueWorkerManager } from './queue-worker.manager';
 
 /**
@@ -19,6 +20,7 @@ import { QueueWorkerManager } from './queue-worker.manager';
     QueueBullmqService,
     QueueBullmqWorker,
     WorkerService,
+    QueuePollingStarter,
     QueueWorkerManager,
     {
       provide: QueueHandlerRegistry,
@@ -29,7 +31,7 @@ import { QueueWorkerManager } from './queue-worker.manager';
       },
     },
   ],
-  exports: [QueueService, QueueHandlerRegistry, QueueBullmqService],
+  exports: [QueueService, QueueHandlerRegistry, QueueBullmqService, QueueWorkerManager],
 })
 export class QueueModule {}
 

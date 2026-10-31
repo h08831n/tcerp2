@@ -61,6 +61,7 @@ describe('queue enqueue idempotency (mocked BullMQ)', () => {
       prisma as never,
       new QueueHandlerRegistry(),
       bullmq as never,
+      { ensureDbWorker: () => undefined } as never,
     );
     return { service, bullmq, prisma };
   }
@@ -152,7 +153,7 @@ describe('queue enqueue idempotency (mocked BullMQ)', () => {
         }),
       },
     };
-    const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never);
+    const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never, { ensureDbWorker: () => undefined, start: () => undefined } as never);
 
     const first = await service.enqueue({
       jobType: 'test.echo',
@@ -194,7 +195,7 @@ describe('queue enqueue idempotency (mocked BullMQ)', () => {
         }),
       },
     };
-    const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never);
+    const service = new QueueService(prisma as never, new QueueHandlerRegistry(), bullmq as never, { ensureDbWorker: () => undefined, start: () => undefined } as never);
 
     const first = await service.enqueue({
       jobType: 'test.echo',

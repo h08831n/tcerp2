@@ -240,3 +240,34 @@ Storage (MinIO) فعلاً `disabled` گزارش می‌شود — کلاینت 
 
 درس: `npm run start` پس از هر فاز باید یک‌بار اجرا شود — DI/errors که فقط در
 بوت ظاهر می‌شوند از تست‌های service-level پنهان می‌مانند.
+
+
+### ۸. Redis-outage drill (فاز ۱۱ / Gate G — اجرا و تأیید ۲۰۲۶-۱۰-۳۱)
+
+**سناریو**: قطع Redis بعد از بوت (bullmq driver فعال) — بند «تست بازیابی پس از
+قطع Redis» فاز ۱. سه باگ واقعی پیدا و رفع شد:
+
+1. **enqueue hang می‌کرد**: `bullmq.add` با `maxRetriesPerRequest: null` وقتی
+   Redis پایین است بی‌نهایت retry می‌کند → HTTP request هیچ‌وقت برنمی‌گشت
+   (ردیف در DB ساخته می‌شد ولی caller جواب نمی‌گرفت). رفع: race با timeout
+   ۳٫۵ ثانیه + defer سینک‌ترو (bullmq.add روی connection بسته sync-throw
+   می‌کند) + شروع worker polling به‌صورت on-demand از طریق
+   `QueuePollingStarter` (cycle-breaker برای DI: WorkerService → QueueService
+   → WorkerManager → WorkerService بود).
+2. **crash در ioredis error event**: اتصال بدون 'error' listener، خطای
+   ECONNREFUSED را unhandled پرتاب می‌کرد و process را می‌کشت. رفع: listener
+   غیرمرگبار در `QueueBullmqService.getConnection`.
+3. **unhandled rejection از ping**: ping بازندهٔ race (reject بعد از timeout)
+   بدون catch → crash. رفع: `.catch(() => undefined)` روی هر دو ping
+   (isAvailable و health).
+
+**نتایج drill ثبت‌شده**: بوت با Redis DOWN → polling driver + health
+`redis: down, degraded: true, status: ok`؛ enqueue بدون Redis → **۲۰۱ در
+۰٫۱۱۵ ثانیه** (قبلاً hang بی‌نهایت) + fallback worker خودکار شروع شد؛ job از
+طریق DB-polling پردازش شد (اعلان در DB ثبت شد)؛ Redis برگشت → health
+`redis: up, degraded: false` بدون restart سرور. double-processing بین دو
+worker توسط claim تراکنشی (SKIP LOCKED / status guard) جلوگیری می‌شود.
+
+**یافتهٔ تستی جانبی**: p5-07 با کانفیگ‌های stale WhatsApp از اجراهای
+خراب‌شده شکست خورد (handler کانال را با isPrimary/createdAt حل می‌کند) —
+self-clean در beforeAll اضافه شد؛ الزام per-run unique data تقویت شد.

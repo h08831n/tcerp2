@@ -3,6 +3,7 @@ import { Prisma, QueueJob, QueueJobStatus, QueuePriority } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { QueueHandlerRegistry } from './queue.handlers';
 import { QueueBullmqService } from './queue-bullmq.service';
+import { QueuePollingStarter } from './queue-polling-starter';
 import { Paginated } from '../common/dto/pagination.dto';
 import { NotFoundError, ValidationError } from '../common/errors';
 
@@ -47,6 +48,7 @@ export class QueueService {
     private readonly prisma: PrismaService,
     private readonly registry: QueueHandlerRegistry,
     private readonly bullmq: QueueBullmqService,
+    private readonly pollingStarter: QueuePollingStarter,
   ) {}
 
   /**
@@ -104,10 +106,28 @@ export class QueueService {
       throw error;
     }
 
-    if (await this.bullmq.add(row, delayMs)) {
+    // Redis-outage resilience (final review drill): bullmq.add with
+    // maxRetriesPerRequest:null HANGS while Redis is down — race it against a
+    // short timeout so the enqueue returns promptly, start the DB-polling
+    // worker as a safety net, and let the transactional PROCESSING claim
+    // (SKIP LOCKED / status guard) prevent double-processing when Redis
+    // returns and BullMQ resumes.
+    // bullmq.add may throw SYNCHRONOUSLY on a closed connection (ioredis
+    // 'Connection is closed') — defer it into the promise chain so the catch
+    // actually applies, and race against the fallback timeout.
+    const added = await Promise.race([
+      Promise.resolve()
+        .then(() => this.bullmq.add(row, delayMs))
+        .catch(() => false),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3500)),
+    ]);
+    if (added) {
       this.logger.debug(`Job ${row.id} (${row.jobType}) handed to BullMQ`);
     } else {
-      this.logger.debug(`Job ${row.id} (${row.jobType}) queued for DB polling`);
+      this.logger.warn(
+        `Job ${row.id} (${row.jobType}) — BullMQ unavailable, queued for DB polling (fallback worker started)`,
+      );
+      this.pollingStarter.start();
     }
     return row;
   }

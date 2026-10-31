@@ -250,6 +250,21 @@
   QueueBullmqService exposed via QueueModule exports. Health payload is typed
   (HealthPayload) and stays 503 only when the DB is down.
 
+- **Redis-outage drill (DONE — final review)**: three REAL bugs found+fixed —
+  (1) enqueue HUNG forever with Redis down (bullmq.add maxRetriesPerRequest:null
+  retries indefinitely); fixed: 3.5s race + sync-throw defer (bullmq.add throws
+  synchronously on a closed connection) + on-demand DB-polling worker start via
+  QueuePollingStarter cycle-breaker (DI cycle WorkerService→QueueService→
+  WorkerManager→WorkerService broken); (2) ioredis 'error' event without
+  listener crashed the process on ECONNREFUSED — non-fatal listener added;
+  (3) losing ping rejections (race timeout then reject) crashed as unhandled —
+  .catch on both pings (isAvailable + health). Drill verified: boot with Redis
+  DOWN → polling driver + health degraded:true/200; enqueue without Redis → 201
+  in 0.115s (was infinite hang) + fallback worker auto-started; job processed
+  via DB-polling; Redis restart → health up without server restart. p5-07 got a
+  beforeAll self-clean (stale WhatsApp configs from crashed runs broke the
+  channel-config resolution).
+
 - **Final review hardening sweep (DONE — pending review)**: static source sweep
   (src/final-review/hardening.spec.ts, unit-enforced on every push):
   FR-01 route-guard sweep over ALL ~50 controllers (git-tracked file list; class-

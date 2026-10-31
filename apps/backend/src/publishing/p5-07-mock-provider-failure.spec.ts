@@ -38,6 +38,12 @@ describeIntegration('p5-07 mock-provider-failure', () => {
   const adapters = makeAdapters();
 
   beforeAll(async () => {
+    // self-clean: stale p5-07 WhatsApp configs from crashed runs — the item
+    // handler resolves the channel config by isPrimary/createdAt, so an older
+    // leftover (forceFail=false after the update test) would win.
+    await prisma.integrationConfig.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, code: { startsWith: 'p5-07-wa-' } },
+    });
     actorId = await adminUserId(prisma);
     const fixture = await createVariantInCompany(prisma, INTEGRATION_COMPANY_ID, marker);
     variantId = fixture.variantId;

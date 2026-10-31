@@ -31,6 +31,13 @@ export class QueueBullmqService implements OnModuleDestroy {
         maxRetriesPerRequest: null,
         lazyConnect: true,
       });
+      // ioredis throws an UNHANDLED error event (process crash) when Redis is
+      // unreachable unless an 'error' listener exists — the availability
+      // probe + health endpoint handle outages explicitly, so the connection
+      // errors are logged, never fatal (Redis-outage drill, final review).
+      this.connection.on('error', (error: Error) => {
+        this.logger.debug(`Redis connection error (non-fatal): ${error.message}`);
+      });
     }
     return this.connection;
   }
@@ -48,9 +55,12 @@ export class QueueBullmqService implements OnModuleDestroy {
       return false;
     }
     try {
-      if (connection.status === 'wait') connection.connect();
+      if (connection.status === 'wait') connection.connect().catch(() => undefined);
+      // The LOSING promise of the race must still be handled: a ping that
+      // rejects AFTER the timeout won would otherwise crash the process as an
+      // unhandled rejection (Redis-outage drill found this).
       const pong = await Promise.race([
-        connection.ping(),
+        connection.ping().catch(() => undefined),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('redis ping timeout')), 2000),
         ),
