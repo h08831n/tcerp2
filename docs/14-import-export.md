@@ -1,9 +1,10 @@
 # 14 — Import/Export Engine (Phase 11, Gate G — slice 1)
 
 > Status: **LOCALLY VERIFIED** (CSV unit 5/5 + g11 integration 8/8 on `tcerp_test`; CI green on push).
-> Scope: handover §31 — the durable import engine + parties CSV export. **Deferred to
-> later slices**: XLSX reader, product/price/document entities, backup/restore drill,
-> load test, monitoring wiring.
+> Scope: handover §31 — the durable import engine + parties CSV export + DAILY_PRICE
+> import (slice 2) + a 1500-row load smoke. **Deferred**: XLSX reader (needs a library
+> decision), product/document entities, backup/restore drill (held for the FINAL review
+> stage per the owner's explicit instruction), full load test, monitoring wiring.
 
 ## 1. Engine shape (handover §31 requirements → implementation)
 
@@ -53,3 +54,20 @@ download, job list with paging, cancel.
 Verified against `tcerp_test` with direct service calls (controller decorators are the
 same guard pattern as every module). XLSX, additional entities, background-queue
 execution for huge files, backup/restore and load tests are NOT done yet.
+
+
+## 7. Slice 2 — DAILY_PRICE import + load smoke
+
+- `entityType=DAILY_PRICE` (migration `20241101130000` adds the enum value): columns
+  `variantSku` (required), `date` (YYYY-MM-DD **calendar-validated** — shape regex alone
+  accepted 2026-13-99, caught by g11-09), `price` (>0), `uomSymbol` (optional → the
+  variant's default uom).
+- Pre-run validation bulk-prefetches the company's variant SKUs + uom symbols, so
+  unknown references fail BEFORE any write (`VARIANT_NOT_FOUND` / `UOM_NOT_FOUND`);
+  run re-resolves fresh and a vanished reference is a row failure.
+- Upsert on the daily price's NATURAL unique `(company, variant, date, uom)` —
+  `updateMatched` re-imports corrected prices on the same key (g11-09 covers create,
+  duplicate, and update on one lifecycle). Created rows carry `source=IMPORTED`.
+- **Load smoke (g11-10)**: 1500-row party import (PER_ROW, batchSize 500) completes
+  100% OK in ~26s (~58 rows/s) on the dev Docker Postgres — a scale-sanity bound, not
+  a benchmark; real sizing happens on production hardware.

@@ -175,6 +175,19 @@
   entities, queue-driven execution for huge files, backup/restore drill,
   load test, monitoring wiring.
 
+- **Gate G slice 2 (DONE — pending review)**: DAILY_PRICE import
+  (migration 20241101130000 enum value): columns variantSku/date/price/uomSymbol,
+  pre-run validation with BULK-PREFETCHED company sku/uom symbol sets (unknown
+  references fail before any write) + real CALENDAR validation (the shape regex
+  accepted 2026-13-99 — g11-09 caught it); run re-resolves variant/uom fresh and
+  upserts on the daily price's NATURAL unique (company, variant, date, uom) —
+  updateMatched re-imports corrected prices; created rows carry source=IMPORTED.
+  Load smoke g11-10: 1500-row party import 100% OK in ~26s (~58 rows/s, PER_ROW,
+  batchSize 500) — scale sanity on dev hardware. Frontend: entity selector +
+  conditional mapping fields. Deferred (documented): XLSX reader (library
+  decision), product/document entities, backup/restore drill (HELD for the final
+  review stage per the owner's explicit instruction), full load test, monitoring.
+
 
 
 ## Completed

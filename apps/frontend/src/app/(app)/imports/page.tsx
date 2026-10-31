@@ -43,6 +43,7 @@ const ROW_STATUS_LABELS: Record<ImportRowDto["status"], string> = {
 
 /** CSV fields the PARTY importer understands (server whitelist order). */
 const PARTY_FIELDS = ["nameFa", "nameEn", "type", "nationalId", "economicCode", "phone", "phone2"] as const;
+const DAILY_PRICE_FIELDS = ["variantSku", "date", "price", "uomSymbol"] as const;
 
 export default function ImportsPage() {
   const [jobs, setJobs] = useState<ImportJobDto[]>([]);
@@ -55,6 +56,7 @@ export default function ImportsPage() {
 
   // create modal
   const [createOpen, setCreateOpen] = useState(false);
+  const [entityType, setEntityType] = useState<"PARTY" | "DAILY_PRICE">("PARTY");
   const [fileName, setFileName] = useState("");
   const [csv, setCsv] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
@@ -95,20 +97,22 @@ export default function ImportsPage() {
     setHeaders(firstLine.split(",").map((h) => h.replace(/^\uFEFF/, "").trim()));
     // auto-map known headers (exact match with field names)
     const auto: Record<string, string> = {};
-    for (const field of PARTY_FIELDS) {
+    for (const field of entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : PARTY_FIELDS) {
       if (headers.includes(field)) auto[field] = field;
     }
     setMapping(auto);
   };
 
   const submit = async () => {
-    if (!csv.trim() || !mapping.nameFa) return;
+    if (!csv.trim()) return;
+    if (entityType === "PARTY" && !mapping.nameFa) return;
+    if (entityType === "DAILY_PRICE" && !(mapping.variantSku && mapping.date && mapping.price)) return;
     setCreating(true);
     setError(null);
     setNotice(null);
     try {
       const job = await createImportJob({
-        entityType: "PARTY",
+        entityType,
         fileName: fileName || "import.csv",
         csv,
         columnMapping: mapping,
@@ -280,6 +284,22 @@ export default function ImportsPage() {
       <Modal open={createOpen} title="ورود جدید (CSV طرف‌حساب‌ها)" onClose={() => setCreateOpen(false)}>
         <div className="space-y-3">
           <label className="block text-xs text-slate-600">
+            نوع موجودیت
+            <select
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+              value={entityType}
+              onChange={(e) => {
+                setEntityType(e.target.value as "PARTY" | "DAILY_PRICE");
+                setMapping({});
+                setHeaders([]);
+                setCsv("");
+              }}
+            >
+              <option value="PARTY">طرف‌حساب‌ها</option>
+              <option value="DAILY_PRICE">قیمت روز (بر اساس SKU)</option>
+            </select>
+          </label>
+          <label className="block text-xs text-slate-600">
             فایل CSV
             <input
               type="file"
@@ -294,11 +314,13 @@ export default function ImportsPage() {
           {headers.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-bold text-slate-700">تطبیق ستون‌ها</p>
-              {PARTY_FIELDS.map((field) => (
+              {(entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : PARTY_FIELDS).map((field) => (
                 <div key={field} className="flex items-center gap-2 text-xs">
                   <span className="w-28 text-slate-600" dir="ltr">
                     {field}
-                    {field === "nameFa" && <span className="text-rose-600"> *</span>}
+                    {(field === "nameFa" || field === "variantSku" || field === "date" || field === "price") && (
+                      <span className="text-rose-600"> *</span>
+                    )}
                   </span>
                   <select
                     className="flex-1 rounded-md border border-slate-300 px-2 py-1"
@@ -333,7 +355,15 @@ export default function ImportsPage() {
             <Button variant="secondary" size="sm" onClick={() => setCreateOpen(false)}>
               انصراف
             </Button>
-            <Button size="sm" disabled={creating || !csv.trim() || !mapping.nameFa} onClick={() => void submit()}>
+            <Button
+              size="sm"
+              disabled={
+                creating ||
+                !csv.trim() ||
+                (entityType === "PARTY" ? !mapping.nameFa : !(mapping.variantSku && mapping.date && mapping.price))
+              }
+              onClick={() => void submit()}
+            >
               {creating ? "…" : "اعتبارسنجی و ثبت Job"}
             </Button>
           </div>

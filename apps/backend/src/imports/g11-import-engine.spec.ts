@@ -29,12 +29,15 @@ function csvOf(rows: string[][]): string {
  * company-scoped export.
  */
 describeIntegration('g11 import engine (Phase 11)', () => {
+  const marker = `g11-${Date.now()}`;
   let prismaService: PrismaService;
   let prisma: PrismaClient;
   let service: ImportsService;
   const jobIds: string[] = [];
   const partyIds: string[] = [];
   const companyIds: string[] = [];
+  const dailyPriceIds: string[] = [];
+  const variantIds: string[] = [];
 
   const cleanup = async () => {
     for (const jobId of jobIds) {
@@ -42,6 +45,8 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       await prisma.importJob.delete({ where: { id: jobId } }).catch(() => undefined);
     }
     await prisma.party.deleteMany({ where: { id: { in: partyIds } } }).catch(() => undefined);
+    await prisma.dailyPrice.deleteMany({ where: { id: { in: dailyPriceIds } } }).catch(() => undefined);
+    await prisma.productVariant.deleteMany({ where: { id: { in: variantIds } } }).catch(() => undefined);
     await prisma.company.deleteMany({ where: { id: { in: companyIds } } }).catch(() => undefined);
   };
 
@@ -327,5 +332,131 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       select: { permissions: { select: { permissionId: true } } },
     });
     expect(salesperson.permissions.some((p) => p.permissionId === permission.id)).toBe(false);
+  });
+
+  it('g11-09 DAILY_PRICE import: pre-validated references, natural-key upsert both ways', async () => {
+    const { seededUoms, createVariantEx } = await import('../integrity-gate/g6-helpers');
+    const uoms = await seededUoms(prisma);
+    const variant = await createVariantEx(prisma, `${marker}-price`, {
+      defaultUomId: uoms.tonId,
+      inventoryUomId: uoms.tonId,
+    });
+    variantIds.push(variant.variantId);
+    const variantSku = (await prisma.productVariant.findUniqueOrThrow({
+      where: { id: variant.variantId },
+      select: { sku: true },
+    })).sku;
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+
+    // validation: unknown sku / bad date / bad price / bad uom caught BEFORE run
+    const badCsv = csvOf([
+      ['variantSku', 'date', 'price', 'uomSymbol'],
+      ['GHOST-SKU', today, '35000', ''],
+      [variantSku, '2026-13-99', '35000', ''],
+      [variantSku, today, '-5', ''],
+      [variantSku, today, '35000', 'GHOST-UOM'],
+    ]);
+    const badJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'DAILY_PRICE', fileName: 'g11-price-bad.csv', csv: badCsv,
+        columnMapping: { variantSku: 'variantSku', date: 'date', price: 'price', uomSymbol: 'uomSymbol' },
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(badJob.id);
+    expect(badJob.failedCount).toBe(4);
+    const badRows = await service.jobRows(INTEGRATION_COMPANY_ID, badJob.id, true);
+    const badErrors = badRows.map((r) => r.error);
+    expect(badErrors).toContain('VARIANT_NOT_FOUND');
+    expect(badErrors).toContain('INVALID_DATE');
+    expect(badErrors).toContain('INVALID_PRICE');
+    expect(badErrors).toContain('UOM_NOT_FOUND');
+
+    // lifecycle: create + same-natural-key duplicate (updateMatched=false)
+    const csv = csvOf([
+      ['variantSku', 'date', 'price', 'uomSymbol'],
+      [variantSku, today, '35000', ''],
+      [variantSku, yesterday, '34000', ''],
+      [variantSku, yesterday, '34500', ''],
+    ]);
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'DAILY_PRICE', fileName: 'g11-price.csv', csv,
+        columnMapping: { variantSku: 'variantSku', date: 'date', price: 'price', uomSymbol: 'uomSymbol' },
+        updateMatched: false,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    const firstRun = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    expect(firstRun.status).toBe('PARTIALLY_FAILED');
+    expect(firstRun.okCount).toBe(2);
+    expect(firstRun.duplicateCount).toBe(1);
+    const created = await prisma.dailyPrice.findFirstOrThrow({
+      where: {
+        companyId: INTEGRATION_COMPANY_ID,
+        productVariantId: variant.variantId,
+        date: new Date(`${yesterday}T00:00:00Z`),
+      },
+      select: { id: true, price: true, source: true },
+    });
+    dailyPriceIds.push(created.id);
+    expect(created.price.toString()).toBe('34000');
+    expect(created.source).toBe('IMPORTED');
+
+    // updateMatched re-import updates the price on the SAME natural key
+    const updCsv = csvOf([
+      ['variantSku', 'date', 'price'],
+      [variantSku, yesterday, '35500'],
+    ]);
+    const updJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'DAILY_PRICE', fileName: 'g11-price-upd.csv', csv: updCsv,
+        columnMapping: { variantSku: 'variantSku', date: 'date', price: 'price' },
+        updateMatched: true,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(updJob.id);
+    const updRun = await service.run(INTEGRATION_COMPANY_ID, updJob.id, ACTOR, ctx);
+    expect(updRun.updatedCount).toBe(1);
+    const updated = await prisma.dailyPrice.findUniqueOrThrow({ where: { id: created.id }, select: { price: true } });
+    expect(updated.price.toString()).toBe('35500');
+  });
+
+  it('g11-10 load smoke: 1500-row party import completes with 100% OK (scale sanity)', async () => {
+    const stamp = `${Date.now()}`.slice(-7);
+    const base = 1_000_000 + (Number(stamp) % 1_000_000);
+    const rows: string[][] = [['nameFa', 'phone']];
+    for (let i = 0; i < 1500; i += 1) {
+      rows.push([`g11-load-${stamp}-${i}`, `0915${String(base + i).padStart(7, '0')}`]);
+    }
+    const started = Date.now();
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PARTY', fileName: `g11-load-${stamp}.csv`, csv: csvOf(rows),
+        columnMapping: { nameFa: 'nameFa', phone: 'phone' },
+        commitMode: 'PER_ROW', batchSize: 500,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    const seconds = (Date.now() - started) / 1000;
+    expect(finished.okCount).toBe(1500);
+    expect(finished.failedCount).toBe(0);
+    expect(finished.status).toBe('COMPLETED');
+    // scale sanity (NOT a benchmark): 1500 rows inside a bounded window
+    expect(seconds).toBeLessThan(120);
+    // eslint-disable-next-line no-console
+    console.log(`[g11-10] load smoke: 1500 rows in ${seconds.toFixed(1)}s (${(1500 / seconds).toFixed(0)} rows/s)`);
+    await prisma.party
+      .deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: `g11-load-${stamp}` } } })
+      .catch(() => undefined);
   });
 });

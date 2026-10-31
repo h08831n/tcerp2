@@ -52,8 +52,11 @@ export class ImportsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
-    if (dto.entityType !== 'PARTY') {
+    if (dto.entityType !== 'PARTY' && dto.entityType !== 'DAILY_PRICE') {
       throw new ValidationError('IMPORT_ENTITY_TYPE_UNSUPPORTED', { entityType: dto.entityType });
+    }
+    if (dto.entityType === 'DAILY_PRICE') {
+      return this.createDailyPriceJob(companyId, dto, actor, ctx);
     }
     const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
     const batchSize = Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000);
@@ -216,6 +219,7 @@ export class ImportsService {
     const options = (job.options ?? {}) as { updateMatched?: boolean };
     const updateMatched = options.updateMatched === true;
     const chunkSize = Math.max(job.batchSize, 1);
+    const isDailyPrice = job.entityType === 'DAILY_PRICE';
 
     // Process until no PENDING rows remain (batch after durable batch).
     for (;;) {
@@ -236,7 +240,9 @@ export class ImportsService {
           const outcome = await this.prisma.$transaction(async (tx) => {
             let o = { ok: 0, updated: 0, duplicates: 0 };
             for (const row of batch) {
-              o = await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
+              o = isDailyPrice
+                ? await this.processDailyPriceRow(tx, companyId, row.payload as Record<string, string>, updateMatched, o)
+                : await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
             }
             return o;
           });
@@ -261,11 +267,17 @@ export class ImportsService {
         for (const row of batch) {
           try {
             const outcome = await this.prisma.$transaction(async (tx) =>
-              this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
-                ok: 0,
-                updated: 0,
-                duplicates: 0,
-              }),
+              isDailyPrice
+                ? this.processDailyPriceRow(tx, companyId, row.payload as Record<string, string>, updateMatched, {
+                    ok: 0,
+                    updated: 0,
+                    duplicates: 0,
+                  })
+                : this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
+                    ok: 0,
+                    updated: 0,
+                    duplicates: 0,
+                  }),
             );
             await this.prisma.importJobRow.update({
               where: { id: row.id },
@@ -392,6 +404,205 @@ export class ImportsService {
         ...(payload.nationalId ? { nationalId: payload.nationalId } : {}),
         ...(payload.economicCode ? { economicCode: payload.economicCode } : {}),
         phones: { create: phoneCreates },
+      },
+    });
+    return { ...counters, ok: counters.ok + 1 };
+  }
+
+  // ───────────────────── DAILY_PRICE import (slice 2) ─────────────────────
+
+  /** Fields: variantSku (required), date (YYYY-MM-DD, required), price (>0), uomSymbol (optional → variant default). */
+  private async createDailyPriceJob(
+    companyId: string,
+    dto: CreateImportJobDto,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
+    const { parseCsv } = await import('../common/utils/csv');
+    const grid = parseCsv(dto.csv);
+    if (grid.length < 2) {
+      throw new ValidationError('IMPORT_CSV_NEEDS_HEADER_AND_ROW');
+    }
+    const headers = grid[0].map(normalizeHeader);
+    const mapping = dto.columnMapping ?? {};
+    const headerIndex = new Map<string, number>();
+    headers.forEach((h, i) => {
+      if (!headerIndex.has(h)) headerIndex.set(h, i);
+    });
+    const PRICE_FIELDS = ['variantSku', 'date', 'price', 'uomSymbol'] as const;
+    const fieldToIndex = new Map<(typeof PRICE_FIELDS)[number], number>();
+    for (const [field, header] of Object.entries(mapping)) {
+      if (!(PRICE_FIELDS as readonly string[]).includes(field as (typeof PRICE_FIELDS)[number])) {
+        throw new ValidationError('IMPORT_UNKNOWN_FIELD', { field });
+      }
+      const idx = headerIndex.get(normalizeHeader(header));
+      if (idx === undefined) {
+        throw new ValidationError('IMPORT_MAPPING_HEADER_NOT_FOUND', { field, header });
+      }
+      fieldToIndex.set(field as (typeof PRICE_FIELDS)[number], idx);
+    }
+    for (const required of ['variantSku', 'date', 'price'] as const) {
+      if (!fieldToIndex.has(required)) {
+        throw new ValidationError('IMPORT_PRICE_MAPPING_REQUIRED', { field: required });
+      }
+    }
+
+    // Bulk prefetch: variant SKUs + uom symbols of THIS company — pre-run
+    // validation catches unknown references before any write (handover §31).
+    const [variants, uoms] = await Promise.all([
+      this.prisma.productVariant.findMany({
+        where: { companyId },
+        select: { sku: true, defaultUomId: true, defaultUom: { select: { symbol: true } } },
+      }),
+      this.prisma.uom.findMany({ where: { companyId }, select: { symbol: true } }),
+    ]);
+    const skuBy = new Map(variants.map((v) => [v.sku, v]));
+    const symbolBy = new Set(uoms.map((u) => u.symbol));
+
+    const dataRows = grid.slice(1);
+    if (dataRows.length > 20_000) {
+      throw new ValidationError('IMPORT_TOO_MANY_ROWS', { max: 20_000 });
+    }
+    const rowPayloads = dataRows.map((cells) => {
+      const get = (field: (typeof PRICE_FIELDS)[number]): string => {
+        const idx = fieldToIndex.get(field);
+        return idx === undefined ? '' : String(cells[idx] ?? '').trim();
+      };
+      const payload: Record<string, string> = {};
+      for (const field of PRICE_FIELDS) {
+        const value = get(field);
+        if (value) payload[field] = value;
+      }
+      if (!payload.variantSku) return { payload, error: 'VARIANT_SKU_REQUIRED' };
+      if (!skuBy.has(payload.variantSku)) return { payload, error: 'VARIANT_NOT_FOUND' };
+      if (!payload.date || !/^\d{4}-\d{2}-\d{2}$/.test(payload.date)) {
+        return { payload, error: 'INVALID_DATE' };
+      }
+      // shape ≠ calendar: 2026-13-99 passes the regex but is not a real day
+      const parsedDate = new Date(`${payload.date}T00:00:00Z`);
+      if (
+        Number.isNaN(parsedDate.getTime()) ||
+        parsedDate.toISOString().slice(0, 10) !== payload.date
+      ) {
+        return { payload, error: 'INVALID_DATE' };
+      }
+      const price = Number(payload.price);
+      if (!payload.price || !Number.isFinite(price) || price <= 0) {
+        return { payload, error: 'INVALID_PRICE' };
+      }
+      if (payload.uomSymbol && !symbolBy.has(payload.uomSymbol)) {
+        return { payload, error: 'UOM_NOT_FOUND' };
+      }
+      if (!payload.uomSymbol && !skuBy.get(payload.variantSku)?.defaultUomId) {
+        return { payload, error: 'UOM_REQUIRED' };
+      }
+      return { payload, error: null };
+    });
+    const failedCount = rowPayloads.filter((r) => r.error).length;
+    const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
+
+    const job = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.importJob.create({
+        data: {
+          companyId,
+          entityType: 'DAILY_PRICE',
+          fileName: dto.fileName?.slice(0, 200) || 'prices.csv',
+          status: ImportJobStatus.VALIDATED,
+          totalRows: dataRows.length,
+          failedCount,
+          commitMode,
+          batchSize: Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000),
+          options: { updateMatched: dto.updateMatched === true } as Prisma.InputJsonValue,
+          columnMapping: dto.columnMapping as Prisma.InputJsonValue,
+          createdById: actor.id,
+        },
+      });
+      for (let i = 0; i < rowPayloads.length; i += 500) {
+        await tx.importJobRow.createMany({
+          data: rowPayloads.slice(i, i + 500).map((row, offset) => ({
+            jobId: created.id,
+            rowIndex: i + offset,
+            status: row.error ? ImportRowStatus.FAILED : ImportRowStatus.PENDING,
+            payload: row.payload as Prisma.InputJsonValue,
+            error: row.error,
+          })),
+        });
+      }
+      await this.auditService.recordTx(tx, {
+        entityType: 'import_job',
+        entityId: created.id,
+        action: AuditAction.CREATE,
+        companyId,
+        actor,
+        newValues: {
+          entityType: 'DAILY_PRICE',
+          totalRows: dataRows.length,
+          failedCount,
+          updateMatched: dto.updateMatched === true,
+        },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return created;
+    });
+    return this.getJob(companyId, job.id);
+  }
+
+  /**
+   * Upsert on the daily price's NATURAL unique (company, variant, date, uom).
+   * uomSymbol absent → the variant's default uom; the row FAILED at run if
+   * the variant/uom vanished between validation and run (re-resolved fresh).
+   */
+  private async processDailyPriceRow(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    payload: Record<string, string>,
+    updateMatched: boolean,
+    counters: { ok: number; updated: number; duplicates: number },
+  ): Promise<{ ok: number; updated: number; duplicates: number }> {
+    const variant = await tx.productVariant.findFirst({
+      where: { companyId, sku: payload.variantSku },
+      select: { id: true, defaultUomId: true, defaultUom: { select: { symbol: true } } },
+    });
+    if (!variant) throw new NotFoundError('VARIANT_NOT_FOUND', { sku: payload.variantSku });
+    let uomId = variant.defaultUomId;
+    if (payload.uomSymbol) {
+      if (variant.defaultUom?.symbol === payload.uomSymbol) {
+        uomId = (await tx.uom.findFirstOrThrow({
+          where: { companyId, symbol: payload.uomSymbol },
+          select: { id: true },
+        })).id;
+      } else {
+        const uom = await tx.uom.findFirst({
+          where: { companyId, symbol: payload.uomSymbol },
+          select: { id: true },
+        });
+        if (!uom) throw new NotFoundError('UOM_NOT_FOUND', { symbol: payload.uomSymbol });
+        uomId = uom.id;
+      }
+    }
+    if (!uomId) throw new ValidationError('UOM_REQUIRED');
+    const date = new Date(`${payload.date}T00:00:00Z`);
+    const price = new Prisma.Decimal(payload.price);
+
+    const existing = await tx.dailyPrice.findFirst({
+      where: { companyId, productVariantId: variant.id, date, uomId },
+      select: { id: true },
+    });
+    if (existing) {
+      if (!updateMatched) return { ...counters, duplicates: counters.duplicates + 1 };
+      await tx.dailyPrice.update({ where: { id: existing.id }, data: { price } });
+      return { ...counters, ok: counters.ok + 1, updated: counters.updated + 1 };
+    }
+    await tx.dailyPrice.create({
+      data: {
+        companyId,
+        productVariantId: variant.id,
+        date,
+        price,
+        uomId,
+        source: 'IMPORTED',
+        notes: 'import',
       },
     });
     return { ...counters, ok: counters.ok + 1 };

@@ -13,8 +13,8 @@ import {
 import { PaginationDto } from '../common/dto/pagination.dto';
 
 export class CreateImportJobDto {
-  @IsIn(['PARTY'])
-  entityType!: 'PARTY';
+  @IsIn(['PARTY', 'DAILY_PRICE'])
+  entityType!: 'PARTY' | 'DAILY_PRICE';
 
   @IsOptional()
   @IsString()

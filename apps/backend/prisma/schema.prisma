@@ -3207,6 +3207,7 @@ model Check {
 
 enum ImportEntityType {
   PARTY
+  DAILY_PRICE
 }
 
 enum ImportJobStatus {
