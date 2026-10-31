@@ -200,6 +200,18 @@
   Deferred: product/document import entities, full load test, external monitoring
   wiring; backup/restore drill HELD for final review (owner instruction).
 
+- **Gate G slice 4 (DONE — pending review)**: PRODUCT_VARIANT import
+  (migration 20241101140000 enum value): variants imported INTO an existing template
+  by internalCode (company-unique); columns templateCode/sku/nameFa required +
+  nameEn + default/inventory uom symbols + weightPerUnit/weightUomSymbol pair;
+  combinationKey = sku for simple imports (DB (template, combination) invariant
+  intact; 3B attribute machinery untouched); natural key = company-unique sku with
+  updateMatched upsert both ways (g11-13 covers creation with uom+weight, duplicate,
+  update); prefetch validation TEMPLATE_NOT_FOUND/SKU_REQUIRED/NAME_FA_REQUIRED/
+  WEIGHT_UOM_REQUIRED/UOM_NOT_FOUND; XLSX works for this entity too (all creators
+  share resolveGrid). Deferred: document import, full load test, external
+  monitoring; backup/restore drill HELD for final review (owner instruction).
+
 
 
 ## Completed

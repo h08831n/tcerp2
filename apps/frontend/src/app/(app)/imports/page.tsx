@@ -44,6 +44,7 @@ const ROW_STATUS_LABELS: Record<ImportRowDto["status"], string> = {
 /** CSV fields the PARTY importer understands (server whitelist order). */
 const PARTY_FIELDS = ["nameFa", "nameEn", "type", "nationalId", "economicCode", "phone", "phone2"] as const;
 const DAILY_PRICE_FIELDS = ["variantSku", "date", "price", "uomSymbol"] as const;
+const VARIANT_FIELDS = ["templateCode", "sku", "nameFa", "nameEn", "defaultUomSymbol", "inventoryUomSymbol", "weightPerUnit", "weightUomSymbol"] as const;
 
 export default function ImportsPage() {
   const [jobs, setJobs] = useState<ImportJobDto[]>([]);
@@ -56,7 +57,7 @@ export default function ImportsPage() {
 
   // create modal
   const [createOpen, setCreateOpen] = useState(false);
-  const [entityType, setEntityType] = useState<"PARTY" | "DAILY_PRICE">("PARTY");
+  const [entityType, setEntityType] = useState<"PARTY" | "DAILY_PRICE" | "PRODUCT_VARIANT">("PARTY");
   const [fileName, setFileName] = useState("");
   const [csv, setCsv] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
@@ -98,7 +99,7 @@ export default function ImportsPage() {
     setHeaders(firstLine.split(",").map((h) => h.replace(/^\uFEFF/, "").trim()));
     // auto-map known headers (exact match with field names)
     const auto: Record<string, string> = {};
-    for (const field of entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : PARTY_FIELDS) {
+    for (const field of entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : entityType === "PRODUCT_VARIANT" ? VARIANT_FIELDS : PARTY_FIELDS) {
       if (headers.includes(field)) auto[field] = field;
     }
     setMapping(auto);
@@ -108,6 +109,7 @@ export default function ImportsPage() {
     if (!csv.trim()) return;
     if (entityType === "PARTY" && !mapping.nameFa) return;
     if (entityType === "DAILY_PRICE" && !(mapping.variantSku && mapping.date && mapping.price)) return;
+    if (entityType === "PRODUCT_VARIANT" && !(mapping.templateCode && mapping.sku && mapping.nameFa)) return;
     setCreating(true);
     setError(null);
     setNotice(null);
@@ -291,7 +293,7 @@ export default function ImportsPage() {
               className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
               value={entityType}
               onChange={(e) => {
-                setEntityType(e.target.value as "PARTY" | "DAILY_PRICE");
+                setEntityType(e.target.value as "PARTY" | "DAILY_PRICE" | "PRODUCT_VARIANT");
                 setMapping({});
                 setHeaders([]);
                 setCsv("");
@@ -299,6 +301,7 @@ export default function ImportsPage() {
             >
               <option value="PARTY">طرف‌حساب‌ها</option>
               <option value="DAILY_PRICE">قیمت روز (بر اساس SKU)</option>
+              <option value="PRODUCT_VARIANT">واریانت محصول (به قالب موجود)</option>
             </select>
           </label>
           <label className="block text-xs text-slate-600">
@@ -318,11 +321,11 @@ export default function ImportsPage() {
               <p className="text-xs font-bold text-slate-700">
                 تطبیق ستون‌ها {xlsxBase64 && <span className="text-slate-400">(ستون‌های فایل اکسل را دستی انتخاب کنید)</span>}
               </p>
-              {(entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : PARTY_FIELDS).map((field) => (
+              {(entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : entityType === "PRODUCT_VARIANT" ? VARIANT_FIELDS : PARTY_FIELDS).map((field) => (
                 <div key={field} className="flex items-center gap-2 text-xs">
                   <span className="w-28 text-slate-600" dir="ltr">
                     {field}
-                    {(field === "nameFa" || field === "variantSku" || field === "date" || field === "price") && (
+                    {(field === "nameFa" || field === "variantSku" || field === "date" || field === "price" || field === "templateCode" || field === "sku") && (
                       <span className="text-rose-600"> *</span>
                     )}
                   </span>
@@ -336,7 +339,9 @@ export default function ImportsPage() {
                       ? headers
                       : entityType === "DAILY_PRICE"
                         ? DAILY_PRICE_FIELDS
-                        : PARTY_FIELDS
+                        : entityType === "PRODUCT_VARIANT"
+                          ? VARIANT_FIELDS
+                          : PARTY_FIELDS
                     ).map((h) => (
                       <option key={h} value={h}>
                         {h}
@@ -369,7 +374,11 @@ export default function ImportsPage() {
               disabled={
                 creating ||
                 (!csv.trim() && !xlsxBase64) ||
-                (entityType === "PARTY" ? !mapping.nameFa : !(mapping.variantSku && mapping.date && mapping.price))
+                (entityType === "PARTY"
+                  ? !mapping.nameFa
+                  : entityType === "DAILY_PRICE"
+                    ? !(mapping.variantSku && mapping.date && mapping.price)
+                    : !(mapping.templateCode && mapping.sku && mapping.nameFa))
               }
               onClick={() => void submit()}
             >

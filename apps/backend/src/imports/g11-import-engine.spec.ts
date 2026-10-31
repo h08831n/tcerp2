@@ -38,6 +38,10 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   const companyIds: string[] = [];
   const dailyPriceIds: string[] = [];
   const variantIds: string[] = [];
+  const templateIds: string[] = [];
+  const categoryIds: string[] = [];
+  const uomCategoryIds: string[] = [];
+  const uomIds: string[] = [];
 
   const cleanup = async () => {
     for (const jobId of jobIds) {
@@ -47,6 +51,10 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     await prisma.party.deleteMany({ where: { id: { in: partyIds } } }).catch(() => undefined);
     await prisma.dailyPrice.deleteMany({ where: { id: { in: dailyPriceIds } } }).catch(() => undefined);
     await prisma.productVariant.deleteMany({ where: { id: { in: variantIds } } }).catch(() => undefined);
+    await prisma.productTemplate.deleteMany({ where: { id: { in: templateIds } } }).catch(() => undefined);
+    await prisma.productCategory.deleteMany({ where: { id: { in: categoryIds } } }).catch(() => undefined);
+    await prisma.uom.deleteMany({ where: { id: { in: uomIds } } }).catch(() => undefined);
+    await prisma.uomCategory.deleteMany({ where: { id: { in: uomCategoryIds } } }).catch(() => undefined);
     await prisma.company.deleteMany({ where: { id: { in: companyIds } } }).catch(() => undefined);
   };
 
@@ -533,5 +541,134 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     expect(payload.database).toBe('up');
     expect(payload.queue).not.toBeNull();
     expect(typeof payload.queue!.pending).toBe('number');
+  });
+
+  it('g11-13 PRODUCT_VARIANT import: template-scoped creation + sku upsert both ways', async () => {
+    // minimal template fixture (category + template with internalCode + uom)
+    const uomCategory = await prisma.uomCategory.create({
+      data: { companyId: INTEGRATION_COMPANY_ID, code: `G11VC-${Date.now()}`, nameFa: 'واحد گ۱۱' },
+    });
+    uomCategoryIds.push(uomCategory.id);
+    const uom = await prisma.uom.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        categoryId: uomCategory.id,
+        symbol: `T${Date.now() % 100000}`,
+        nameFa: 'تن گ۱۱',
+        conversionRatio: new Prisma.Decimal(1),
+        isBaseUnit: true,
+      },
+    });
+    uomIds.push(uom.id);
+    const category = await prisma.productCategory.create({
+      data: { companyId: INTEGRATION_COMPANY_ID, code: `G11CAT-${Date.now()}`, nameFa: 'دسته گ۱۱' },
+    });
+    categoryIds.push(category.id);
+    const templateCode = `G11TPL-${Date.now()}`;
+    const template = await prisma.productTemplate.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        categoryId: category.id,
+        internalCode: templateCode,
+        nameFa: 'قالب گ۱۱',
+        defaultSalesUomId: uom.id,
+      },
+    });
+    templateIds.push(template.id);
+
+    // validation: unknown template / missing sku / missing nameFa caught pre-run
+    const badCsv = csvOf([
+      ['templateCode', 'sku', 'nameFa'],
+      ['GHOST-TPL', 'SKU-A', 'نام'],
+      [templateCode, '', 'نام'],
+      [templateCode, 'SKU-B', ''],
+    ]);
+    const badJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PRODUCT_VARIANT', fileName: 'g11-var-bad.csv', csv: badCsv,
+        columnMapping: { templateCode: 'templateCode', sku: 'sku', nameFa: 'nameFa' },
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(badJob.id);
+    expect(badJob.failedCount).toBe(3);
+    const badErrors = (await service.jobRows(INTEGRATION_COMPANY_ID, badJob.id, true)).map((r) => r.error);
+    expect(badErrors).toContain('TEMPLATE_NOT_FOUND');
+    expect(badErrors).toContain('SKU_REQUIRED');
+    expect(badErrors).toContain('NAME_FA_REQUIRED');
+
+    // lifecycle: create 2 variants (one with uom + weight), then re-import one
+    // sku with updateMatched=false → DUPLICATE; with true → updated
+    const csv = csvOf([
+      ['templateCode', 'sku', 'nameFa', 'defaultUomSymbol', 'weightPerUnit', 'weightUomSymbol'],
+      [templateCode, `G11V-${Date.now()}-A`, 'میلگرد ۱۴ گ۱۱', uom.symbol, '18.7', uom.symbol],
+      [templateCode, `G11V-${Date.now()}-B`, 'میلگرد ۱۶ گ۱۱', '', '', ''],
+    ]);
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PRODUCT_VARIANT', fileName: 'g11-variants.csv', csv,
+        columnMapping: {
+          templateCode: 'templateCode', sku: 'sku', nameFa: 'nameFa',
+          defaultUomSymbol: 'defaultUomSymbol', weightPerUnit: 'weightPerUnit', weightUomSymbol: 'weightUomSymbol',
+        },
+        updateMatched: false,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    const firstRun = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    expect(firstRun.status).toBe('COMPLETED');
+    expect(firstRun.okCount).toBe(2);
+    const created = await prisma.productVariant.findFirstOrThrow({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: 'میلگرد ۱۴ گ۱۱' },
+      select: { id: true, sku: true, combinationKey: true, templateId: true, weightPerUnit: true, defaultUomId: true },
+    });
+    variantIds.push(created.id);
+    expect(created.combinationKey).toBe(created.sku); // simple-import stand-in key
+    expect(created.templateId).toBe(template.id);
+    expect(created.weightPerUnit?.toString()).toBe('18.7');
+    expect(created.defaultUomId).toBe(uom.id);
+
+    // updateMatched=false on the same sku → DUPLICATE (no second variant)
+    const dupCsv = csvOf([
+      ['templateCode', 'sku', 'nameFa'],
+      [templateCode, created.sku, 'نام تغییر'],
+    ]);
+    const dupJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PRODUCT_VARIANT', fileName: 'g11-var-dup.csv', csv: dupCsv,
+        columnMapping: { templateCode: 'templateCode', sku: 'sku', nameFa: 'nameFa' },
+        updateMatched: false,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(dupJob.id);
+    const dupRun = await service.run(INTEGRATION_COMPANY_ID, dupJob.id, ACTOR, ctx);
+    expect(dupRun.duplicateCount).toBe(1);
+    const stillSame = await prisma.productVariant.findUniqueOrThrow({
+      where: { id: created.id }, select: { nameFa: true },
+    });
+    expect(stillSame.nameFa).toBe('میلگرد ۱۴ گ۱۱');
+
+    // updateMatched=true → name updated
+    const updJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PRODUCT_VARIANT', fileName: 'g11-var-upd.csv', csv: dupCsv,
+        columnMapping: { templateCode: 'templateCode', sku: 'sku', nameFa: 'nameFa' },
+        updateMatched: true,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(updJob.id);
+    const updRun = await service.run(INTEGRATION_COMPANY_ID, updJob.id, ACTOR, ctx);
+    expect(updRun.updatedCount).toBe(1);
+    const updated = await prisma.productVariant.findUniqueOrThrow({
+      where: { id: created.id }, select: { nameFa: true },
+    });
+    expect(updated.nameFa).toBe('نام تغییر');
   });
 });

@@ -3,7 +3,7 @@ import type { PaginatedResponse } from "@/lib/product";
 
 export interface ImportJobDto {
   id: string;
-  entityType: "PARTY" | "DAILY_PRICE";
+  entityType: "PARTY" | "DAILY_PRICE" | "PRODUCT_VARIANT";
   fileName: string;
   status: "VALIDATED" | "RUNNING" | "COMPLETED" | "PARTIALLY_FAILED" | "FAILED" | "CANCELLED";
   totalRows: number;
@@ -28,7 +28,7 @@ export interface ImportRowDto {
 }
 
 export function createImportJob(body: {
-  entityType: "PARTY" | "DAILY_PRICE";
+  entityType: "PARTY" | "DAILY_PRICE" | "PRODUCT_VARIANT";
   fileName?: string;
   csv?: string;
   xlsxBase64?: string;

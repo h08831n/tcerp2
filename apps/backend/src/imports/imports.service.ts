@@ -91,11 +91,18 @@ export class ImportsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
-    if (dto.entityType !== 'PARTY' && dto.entityType !== 'DAILY_PRICE') {
+    if (
+      dto.entityType !== 'PARTY' &&
+      dto.entityType !== 'DAILY_PRICE' &&
+      dto.entityType !== 'PRODUCT_VARIANT'
+    ) {
       throw new ValidationError('IMPORT_ENTITY_TYPE_UNSUPPORTED', { entityType: dto.entityType });
     }
     if (dto.entityType === 'DAILY_PRICE') {
       return this.createDailyPriceJob(companyId, dto, actor, ctx);
+    }
+    if (dto.entityType === 'PRODUCT_VARIANT') {
+      return this.createVariantJob(companyId, dto, actor, ctx);
     }
     const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
     const batchSize = Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000);
@@ -258,6 +265,7 @@ export class ImportsService {
     const updateMatched = options.updateMatched === true;
     const chunkSize = Math.max(job.batchSize, 1);
     const isDailyPrice = job.entityType === 'DAILY_PRICE';
+    const isVariant = job.entityType === 'PRODUCT_VARIANT';
 
     // Process until no PENDING rows remain (batch after durable batch).
     for (;;) {
@@ -280,7 +288,9 @@ export class ImportsService {
             for (const row of batch) {
               o = isDailyPrice
                 ? await this.processDailyPriceRow(tx, companyId, row.payload as Record<string, string>, updateMatched, o)
-                : await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
+                : isVariant
+                  ? await this.processVariantRow(tx, companyId, row.payload as Record<string, string>, updateMatched, o)
+                  : await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
             }
             return o;
           });
@@ -311,11 +321,17 @@ export class ImportsService {
                     updated: 0,
                     duplicates: 0,
                   })
-                : this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
-                    ok: 0,
-                    updated: 0,
-                    duplicates: 0,
-                  }),
+                : isVariant
+                  ? this.processVariantRow(tx, companyId, row.payload as Record<string, string>, updateMatched, {
+                      ok: 0,
+                      updated: 0,
+                      duplicates: 0,
+                    })
+                  : this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
+                      ok: 0,
+                      updated: 0,
+                      duplicates: 0,
+                    }),
             );
             await this.prisma.importJobRow.update({
               where: { id: row.id },
@@ -645,7 +661,231 @@ export class ImportsService {
     return { ...counters, ok: counters.ok + 1 };
   }
 
+  // ───────────────────── PRODUCT_VARIANT import (slice 4) ─────────────────────
+
+  /**
+   * Variants are imported INTO an EXISTING template identified by
+   * `internalCode` (company-unique). Columns: templateCode (required), sku
+   * (required, company-unique natural key), nameFa (required), nameEn,
+   * defaultUomSymbol / inventoryUomSymbol (optional → resolved per company),
+   * weightPerUnit + weightUomSymbol (optional pair). Simple imports carry NO
+   * attribute combination — combinationKey is the sku itself (unique per
+   * template), which keeps the DB's (template, combination) invariant intact;
+   * attribute-driven variants keep using the 3B generation machinery.
+   */
+  private async createVariantJob(
+    companyId: string,
+    dto: CreateImportJobDto,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
+    const grid = await this.resolveGrid(dto);
+    if (grid.length < 2) {
+      throw new ValidationError('IMPORT_CSV_NEEDS_HEADER_AND_ROW');
+    }
+    const headers = grid[0].map(normalizeHeader);
+    const mapping = dto.columnMapping ?? {};
+    const headerIndex = new Map<string, number>();
+    headers.forEach((h, i) => {
+      if (!headerIndex.has(h)) headerIndex.set(h, i);
+    });
+    const VARIANT_FIELDS = [
+      'templateCode',
+      'sku',
+      'nameFa',
+      'nameEn',
+      'defaultUomSymbol',
+      'inventoryUomSymbol',
+      'weightPerUnit',
+      'weightUomSymbol',
+    ] as const;
+    const fieldToIndex = new Map<(typeof VARIANT_FIELDS)[number], number>();
+    for (const [field, header] of Object.entries(mapping)) {
+      if (!(VARIANT_FIELDS as readonly string[]).includes(field as (typeof VARIANT_FIELDS)[number])) {
+        throw new ValidationError('IMPORT_UNKNOWN_FIELD', { field });
+      }
+      const idx = headerIndex.get(normalizeHeader(header));
+      if (idx === undefined) {
+        throw new ValidationError('IMPORT_MAPPING_HEADER_NOT_FOUND', { field, header });
+      }
+      fieldToIndex.set(field as (typeof VARIANT_FIELDS)[number], idx);
+    }
+    for (const required of ['templateCode', 'sku', 'nameFa'] as const) {
+      if (!fieldToIndex.has(required)) {
+        throw new ValidationError('IMPORT_VARIANT_MAPPING_REQUIRED', { field: required });
+      }
+    }
+
+    // Prefetch: template internalCodes + uom symbols of THIS company.
+    const [templates, uoms] = await Promise.all([
+      this.prisma.productTemplate.findMany({
+        where: { companyId },
+        select: { internalCode: true },
+      }),
+      this.prisma.uom.findMany({ where: { companyId }, select: { symbol: true } }),
+    ]);
+    const templateBy = new Set(
+      templates.map((t) => t.internalCode).filter((c): c is string => Boolean(c)),
+    );
+    const symbolBy = new Set(uoms.map((u) => u.symbol));
+
+    const dataRows = grid.slice(1);
+    if (dataRows.length > 20_000) {
+      throw new ValidationError('IMPORT_TOO_MANY_ROWS', { max: 20_000 });
+    }
+    const rowPayloads = dataRows.map((cells) => {
+      const get = (field: (typeof VARIANT_FIELDS)[number]): string => {
+        const idx = fieldToIndex.get(field);
+        return idx === undefined ? '' : String(cells[idx] ?? '').trim();
+      };
+      const payload: Record<string, string> = {};
+      for (const field of VARIANT_FIELDS) {
+        const value = get(field);
+        if (value) payload[field] = value;
+      }
+      if (!payload.templateCode) return { payload, error: 'TEMPLATE_CODE_REQUIRED' };
+      if (!templateBy.has(payload.templateCode)) return { payload, error: 'TEMPLATE_NOT_FOUND' };
+      if (!payload.sku) return { payload, error: 'SKU_REQUIRED' };
+      if (!payload.nameFa) return { payload, error: 'NAME_FA_REQUIRED' };
+      if (payload.weightPerUnit && !Number.isFinite(Number(payload.weightPerUnit))) {
+        return { payload, error: 'INVALID_WEIGHT' };
+      }
+      if (payload.weightPerUnit && !payload.weightUomSymbol) {
+        return { payload, error: 'WEIGHT_UOM_REQUIRED' };
+      }
+      if (payload.weightUomSymbol && !symbolBy.has(payload.weightUomSymbol)) {
+        return { payload, error: 'WEIGHT_UOM_NOT_FOUND' };
+      }
+      for (const uomField of ['defaultUomSymbol', 'inventoryUomSymbol'] as const) {
+        if (payload[uomField] && !symbolBy.has(payload[uomField])) {
+          return { payload, error: 'UOM_NOT_FOUND' };
+        }
+      }
+      return { payload, error: null };
+    });
+    const failedCount = rowPayloads.filter((r) => r.error).length;
+    const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
+
+    const job = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.importJob.create({
+        data: {
+          companyId,
+          entityType: 'PRODUCT_VARIANT',
+          fileName: dto.fileName?.slice(0, 200) || 'variants.csv',
+          status: ImportJobStatus.VALIDATED,
+          totalRows: dataRows.length,
+          failedCount,
+          commitMode,
+          batchSize: Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000),
+          options: { updateMatched: dto.updateMatched === true } as Prisma.InputJsonValue,
+          columnMapping: dto.columnMapping as Prisma.InputJsonValue,
+          createdById: actor.id,
+        },
+      });
+      for (let i = 0; i < rowPayloads.length; i += 500) {
+        await tx.importJobRow.createMany({
+          data: rowPayloads.slice(i, i + 500).map((row, offset) => ({
+            jobId: created.id,
+            rowIndex: i + offset,
+            status: row.error ? ImportRowStatus.FAILED : ImportRowStatus.PENDING,
+            payload: row.payload as Prisma.InputJsonValue,
+            error: row.error,
+          })),
+        });
+      }
+      await this.auditService.recordTx(tx, {
+        entityType: 'import_job',
+        entityId: created.id,
+        action: AuditAction.CREATE,
+        companyId,
+        actor,
+        newValues: {
+          entityType: 'PRODUCT_VARIANT',
+          totalRows: dataRows.length,
+          failedCount,
+          updateMatched: dto.updateMatched === true,
+        },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return created;
+    });
+    return this.getJob(companyId, job.id);
+  }
+
+  /** Resolve a company uom by symbol (run-time, fresh). */
+  private async resolveUomBySymbol(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    symbol: string,
+  ): Promise<string> {
+    const uom = await tx.uom.findFirst({ where: { companyId, symbol }, select: { id: true } });
+    if (!uom) throw new NotFoundError('UOM_NOT_FOUND', { symbol });
+    return uom.id;
+  }
+
+  /** Upsert on the variant's company-unique sku. */
+  private async processVariantRow(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    payload: Record<string, string>,
+    updateMatched: boolean,
+    counters: { ok: number; updated: number; duplicates: number },
+  ): Promise<{ ok: number; updated: number; duplicates: number }> {
+    const template = await tx.productTemplate.findFirst({
+      where: { companyId, internalCode: payload.templateCode },
+      select: { id: true },
+    });
+    if (!template) throw new NotFoundError('TEMPLATE_NOT_FOUND', { code: payload.templateCode });
+    const defaultUomId = payload.defaultUomSymbol
+      ? await this.resolveUomBySymbol(tx, companyId, payload.defaultUomSymbol)
+      : undefined;
+    const inventoryUomId = payload.inventoryUomSymbol
+      ? await this.resolveUomBySymbol(tx, companyId, payload.inventoryUomSymbol)
+      : undefined;
+    const weightUomId = payload.weightUomSymbol
+      ? await this.resolveUomBySymbol(tx, companyId, payload.weightUomSymbol)
+      : undefined;
+
+    const existing = await tx.productVariant.findFirst({
+      where: { companyId, sku: payload.sku },
+      select: { id: true },
+    });
+    if (existing) {
+      if (!updateMatched) return { ...counters, duplicates: counters.duplicates + 1 };
+      await tx.productVariant.update({
+        where: { id: existing.id },
+        data: {
+          nameFa: payload.nameFa,
+          ...(payload.nameEn ? { nameEn: payload.nameEn } : {}),
+          ...(defaultUomId ? { defaultUomId } : {}),
+          ...(inventoryUomId ? { inventoryUomId } : {}),
+          ...(payload.weightPerUnit ? { weightPerUnit: new Prisma.Decimal(payload.weightPerUnit) } : {}),
+          ...(weightUomId ? { weightUomId } : {}),
+        },
+      });
+      return { ...counters, ok: counters.ok + 1, updated: counters.updated + 1 };
+    }
+    await tx.productVariant.create({
+      data: {
+        companyId,
+        templateId: template.id,
+        sku: payload.sku,
+        nameFa: payload.nameFa,
+        ...(payload.nameEn ? { nameEn: payload.nameEn } : {}),
+        // simple import: the sku stands in for an attribute combination
+        combinationKey: payload.sku,
+        ...(defaultUomId ? { defaultUomId } : {}),
+        ...(inventoryUomId ? { inventoryUomId } : {}),
+        ...(payload.weightPerUnit ? { weightPerUnit: new Prisma.Decimal(payload.weightPerUnit) } : {}),
+        ...(weightUomId ? { weightUomId } : {}),
+      },
+    });
+    return { ...counters, ok: counters.ok + 1 };
+  }
+
   // ───────────────────── queries ─────────────────────
+
 
   async getJob(
     companyId: string,

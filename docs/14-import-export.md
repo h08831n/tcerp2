@@ -2,10 +2,10 @@
 
 > Status: **LOCALLY VERIFIED** (CSV unit 5/5 + g11 integration 8/8 on `tcerp_test`; CI green on push).
 > Scope: handover §31 — durable import engine + parties CSV export + DAILY_PRICE import
-> (slice 2) + XLSX input and health queue observability (slice 3) + a 1500-row load
-> smoke. **Deferred**: product/document import entities, full load test, external
+> (slice 2) + XLSX input and health queue observability (slice 3) + PRODUCT_VARIANT
+> import (slice 4) + a 1500-row load smoke. **Deferred**: full load test, external
 > monitoring wiring; backup/restore drill held for the FINAL review stage per the
-> owner's explicit instruction.
+> owner's explicit instruction. Document import remains a future entity.
 
 ## 1. Engine shape (handover §31 requirements → implementation)
 
@@ -87,3 +87,22 @@ execution for huge files, backup/restore and load tests are NOT done yet.
 - **Health queue observability**: `GET /health` now reports `queue: {pending,
   scheduled, failed}` (best-effort — a metrics failure never flips the liveness
   verdict) so a dead worker or a poisoning job is visible to uptime monitors (g11-12).
+
+
+## 9. Slice 4 — PRODUCT_VARIANT import
+
+- `entityType=PRODUCT_VARIANT` (migration `20241101140000`): variants are imported
+  INTO an EXISTING template identified by `internalCode` (company-unique). Columns:
+  `templateCode`/`sku`/`nameFa` (required), `nameEn`, `defaultUomSymbol`,
+  `inventoryUomSymbol`, `weightPerUnit` + `weightUomSymbol` (optional pair; weight
+  without its uom is a validation error).
+- **combinationKey = sku** for simple imports: the DB's (template, combination) unique
+  invariant stays intact while attribute-driven variants keep using the 3B generation
+  machinery — the two creation paths never collide on the same rows.
+- Natural key = company-unique `sku`: `updateMatched` updates name/uoms/weight on the
+  matched variant; without it the row is DUPLICATE (g11-13 covers template-scoped
+  creation with uom + weight, the duplicate path, and the update path).
+- Prefetch validation: template internalCodes + uom symbols before any write
+  (`TEMPLATE_NOT_FOUND` / `SKU_REQUIRED` / `NAME_FA_REQUIRED` / `WEIGHT_UOM_REQUIRED` /
+  `UOM_NOT_FOUND`). XLSX input works for this entity too (all creators share
+  `resolveGrid`).
