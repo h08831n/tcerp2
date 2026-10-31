@@ -46,7 +46,8 @@ function resolveLink(type: string, data: Record<string, unknown> | null): string
     }
     case "PRICE_REQUEST_CREATED":
     case "PRICE_REQUEST_UPDATED":
-    case "PRICE_REQUEST_LINE_UPDATED": {
+    case "PRICE_REQUEST_LINE_UPDATED":
+    case "PRICE_REQUEST_LINE_REMOVED": {
       // No per-request detail page exists — the worklist is the surface.
       return "/price-requests";
     }
@@ -80,8 +81,8 @@ const TYPE_LABELS: Record<string, string> = {
   ADDRESS_UPDATED: "ویرایش آدرس",
   ADDRESS_REMOVED: "حذف آدرس",
   OWNER_CHANGED: "تغییر کارشناس",
-  ARCHIVED: "بایگانی",
-  RESTORED: "بازگردانی",
+  PARTY_ARCHIVED: "بایگانی",
+  PARTY_RESTORED: "بازگردانی",
   SCORE_RECOMPUTED: "محاسبه امتیاز",
   FINANCIAL_RESPONSIBILITY_ADDED: "افزودن گروه مسئولیت مالی",
   FINANCIAL_RESPONSIBILITY_MEMBER_ADDED: "افزودن عضو گروه مسئولیت",
@@ -103,6 +104,7 @@ const TYPE_LABELS: Record<string, string> = {
   PRICE_REQUEST_CREATED: "ثبت استعلام قیمت",
   PRICE_REQUEST_UPDATED: "ویرایش استعلام قیمت",
   PRICE_REQUEST_LINE_UPDATED: "ویرایش ردیف استعلام",
+  PRICE_REQUEST_LINE_REMOVED: "حذف ردیف استعلام",
   LOADING_REGISTERED: "ثبت بارگیری",
   LOADING_CONFIRMED: "تأیید بارگیری",
   LOADING_REVERSED: "برگشت بارگیری",
@@ -291,7 +293,7 @@ export function PartyTimelineSidebar({ partyId, refreshToken = 0 }: PartyTimelin
                       )}
                     </div>
                   )}
-                  <p className="mt-0.5 text-[10px] tabular-nums text-slate-400">
+                  <p className="mt-1 text-[11px] font-medium tabular-nums text-slate-500">
                     {jalaliDateTime(item.createdAt)}
                   </p>
                 </>

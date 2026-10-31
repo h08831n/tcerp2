@@ -38,6 +38,15 @@ import {
 
 type Client = PrismaService | Prisma.TransactionClient;
 
+/** Persian labels for timeline sentences (ROLE_ADDED/REMOVED descriptions). */
+export const ROLE_LABELS: Record<string, string> = {
+  CUSTOMER: 'مشتری',
+  SUPPLIER: 'تأمین‌کننده',
+  DRIVER: 'راننده',
+  CARRIER: 'حمل‌کننده',
+  PARTNER: 'شریک',
+};
+
 /** Record-scope actor context resolved by the controller per request. */
 export interface ActorScope {
   userId: string;
@@ -648,7 +657,7 @@ export class PartiesService {
           entityId: created.id,
           type: 'PARTY_CREATED',
           title: 'ایجاد طرف حساب',
-          description: created.nameFa,
+          description: `طرف‌حساب «${created.nameFa}» ایجاد شد`,
           data: { partyId: created.id, type: created.type, roles },
           actorUserId: actor.id,
         });
@@ -937,7 +946,7 @@ export class PartiesService {
         entityId: id,
         type: 'PARTY_ARCHIVED',
         title: 'آرشیو طرف حساب',
-        description: party.nameFa,
+        description: `طرف‌حساب «${party.nameFa}» بایگانی شد`,
         data: { partyId: id },
         actorUserId: actor.id,
       });
@@ -989,7 +998,7 @@ export class PartiesService {
         entityId: id,
         type: 'PARTY_RESTORED',
         title: 'بازگردانی طرف حساب',
-        description: party.nameFa,
+        description: `طرف‌حساب «${party.nameFa}» از بایگانی بازگردانی شد`,
         data: { partyId: id },
         actorUserId: actor.id,
       });
@@ -1020,7 +1029,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id); // company + scope check
+    const party = await this.getById(companyId, actorScope, id); // company + scope check
     let role;
     try {
       role = await this.prisma.$transaction(async (trx) => {
@@ -1033,7 +1042,7 @@ export class PartiesService {
           entityId: id,
           type: 'ROLE_ADDED',
           title: 'افزودن نقش',
-          description: dto.role,
+          description: `نقش ${ROLE_LABELS[dto.role] ?? dto.role} به «${party.nameFa}» اضافه شد`,
           data: { partyId: id, role: dto.role },
           actorUserId: actor.id,
         });
@@ -1068,7 +1077,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id);
+    const party = await this.getById(companyId, actorScope, id);
     const existing = await this.prisma.partyRole.findUnique({
       where: { partyId_role: { partyId: id, role } },
     });
@@ -1083,7 +1092,7 @@ export class PartiesService {
         entityId: id,
         type: 'ROLE_REMOVED',
         title: 'حذف نقش',
-        description: role,
+        description: `نقش ${ROLE_LABELS[role] ?? role} از «${party.nameFa}» حذف شد`,
         data: { partyId: id, role },
         actorUserId: actor.id,
       });
@@ -1112,7 +1121,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id);
+    const party = await this.getById(companyId, actorScope, id);
     const row = toPhoneRow(dto);
     return this.prisma.$transaction(async (trx) => {
       // Same rule as creation (partial unique `parties_mobile_uniq` backstop).
@@ -1136,7 +1145,7 @@ export class PartiesService {
         entityId: id,
         type: 'PHONE_ADDED',
         title: 'افزودن شماره تماس',
-        description: row.rawValue,
+        description: `شماره ${row.rawValue} به «${party.nameFa}» اضافه شد`,
         data: {
           partyId: id,
           phoneId: phone.id,
@@ -1168,7 +1177,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id);
+    const party = await this.getById(companyId, actorScope, id);
     const phone = await this.prisma.partyPhone.findFirst({
       where: { id: phoneId, partyId: id },
     });
@@ -1183,7 +1192,7 @@ export class PartiesService {
         entityId: id,
         type: 'PHONE_REMOVED',
         title: 'حذف شماره تماس',
-        description: phone.rawValue,
+        description: `شماره ${phone.rawValue} از «${party.nameFa}» حذف شد`,
         data: { partyId: id, phoneId, normalizedValue: phone.normalizedValue },
         actorUserId: actor.id,
       });
@@ -1212,7 +1221,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id);
+    const party = await this.getById(companyId, actorScope, id);
     const phoneRows = (dto.phones ?? []).map((p) => ({
       kind: p.kind,
       rawValue: p.value,
@@ -1242,7 +1251,7 @@ export class PartiesService {
         entityId: id,
         type: 'CONTACT_ADDED',
         title: 'افزودن شخص رابط',
-        description: contact.name,
+        description: `شخص رابط «${contact.name}» به «${party.nameFa}» اضافه شد`,
         data: { partyId: id, contactId: contact.id },
         actorUserId: actor.id,
       });
@@ -1330,6 +1339,7 @@ export class PartiesService {
     if (!existing) {
       throw new NotFoundError('Contact not found for this party', { partyId: id, contactId });
     }
+    const party = await this.getById(companyId, actorScope, id);
     await this.prisma.$transaction(async (trx) => {
       await trx.contact.delete({ where: { id: existing.id } });
       await this.timeline.record(trx, {
@@ -1338,7 +1348,7 @@ export class PartiesService {
         entityId: id,
         type: 'CONTACT_REMOVED',
         title: 'حذف شخص رابط',
-        description: existing.name,
+        description: `شخص رابط «${existing.name}» از «${party.nameFa}» حذف شد`,
         data: { partyId: id, contactId },
         actorUserId: actor.id,
       });
@@ -1367,7 +1377,7 @@ export class PartiesService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await this.getById(companyId, actorScope, id);
+    const party = await this.getById(companyId, actorScope, id);
     return this.prisma.$transaction(async (trx) => {
       if (dto.isPrimary) {
         await trx.address.updateMany({ where: { partyId: id }, data: { isPrimary: false } });
@@ -1391,7 +1401,7 @@ export class PartiesService {
         entityId: id,
         type: 'ADDRESS_ADDED',
         title: 'افزودن نشانی',
-        description: address.line,
+        description: `نشانی «${address.line ?? ''}» به «${party.nameFa}» اضافه شد`,
         data: { partyId: id, addressId: address.id, addressType: address.type },
         actorUserId: actor.id,
       });
@@ -1480,6 +1490,7 @@ export class PartiesService {
     if (!existing) {
       throw new NotFoundError('Address not found for this party', { partyId: id, addressId });
     }
+    const party = await this.getById(companyId, actorScope, id);
     await this.prisma.$transaction(async (trx) => {
       await trx.address.delete({ where: { id: existing.id } });
       await this.timeline.record(trx, {
@@ -1488,7 +1499,7 @@ export class PartiesService {
         entityId: id,
         type: 'ADDRESS_REMOVED',
         title: 'حذف نشانی',
-        description: existing.line,
+        description: `نشانی «${existing.line ?? ''}» از «${party.nameFa}» حذف شد`,
         data: { partyId: id, addressId },
         actorUserId: actor.id,
       });

@@ -491,6 +491,24 @@ export class PriceRequestsService {
     if (!line) throw new NotFoundError('Price request line not found', { lineId });
     await this.prisma.$transaction(async (tx) => {
       await tx.priceRequestLine.delete({ where: { id: line.id } });
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: request.customerPartyId ? 'PARTY' : 'PRICE_REQUEST',
+        entityId: request.customerPartyId ?? request.id,
+        type: 'PRICE_REQUEST_LINE_REMOVED',
+        title: 'حذف ردیف از استعلام قیمت',
+        description: `استعلام ${request.requestNumber}`,
+        data: {
+          priceRequestId: request.id,
+          priceRequestLineId: line.id,
+          removed: {
+            productVariantId: line.productVariantId,
+            requestedQuantity: line.requestedQuantity,
+            uomId: line.uomId,
+          },
+        },
+        actorUserId: actor.id,
+      });
       await this.auditService.recordTx(tx, {
         entityType: 'price_request_line',
         entityId: line.id,

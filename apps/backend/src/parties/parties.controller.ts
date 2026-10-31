@@ -366,10 +366,11 @@ export class PartiesController {
       query.includeHidden === true &&
       (actorScope.scope === 'ALL' ||
         (await this.permissionsService.getEffectivePermissions(user.id, companyId)).has('audit.view'));
-    return this.timeline.listForEntity(companyId, 'PARTY', id, {
+    const items = await this.timeline.listForEntity(companyId, 'PARTY', id, {
       limit: query.limit,
       includeHidden,
     });
+    return { items };
   }
 
   // ─────────────────────── financial responsibility ───────────────────────

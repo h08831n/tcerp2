@@ -430,7 +430,10 @@ export function deletePartyAddress(id: string, addressId: string): Promise<void>
 }
 
 export function fetchTimeline(id: string, limit = 50): Promise<{ items: TimelineItemDto[] }> {
-  return apiJson<{ items: TimelineItemDto[] }>(`/parties/${id}/timeline?limit=${limit}`);
+  // Tolerate both the envelope ({items}) and a legacy bare array.
+  return apiJson<{ items?: TimelineItemDto[] } | TimelineItemDto[]>(
+    `/parties/${id}/timeline?limit=${limit}`,
+  ).then((result) => ({ items: Array.isArray(result) ? result : (result.items ?? []) }));
 }
 
 export function fetchFinancialResponsibility(
