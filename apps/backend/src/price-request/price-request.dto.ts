@@ -3,6 +3,7 @@ import {
   IsArray,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -285,4 +286,9 @@ export class LowestReportQueryDto {
   @IsInt()
   @Min(1)
   days: number = 60;
+}
+
+export class DecideOfferOutcomeDto {
+  @IsIn(['WON', 'LOST'])
+  outcome!: 'WON' | 'LOST';
 }

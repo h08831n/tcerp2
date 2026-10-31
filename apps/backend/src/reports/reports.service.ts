@@ -389,6 +389,296 @@ export class ReportsService {
     }));
   }
 
+  // ───────────────────── debt report (Gate F slice 2) ─────────────────────
+
+  /**
+   * گزارش بدهی (REQUIREMENTS §20/§33): per-party accounting balance (from the
+   * 7C subsidiary ledger — POSTED/REVERSED journals only), the cached
+   * OPERATIONAL balance, their reconciliation delta, the party's UNMATCHED
+   * settlement claims (declared-but-unreconciled) and UNSETTLED checks
+   * (REGISTERED/PENDING/DEPOSITED/BOUNCED — cleared/paid/cancelled are
+   * settled facts). Gated by accounting.report (financial visibility).
+   */
+  async debtReport(companyId: string, role: 'CUSTOMER' | 'SUPPLIER', search?: string) {
+    const accountCode = role === 'SUPPLIER' ? 'PAYABLE' : 'RECEIVABLE';
+    const sign = role === 'SUPPLIER' ? -1 : 1;
+    // LEFT-JOIN semantics (deliberately NOT the subsidiary ledger's INNER
+    // join): a party holding an operational balance but NO journal history is
+    // exactly a reconciliation gap and must appear with accounting = 0. The
+    // balance formula mirrors the 7C subsidiary ledger (debit − credit, signed
+    // per role; POSTED/REVERSED entries only) — g7c pins that math.
+    const balances = await this.prisma.$queryRaw<Array<{
+      party_id: string;
+      name_fa: string;
+      accounting_balance: string;
+      last_activity: Date | null;
+    }>>(Prisma.sql`
+      SELECT p.id AS party_id, p.name_fa,
+        (COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0)) * ${sign} AS accounting_balance,
+        MAX(je.entry_date) AS last_activity
+      FROM parties p
+      JOIN party_roles pr ON pr.party_id = p.id AND pr.role = ${role}::"PartyRoleType"
+      LEFT JOIN journal_lines l ON l.party_id = p.id
+      LEFT JOIN journal_entries je ON je.id = l.journal_entry_id
+        AND je.company_id = ${companyId}::uuid AND je.status IN ('POSTED', 'REVERSED')
+      LEFT JOIN chart_of_accounts a ON a.id = l.account_id AND a.code = ${accountCode}
+      WHERE p.company_id = ${companyId}::uuid AND p.archived_at IS NULL
+        ${search ? Prisma.sql`AND p.name_fa ILIKE ${'%' + search + '%'}` : Prisma.empty}
+      GROUP BY p.id, p.name_fa
+      HAVING COALESCE(SUM(l.debit), 0) <> COALESCE(SUM(l.credit), 0)
+        OR EXISTS (SELECT 1 FROM party_operational_balances b WHERE b.party_id = p.id AND b.balance <> 0)
+        OR EXISTS (SELECT 1 FROM operational_settlement_claims c WHERE c.party_id = p.id AND c.status = 'UNMATCHED')
+        OR EXISTS (SELECT 1 FROM checks k WHERE k.party_id = p.id AND k.status IN ('REGISTERED', 'PENDING', 'DEPOSITED', 'BOUNCED'))
+      ORDER BY accounting_balance DESC
+      LIMIT 200
+    `);
+    const claimDirection = role === 'SUPPLIER' ? 'SUPPLIER_PAYMENT' : 'CUSTOMER_RECEIPT';
+    const [claims, checks] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ party_id: string; count: bigint; total: string }>>(Prisma.sql`
+        SELECT c.party_id, COUNT(*) AS count, COALESCE(SUM(c.amount), 0) AS total
+        FROM operational_settlement_claims c
+        WHERE c.company_id = ${companyId}::uuid
+          AND c.status = 'UNMATCHED'
+          AND c.direction = ${claimDirection}::"ClaimDirection"
+        GROUP BY c.party_id
+      `),
+      this.prisma.$queryRaw<Array<{ party_id: string; count: bigint; total: string; nearest_due: Date | null }>>(Prisma.sql`
+        SELECT k.party_id, COUNT(*) AS count, COALESCE(SUM(k.amount), 0) AS total, MIN(k.due_date) AS nearest_due
+        FROM checks k
+        WHERE k.company_id = ${companyId}::uuid
+          AND k.party_id IS NOT NULL
+          AND k.status IN ('REGISTERED', 'PENDING', 'DEPOSITED', 'BOUNCED')
+        GROUP BY k.party_id
+      `),
+    ]);
+    const partyIds = balances.map((b) => b.party_id);
+    const [claimsBy, checksBy, opBalances] = await Promise.all([
+      Promise.resolve(new Map(claims.map((c) => [c.party_id, c]))),
+      Promise.resolve(new Map(checks.map((c) => [c.party_id, c]))),
+      partyIds.length
+        ? this.prisma.partyOperationalBalance.findMany({
+            where: { companyId, partyId: { in: partyIds } },
+            select: { partyId: true, balance: true },
+          })
+        : Promise.resolve([] as Array<{ partyId: string; balance: Prisma.Decimal }>),
+    ]);
+    const opBy = new Map(opBalances.map((b) => [b.partyId, b.balance]));
+
+    const items = balances.map((item) => {
+      const claim = claimsBy.get(item.party_id);
+      const check = checksBy.get(item.party_id);
+      const accountingBalance = n(item.accounting_balance);
+      const op = opBy.get(item.party_id);
+      const operationalBalance = op === undefined ? null : Number(op);
+      const reconciliationDelta =
+        op === undefined ? null : accountingBalance - Number(op);
+      return {
+        partyId: item.party_id,
+        nameFa: item.name_fa,
+        accountingBalance,
+        operationalBalance,
+        reconciliationDelta,
+        unmatchedClaims: claim
+          ? { count: n(claim.count), total: n(claim.total) }
+          : { count: 0, total: 0 },
+        unsettledChecks: check
+          ? { count: n(check.count), total: n(check.total), nearestDueDate: check.nearest_due }
+          : { count: 0, total: 0, nearestDueDate: null },
+        lastActivity: item.last_activity,
+      };
+    });
+    return {
+      role,
+      accountCode,
+      groupTotal: items.reduce((sum, i) => sum + i.accountingBalance, 0),
+      items,
+    };
+  }
+
+  // ───────────────────── offers win/loss (Gate F slice 2) ─────────────────────
+
+  /**
+   * برد/باخت پیشنهادها — aggregates the EXPLICIT decisions only
+   * (SupplierOffer.outcome). Suppliers without any decided offer are absent:
+   * the report never guesses (handover rule).
+   */
+  async offersOutcomeReport(companyId: string) {
+    const perSupplier = await this.prisma.$queryRaw<Array<{
+      party_id: string;
+      name_fa: string;
+      offers_count: bigint;
+      won: bigint;
+      lost: bigint;
+      avg_offered: string | null;
+    }>>(Prisma.sql`
+      SELECT o.supplier_party_id AS party_id, p.name_fa,
+        COUNT(*) AS offers_count,
+        COUNT(*) FILTER (WHERE o.outcome = 'WON') AS won,
+        COUNT(*) FILTER (WHERE o.outcome = 'LOST') AS lost,
+        AVG(o.offered_price) AS avg_offered
+      FROM supplier_offers o
+      JOIN parties p ON p.id = o.supplier_party_id
+      WHERE o.company_id = ${companyId}::uuid
+        AND o.outcome IS NOT NULL
+      GROUP BY o.supplier_party_id, p.name_fa
+      ORDER BY won DESC, offers_count DESC
+    `);
+    const recent = await this.prisma.supplierOffer.findMany({
+      where: { companyId, outcome: { not: null } },
+      orderBy: { outcomeDecidedAt: 'desc' },
+      take: 50,
+      select: {
+        id: true,
+        offeredPrice: true,
+        outcome: true,
+        outcomeDecidedAt: true,
+        supplier: { select: { id: true, nameFa: true } },
+        priceRequestLine: {
+          select: {
+            id: true,
+            priceRequest: { select: { id: true, requestNumber: true } },
+          },
+        },
+      },
+    });
+    return {
+      perSupplier: perSupplier.map((r) => {
+        const won = n(r.won);
+        const decided = won + n(r.lost);
+        return {
+          partyId: r.party_id,
+          supplierName: r.name_fa,
+          offersCount: n(r.offers_count),
+          won,
+          lost: n(r.lost),
+          winRate: decided > 0 ? Math.round((won / decided) * 100) : 0,
+          avgOfferedPrice: r.avg_offered === null ? null : n(r.avg_offered),
+        };
+      }),
+      recent: recent.map((o) => ({
+        offerId: o.id,
+        supplierName: o.supplier.nameFa,
+        offeredPrice: n(o.offeredPrice),
+        outcome: o.outcome,
+        decidedAt: o.outcomeDecidedAt,
+        requestId: o.priceRequestLine.priceRequest.id,
+        requestNumber: o.priceRequestLine.priceRequest.requestNumber,
+      })),
+    };
+  }
+
+  // ───────────────────── per-warehouse negative stock + turnover ─────────────
+
+  /**
+   * موجودی منفی به تفکیک انبار: movement quantities attribute to the
+   * warehouse of the INTERNAL side (destination for IN, source for OUT);
+   * internal→internal transfers attribute to BOTH sides and net out within
+   * the same warehouse.
+   */
+  async negativeStockByWarehouse(companyId: string) {
+    const rows = await this.prisma.$queryRaw<Array<{
+      warehouse_id: string | null;
+      warehouse_name: string | null;
+      variant_id: string;
+      sku: string;
+      variant_name: string;
+      balance: string;
+    }>>(Prisma.sql`
+      SELECT w.id AS warehouse_id, w.name_fa AS warehouse_name,
+        sm.product_variant_id AS variant_id, pv.sku,
+        COALESCE(pv.name_fa, pv.name_en, pv.sku) AS variant_name,
+        SUM(CASE
+          WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' THEN sm.normalized_quantity
+          WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' THEN -sm.normalized_quantity
+          ELSE 0 END) AS balance
+      FROM stock_movements sm
+      JOIN stock_locations dl ON dl.id = sm.destination_location_id
+      JOIN stock_locations sl ON sl.id = sm.source_location_id
+      JOIN product_variants pv ON pv.id = sm.product_variant_id
+      LEFT JOIN warehouses w ON w.id = COALESCE(
+        CASE WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' THEN dl.warehouse_id END,
+        CASE WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' THEN sl.warehouse_id END,
+        CASE WHEN dl.type = 'INTERNAL' AND sl.type = 'INTERNAL' THEN dl.warehouse_id END
+      )
+      WHERE sm.company_id = ${companyId}::uuid
+      GROUP BY w.id, w.name_fa, sm.product_variant_id, pv.sku, pv.name_fa, pv.name_en
+      HAVING SUM(CASE
+          WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' THEN sm.normalized_quantity
+          WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' THEN -sm.normalized_quantity
+          ELSE 0 END) < 0
+      ORDER BY balance ASC
+      LIMIT 200
+    `);
+    return rows.map((r) => ({
+      warehouseId: r.warehouse_id,
+      warehouseName: r.warehouse_name,
+      variantId: r.variant_id,
+      sku: r.sku,
+      variantName: r.variant_name,
+      balance: n(r.balance),
+    }));
+  }
+
+  /** گردش انبار: period IN/OUT per (warehouse, variant) + full-history ending balance. */
+  async warehouseTurnover(companyId: string, fromDate: Date, toDate: Date) {
+    if (!(fromDate.getTime() <= toDate.getTime())) {
+      throw new ValidationError('REPORT_INVALID_PERIOD', { fromDate, toDate });
+    }
+    const rows = await this.prisma.$queryRaw<Array<{
+      warehouse_id: string | null;
+      warehouse_name: string | null;
+      variant_id: string;
+      sku: string;
+      variant_name: string;
+      in_qty: string;
+      out_qty: string;
+      ending_balance: string;
+    }>>(Prisma.sql`
+      SELECT w.id AS warehouse_id, w.name_fa AS warehouse_name,
+        sm.product_variant_id AS variant_id, pv.sku,
+        COALESCE(pv.name_fa, pv.name_en, pv.sku) AS variant_name,
+        COALESCE(SUM(CASE
+          WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' AND sm.movement_date >= ${fromDate} AND sm.movement_date <= ${toDate}
+          THEN sm.normalized_quantity ELSE 0 END), 0) AS in_qty,
+        COALESCE(SUM(CASE
+          WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' AND sm.movement_date >= ${fromDate} AND sm.movement_date <= ${toDate}
+          THEN sm.normalized_quantity ELSE 0 END), 0) AS out_qty,
+        SUM(CASE
+          WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' THEN sm.normalized_quantity
+          WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' THEN -sm.normalized_quantity
+          ELSE 0 END) AS ending_balance
+      FROM stock_movements sm
+      JOIN stock_locations dl ON dl.id = sm.destination_location_id
+      JOIN stock_locations sl ON sl.id = sm.source_location_id
+      JOIN product_variants pv ON pv.id = sm.product_variant_id
+      LEFT JOIN warehouses w ON w.id = COALESCE(
+        CASE WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' THEN dl.warehouse_id END,
+        CASE WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' THEN sl.warehouse_id END,
+        CASE WHEN dl.type = 'INTERNAL' AND sl.type = 'INTERNAL' THEN dl.warehouse_id END
+      )
+      WHERE sm.company_id = ${companyId}::uuid
+      GROUP BY w.id, w.name_fa, sm.product_variant_id, pv.sku, pv.name_fa, pv.name_en
+      HAVING COALESCE(SUM(CASE
+          WHEN dl.type = 'INTERNAL' AND sl.type <> 'INTERNAL' AND sm.movement_date >= ${fromDate} AND sm.movement_date <= ${toDate}
+          THEN sm.normalized_quantity ELSE 0 END), 0) > 0
+          OR COALESCE(SUM(CASE
+          WHEN sl.type = 'INTERNAL' AND dl.type <> 'INTERNAL' AND sm.movement_date >= ${fromDate} AND sm.movement_date <= ${toDate}
+          THEN sm.normalized_quantity ELSE 0 END), 0) > 0
+      ORDER BY in_qty DESC
+      LIMIT 200
+    `);
+    return rows.map((r) => ({
+      warehouseId: r.warehouse_id,
+      warehouseName: r.warehouse_name,
+      variantId: r.variant_id,
+      sku: r.sku,
+      variantName: r.variant_name,
+      inQty: n(r.in_qty),
+      outQty: n(r.out_qty),
+      endingBalance: n(r.ending_balance),
+    }));
+  }
+
   // ───────────────────── global search ─────────────────────
 
   /**

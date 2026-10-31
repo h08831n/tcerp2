@@ -239,6 +239,49 @@ export class SupplierOffersService {
     });
   }
 
+  /**
+   * Phase 10 (Gate F slice 2): explicit win/loss decision on an offer — the
+   * outcome report aggregates DECIDED facts, never inferences from purchases.
+   * Atomic: outcome + decider + audit commit together; re-deciding is allowed
+   * (a correction) and every change is audited with the old value.
+   */
+  async decideOutcome(
+    companyId: string,
+    offerId: string,
+    outcome: 'WON' | 'LOST',
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ) {
+    const offer = await this.prisma.supplierOffer.findFirst({
+      where: { id: offerId, companyId },
+      select: { id: true, outcome: true, supplierPartyId: true },
+    });
+    if (!offer) throw new NotFoundError('Supplier offer not found', { offerId });
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.supplierOffer.update({
+        where: { id: offer.id },
+        data: {
+          outcome,
+          outcomeDecidedAt: new Date(),
+          outcomeDecidedBy: actor.id,
+        },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'supplier_offer',
+        entityId: offer.id,
+        action: AuditAction.UPDATE,
+        companyId,
+        actor,
+        oldValues: { outcome: offer.outcome },
+        newValues: { outcome },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return row;
+    });
+    return updated;
+  }
+
   // ───────────────────── daily-lowest intelligence (§15) ─────────────────────
 
   /**

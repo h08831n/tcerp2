@@ -128,6 +128,23 @@
   docs/13-management-reports.md. Deferred: debt report, win/loss offers,
   per-warehouse drill-down, saved views (documented).
 
+- **Gate F slice 2 (DONE — pending review)**: debt report
+  (`/reports/debt`, accounting.report-gated: per-party accounting balance via the
+  7C subsidiary formula with LEFT-join semantics — op-balance-without-journals
+  parties appear with accounting 0 — + operational cache + reconciliation delta +
+  UNMATCHED claims + unsettled checks with nearest due), win/loss offers
+  (SupplierOffer.outcome WON/LOST migration 20241101110000 + audited decide
+  endpoint POST /price-requests/offers/:offerId/outcome + report aggregating
+  EXPLICIT decisions only — undecided suppliers absent), per-warehouse negative
+  stock (internal-side warehouse attribution, transfers net within warehouse) +
+  warehouse turnover (period flows + full-history ending balance, local-calendar
+  boundaries). Frontend: /reports page (debt/offers/stock tabs) with localStorage
+  Saved Views (≤10/scope, best-effort) + palette keyboard navigation (arrows +
+  Enter, listbox roles). Tests g10-09..12 (LEFT-join gap case, offer winRate
+  aggregation, per-warehouse attribution on an isolated variant, turnover
+  relationships + invalid-period rejection). Deferred: loadings report variations
+  (weighbridge-delta, incomplete).
+
 
 
 ## Completed

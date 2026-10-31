@@ -85,6 +85,7 @@ export default function DashboardPage() {
   const [term, setTerm] = useState("");
   const [results, setResults] = useState<SearchResults>(EMPTY_SEARCH);
   const [searching, setSearching] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -162,6 +163,18 @@ export default function DashboardPage() {
     setTerm("");
     router.push(href);
   };
+
+  // Flat navigable list for keyboard support (arrow keys + Enter).
+  const paletteItems = [
+    ...results.parties.map((p) => ({ id: `party:${p.id}`, href: `/parties/${p.id}`, label: p.label, group: "طرف‌حساب‌ها" })),
+    ...results.variants.map((v) => ({ id: `variant:${v.id}`, href: "/products", label: v.label, group: "محصولات" })),
+    ...results.salesDocuments.map((d) => ({ id: `sales:${d.id}`, href: `/sales/${d.id}`, label: `${d.label} — ${money(d.total)}`, group: "اسناد فروش" })),
+    ...results.purchaseDocuments.map((d) => ({ id: `purchase:${d.id}`, href: `/purchases/${d.id}`, label: `${d.label} — ${money(d.total)}`, group: "اسناد خرید" })),
+  ];
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [results]);
 
   const kpis = data
     ? [
@@ -327,62 +340,43 @@ export default function DashboardPage() {
             ref={searchInputRef}
             value={term}
             onChange={(e) => setTerm(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveIndex((i) => Math.min(i + 1, paletteItems.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Enter" && paletteItems[activeIndex]) {
+                e.preventDefault();
+                goTo(paletteItems[activeIndex].href);
+              }
+            }}
             placeholder="طرف‌حساب، محصول، شماره سند… (حداقل ۲ حرف)"
             className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-primary-500"
             aria-label="عبارت جست‌وجو"
           />
           {searching && <p className="text-xs text-slate-400">در حال جست‌وجو…</p>}
-          <div className="max-h-72 space-y-3 overflow-auto">
-            {results.parties.length > 0 && (
-              <div>
-                <p className="text-[11px] font-bold text-slate-500">طرف‌حساب‌ها</p>
-                {results.parties.map((p) => (
-                  <button key={p.id} type="button" onClick={() => goTo(`/parties/${p.id}`)} className="block w-full rounded px-2 py-1.5 text-right text-sm text-slate-700 hover:bg-slate-50">
-                    {p.label}
-                  </button>
-                ))}
-              </div>
+          <div className="max-h-72 space-y-1 overflow-auto" role="listbox" aria-label="نتایج جست‌وجو">
+            {paletteItems.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                role="option"
+                aria-selected={index === activeIndex}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => goTo(item.href)}
+                className={`block w-full rounded px-2 py-1.5 text-right text-sm ${
+                  index === activeIndex ? "bg-primary-50 font-medium text-primary-800" : "text-slate-700 hover:bg-slate-50"
+                }`}
+              >
+                <span className="text-[10px] text-slate-400">{item.group}</span>
+                <span className="ms-2">{item.label}</span>
+              </button>
+            ))}
+            {term.trim().length >= 2 && !searching && paletteItems.length === 0 && (
+              <p className="text-xs text-slate-400">نتیجه‌ای یافت نشد.</p>
             )}
-            {results.variants.length > 0 && (
-              <div>
-                <p className="text-[11px] font-bold text-slate-500">محصولات</p>
-                {results.variants.map((v) => (
-                  <button key={v.id} type="button" onClick={() => goTo("/products")} className="block w-full rounded px-2 py-1.5 text-right text-sm text-slate-700 hover:bg-slate-50">
-                    {v.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            {results.salesDocuments.length > 0 && (
-              <div>
-                <p className="text-[11px] font-bold text-slate-500">اسناد فروش</p>
-                {results.salesDocuments.map((d) => (
-                  <button key={d.id} type="button" onClick={() => goTo(`/sales/${d.id}`)} className="block w-full rounded px-2 py-1.5 text-right text-sm text-slate-700 hover:bg-slate-50">
-                    <span dir="ltr" className="font-mono text-xs">{d.label}</span>
-                    <span className="ms-2 text-[11px] text-slate-400">{money(d.total)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {results.purchaseDocuments.length > 0 && (
-              <div>
-                <p className="text-[11px] font-bold text-slate-500">اسناد خرید</p>
-                {results.purchaseDocuments.map((d) => (
-                  <button key={d.id} type="button" onClick={() => goTo(`/purchases/${d.id}`)} className="block w-full rounded px-2 py-1.5 text-right text-sm text-slate-700 hover:bg-slate-50">
-                    <span dir="ltr" className="font-mono text-xs">{d.label}</span>
-                    <span className="ms-2 text-[11px] text-slate-400">{money(d.total)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {term.trim().length >= 2 &&
-              !searching &&
-              results.parties.length === 0 &&
-              results.variants.length === 0 &&
-              results.salesDocuments.length === 0 &&
-              results.purchaseDocuments.length === 0 && (
-                <p className="text-xs text-slate-400">نتیجه‌ای یافت نشد.</p>
-              )}
           </div>
         </div>
       </Modal>

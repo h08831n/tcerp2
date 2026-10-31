@@ -93,4 +93,68 @@ export class ReportsController {
     );
     return this.reports.globalSearch(companyId, q ?? '');
   }
+
+  // ───────────── Gate F slice 2 ─────────────
+
+  /**
+   * گزارش بدهی: مانده حسابداری/عملیاتی/اختلاف + تسویه‌های UNMATCHED + چک‌های
+   * وصول‌نشده به تفکیک طرف‌حساب. EXPOSES ACCOUNTING BALANCES — gated by
+   * `accounting.report` (the same gate as the 7C subsidiary ledger), NOT the
+   * general reports.view.
+   */
+  @Get('debt')
+  @RequirePermissions('accounting.report')
+  async debt(
+    @Query('role') role: string | undefined,
+    @Query('search') search: string | undefined,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.reports.debtReport(
+      companyId,
+      role === 'SUPPLIER' ? 'SUPPLIER' : 'CUSTOMER',
+      search || undefined,
+    );
+  }
+
+  /** برد/باخت پیشنهادها — explicit decisions only (never inferred). */
+  @Get('offers-outcome')
+  @RequirePermissions('reports.view')
+  async offersOutcome(@CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = this.reports.assertCompanyScope(
+      await this.companyContext.resolveCompanyId(user, request.headers),
+    );
+    return this.reports.offersOutcomeReport(companyId);
+  }
+
+  @Get('negative-stock/by-warehouse')
+  @RequirePermissions('reports.view')
+  async negativeStockByWarehouse(@CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = this.reports.assertCompanyScope(
+      await this.companyContext.resolveCompanyId(user, request.headers),
+    );
+    return this.reports.negativeStockByWarehouse(companyId);
+  }
+
+  @Get('warehouse-turnover')
+  @RequirePermissions('reports.view')
+  async warehouseTurnover(
+    @Query('from') from: string | undefined,
+    @Query('to') to: string | undefined,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = this.reports.assertCompanyScope(
+      await this.companyContext.resolveCompanyId(user, request.headers),
+    );
+    // Local-calendar boundaries (same convention as the dashboard «today»):
+    // from = local midnight, to = local end-of-day so the TO day's afternoon
+    // movements are inside the window.
+    this.reports.parseOptionalDay(from);
+    this.reports.parseOptionalDay(to);
+    const fromDate = from ? new Date(`${from}T00:00:00`) : new Date(Date.now() - 30 * 86_400_000);
+    const toDate = to ? new Date(`${to}T23:59:59.999`) : new Date();
+    return this.reports.warehouseTurnover(companyId, fromDate, toDate);
+  }
 }

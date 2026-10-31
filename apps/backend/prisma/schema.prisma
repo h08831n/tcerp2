@@ -2157,18 +2157,23 @@ model PriceRequestLine {
 }
 
 model SupplierOffer {
-  id                String   @id @default(uuid()) @db.Uuid
-  companyId         String   @map("company_id") @db.Uuid
-  priceRequestLineId String  @map("price_request_line_id") @db.Uuid
-  supplierPartyId   String   @map("supplier_party_id") @db.Uuid
-  offeredPrice      Decimal  @map("offered_price") @db.Decimal(20, 4)
-  uomId             String   @map("uom_id") @db.Uuid
+  id                String        @id @default(uuid()) @db.Uuid
+  companyId         String        @map("company_id") @db.Uuid
+  priceRequestLineId String       @map("price_request_line_id") @db.Uuid
+  supplierPartyId   String        @map("supplier_party_id") @db.Uuid
+  offeredPrice      Decimal       @map("offered_price") @db.Decimal(20, 4)
+  uomId             String        @map("uom_id") @db.Uuid
   paymentTerms      String?
-  deliveryTime      String?  @map("delivery_time")
+  deliveryTime      String?       @map("delivery_time")
   notes             String?
-  offeredAt         DateTime @default(now()) @map("offered_at") @db.Timestamptz(6)
-  createdBy         String?  @map("created_by") @db.Uuid
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  offeredAt         DateTime      @default(now()) @map("offered_at") @db.Timestamptz(6)
+  // Phase 10: explicit win/loss decision (reported verbatim — never inferred
+  // from purchases, which the handover forbids for this report).
+  outcome           OfferOutcome?
+  outcomeDecidedAt  DateTime?     @map("outcome_decided_at") @db.Timestamptz(6)
+  outcomeDecidedBy  String?       @map("outcome_decided_by") @db.Uuid
+  createdBy         String?       @map("created_by") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company          Company          @relation(fields: [companyId], references: [id])
   priceRequestLine PriceRequestLine @relation(fields: [priceRequestLineId], references: [id], onDelete: Cascade)
@@ -3149,6 +3154,13 @@ model BankTransfer {
 enum CheckDirection {
   INCOMING
   OUTGOING
+}
+
+// Phase 10 (Gate F slice 2): explicit supplier-offer outcome — without it a
+// win/loss report would be guesswork. Decided manually per offer.
+enum OfferOutcome {
+  WON
+  LOST
 }
 
 enum CheckStatus {

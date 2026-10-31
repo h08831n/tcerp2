@@ -3,8 +3,9 @@
 > Status: **LOCALLY VERIFIED** (integration 8/8 g10 suites on `tcerp_test`; CI green on push).
 > Scope: REQUIREMENTS §31/§33/§10 — the first Phase-10 slice: dashboard KPIs,
 > performance reports, operational watchlists and the global-search command palette.
-> **Deliberately deferred** (documented at §5): saved views, per-warehouse negative-stock
-> drill-down, debt reports (operational vs accounting gap), win/loss offer report.
+> **Slice 2 delivered** (بخش §6): debt report, win/loss offers (explicit outcome),
+> per-warehouse negative stock, warehouse turnover, saved views, palette keyboard nav.
+> Still deferred: loadings report variations (weighbridge-delta, incomplete).
 
 ## 1. Principles (per the handover's reporting rules)
 
@@ -63,3 +64,53 @@ isolation + short-term rejection, and the seed contract (manager roles hold
 - Per-warehouse negative-stock drill-down and warehouse-turnover report.
 - Saved Views + palette keyboard navigation (arrow keys/Enter through results).
 - Loadings report variations (weighbridge-delta, incomplete).
+
+
+## 6. Gate F slice 2 (second delivery)
+
+### 6.1 گزارش بدهی — `GET /reports/debt?role=CUSTOMER|SUPPLIER` (`accounting.report`)
+EXPOSES ACCOUNTING BALANCES — gated by the 7C ledger's permission, NOT reports.view.
+Per party: **accounting balance** (debit − credit signed per role, POSTED/REVERSED
+journals — the 7C subsidiary formula), the **cached operational balance**
+(PartyOperationalBalance), their **reconciliation delta**, the party's **UNMATCHED
+settlement claims** (declared-but-unreconciled, direction-matched) and **unsettled
+checks** (REGISTERED/PENDING/DEPOSITED/BOUNCED with count/total/nearest due).
+KEY JOIN DECISION: the party list is a **LEFT join** over journal lines (the 7C
+subsidiary ledger INNER-joins) — a party holding an operational balance but no
+journal history is exactly a reconciliation gap and must appear with accounting = 0
+(g10-09 pins this). Only parties with at least one signal (balance ≠ 0, claim, or
+check) are listed; groupTotal covers the whole filtered set.
+
+### 6.2 برد/باخت پیشنهادها
+`SupplierOffer.outcome` (WON/LOST + decidedAt/By, migration
+`20241101110000_phase10_offer_outcome`) — the handover forbids inferring outcomes, so
+the report aggregates EXPLICIT decisions only; suppliers without any decided offer are
+absent from the report. Decision surface: `POST /price-requests/offers/:offerId/outcome`
+(`price_request.manage_offers`, audited with the old value, re-decidable as a
+correction). Report `GET /reports/offers-outcome` (reports.view): per-supplier
+won/lost/winRate/avgOfferedPrice + the 50 most recent decided offers.
+
+### 6.3 انبار به تفکیک انبار
+- `GET /reports/negative-stock/by-warehouse` (reports.view): per-warehouse negative
+  balances — movements attribute to the warehouse of the INTERNAL side (destination
+  for IN, source for OUT); internal→internal transfers net within the warehouse.
+- `GET /reports/warehouse-turnover?from&to` (reports.view): period IN/OUT per
+  (warehouse, variant) + full-history ending balance; boundaries are local-calendar
+  (from = local midnight, to = local end-of-day).
+
+### 6.4 Frontend
+- New **`/reports` page** (nav «گزارش‌ها» now live): debt tab (role toggle, search,
+  saved views), offers tab (per-supplier summary cards + recent decisions with
+  inline WON/LOST), stock tab (per-warehouse negative + turnover with date window).
+- **Saved Views**: per-tab named filter sets in localStorage (≤10 per scope,
+  best-effort — storage failure never blocks the page).
+- **Palette keyboard navigation**: flat navigable result list (arrow keys move,
+  Enter opens, hover syncs the selection, role=listbox).
+
+### 6.5 Tests (g10-09..12)
+Debt JOIN semantics on an isolated company (no journals → accounting 0, operational
+5m, delta −5m, one UNMATCHED claim with its document CHECK constraint, one PENDING
+check), offers outcome aggregation (winner 100% / loser 0% / undecided absent),
+per-warehouse attribution on an independent variant (−25 on MAIN), turnover
+relationships (in/out ≥ the spec's movements, ending = in − out) + invalid-period
+rejection.

@@ -519,4 +519,231 @@ describeIntegration('g10 management reports (Phase 10)', () => {
       }
     }
   });
+
+  it('g10-09 debt report: accounting/operational/delta + unmatched claims + unsettled checks per party', async () => {
+    // Isolated company — no journals needed: the SUBSIDIARY LEDGER math is
+    // g7c-proven; this test pins the JOIN semantics (op balance, claims,
+    // checks) that slice 2 adds on top.
+    const company = await prisma.company.create({
+      data: { nameFa: `g10-debt-${Date.now()}`, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    try {
+      const customer = await prisma.party.create({
+        data: {
+          companyId: company.id,
+          type: 'COMPANY',
+          nameFa: 'g10 مشتری بدهکار',
+          roles: { create: [{ role: 'CUSTOMER' }] },
+        },
+        select: { id: true },
+      });
+      partyIds.push(customer.id);
+      await prisma.partyOperationalBalance.create({
+        data: { companyId: company.id, partyId: customer.id, balance: new Prisma.Decimal(5_000_000) },
+      });
+      // CUSTOMER_RECEIPT claims reference an operational document (CHECK
+      // claims_direction_document_chk) — attach a minimal sales document.
+      const claimDoc = await prisma.salesDocument.create({
+        data: {
+          companyId: company.id,
+          documentNumber: `G10DEBT-${Date.now()}`,
+          customerPartyId: customer.id,
+          salespersonUserId: actorId,
+          documentDate: new Date(),
+          status: 'COMPLETED',
+        },
+        select: { id: true },
+      });
+      salesDocIds.push(claimDoc.id);
+      await prisma.operationalSettlementClaim.create({
+        data: {
+          companyId: company.id,
+          direction: 'CUSTOMER_RECEIPT',
+          partyId: customer.id,
+          salesDocumentId: claimDoc.id,
+          amount: new Prisma.Decimal(2_000_000),
+          status: 'UNMATCHED',
+        },
+      });
+      await prisma.check.create({
+        data: {
+          companyId: company.id,
+          direction: 'INCOMING',
+          checkNumber: `G10-${Date.now()}`,
+          partyId: customer.id,
+          amount: new Prisma.Decimal(1_500_000),
+          dueDate: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
+          status: 'PENDING',
+        },
+      });
+
+      const report = await service.debtReport(company.id, 'CUSTOMER');
+      const mine = report.items.find((i) => i.partyId === customer.id)!;
+      expect(mine).toBeDefined();
+      // no journals posted → accounting side is zero; the OPERATIONAL side is
+      // the cache (5m) → reconciliation delta = 0 − 5m
+      expect(Number(mine.accountingBalance)).toBe(0);
+      expect(Number(mine.operationalBalance)).toBe(5_000_000);
+      expect(Number(mine.reconciliationDelta)).toBe(-5_000_000);
+      expect(mine.unmatchedClaims).toEqual({ count: 1, total: 2_000_000 });
+      expect(mine.unsettledChecks.count).toBe(1);
+      expect(mine.unsettledChecks.total).toBe(1_500_000);
+      expect(mine.unsettledChecks.nearestDueDate).not.toBeNull();
+      expect(report.items).toHaveLength(1);
+    } finally {
+      await prisma.check.deleteMany({ where: { companyId: company.id } }).catch(() => undefined);
+      await prisma.operationalSettlementClaim.deleteMany({ where: { companyId: company.id } }).catch(() => undefined);
+      await prisma.partyOperationalBalance.deleteMany({ where: { companyId: company.id } }).catch(() => undefined);
+      await prisma.party.deleteMany({ where: { companyId: company.id } }).catch(() => undefined);
+      await prisma.company.delete({ where: { id: company.id } }).catch(() => undefined);
+    }
+  });
+
+  it('g10-10 offers outcome: explicit decisions aggregate; undecided suppliers absent', async () => {
+    const supplierA = await makeParty(`g10 پیشنهاددهنده A ${marker}`, ['SUPPLIER']);
+    const supplierB = await makeParty(`g10 پیشنهاددهنده B ${marker}`, ['SUPPLIER']);
+    const request = await prisma.priceRequest.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        requestNumber: `P10PR-${Date.now()}`,
+        requesterUserId: actorId,
+        requestDate: new Date(),
+        status: 'OFFERED',
+      },
+      select: { id: true },
+    });
+    const line = await prisma.priceRequestLine.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        priceRequestId: request.id,
+        productVariantId: variantId,
+        requestedQuantity: new Prisma.Decimal(10),
+        uomId,
+      },
+      select: { id: true },
+    });
+    const offerA = await prisma.supplierOffer.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        priceRequestLineId: line.id,
+        supplierPartyId: supplierA,
+        offeredPrice: new Prisma.Decimal(34000),
+        uomId,
+      },
+      select: { id: true },
+    });
+    await prisma.supplierOffer.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        priceRequestLineId: line.id,
+        supplierPartyId: supplierB,
+        offeredPrice: new Prisma.Decimal(34500),
+        uomId,
+      },
+      select: { id: true },
+    });
+
+    // decide: A wins, B loses
+    await prisma.supplierOffer.update({
+      where: { id: offerA.id },
+      data: { outcome: 'WON', outcomeDecidedAt: new Date(), outcomeDecidedBy: actorId },
+    });
+    await prisma.supplierOffer.updateMany({
+      where: { priceRequestLineId: line.id, supplierPartyId: supplierB },
+      data: { outcome: 'LOST', outcomeDecidedAt: new Date(), outcomeDecidedBy: actorId },
+    });
+
+    const report = await service.offersOutcomeReport(INTEGRATION_COMPANY_ID);
+    const a = report.perSupplier.find((r) => r.partyId === supplierA)!;
+    expect(a.won).toBe(1);
+    expect(a.winRate).toBe(100);
+    const b = report.perSupplier.find((r) => r.partyId === supplierB)!;
+    expect(b.lost).toBe(1);
+    expect(b.winRate).toBe(0);
+    expect(report.recent.length).toBeGreaterThanOrEqual(2);
+    expect(report.recent.every((r) => r.outcome === 'WON' || r.outcome === 'LOST')).toBe(true);
+
+    await prisma.supplierOffer.deleteMany({ where: { priceRequestLineId: line.id } });
+    await prisma.priceRequestLine.delete({ where: { id: line.id } });
+    await prisma.priceRequest.delete({ where: { id: request.id } });
+  });
+
+  it('g10-11 negative stock BY WAREHOUSE attributes the internal side', async () => {
+    const main = await ensureMainWarehouse(prisma);
+    // INDEPENDENT variant — the shared variant carries g10-06's movements.
+    const uoms = await seededUoms(prisma);
+    const own = await createVariantEx(prisma, `${marker}-w`, {
+      defaultUomId: uoms.tonId,
+      inventoryUomId: uoms.tonId,
+    });
+    const internal = await prisma.stockLocation.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        code: `G10-${marker}-W2`,
+        nameFa: 'انبار دوم g10',
+        type: 'INTERNAL',
+        warehouseId: main.id,
+      },
+      select: { id: true },
+    });
+    const supplierLoc = await prisma.stockLocation.create({
+      data: { companyId: INTEGRATION_COMPANY_ID, code: `G10-${marker}-S2`, nameFa: 'تأمین g10-2', type: 'SUPPLIER' },
+      select: { id: true },
+    });
+    const customerLoc = await prisma.stockLocation.create({
+      data: { companyId: INTEGRATION_COMPANY_ID, code: `G10-${marker}-C2`, nameFa: 'مشتری g10-2', type: 'CUSTOMER' },
+      select: { id: true },
+    });
+    const move = async (direction: 'IN' | 'OUT', qty: number, from: string, to: string, tag: string) => {
+      const row = await prisma.stockMovement.create({
+        data: {
+          companyId: INTEGRATION_COMPANY_ID,
+          productVariantId: own.variantId,
+          sourceQuantity: new Prisma.Decimal(qty),
+          sourceUomId: uoms.tonId,
+          normalizedQuantity: new Prisma.Decimal(qty),
+          inventoryUomId: uoms.tonId,
+          direction,
+          sourceLocationId: from,
+          destinationLocationId: to,
+          warehouseId: main.id,
+          movementDate: new Date(),
+          sourceEntityType: 'LOADING',
+          sourceEntityId: internal.id,
+          idempotencyKey: `g10-${tag}-${Date.now()}-${Math.random()}`,
+        },
+        select: { id: true },
+      });
+      movementIds.push(row.id);
+    };
+    await move('IN', 40, supplierLoc.id, internal.id, 'in2');
+    await move('OUT', 65, internal.id, customerLoc.id, 'out2');
+
+    const rows = await service.negativeStockByWarehouse(INTEGRATION_COMPANY_ID);
+    const mine = rows.find((r) => r.variantId === own.variantId && r.warehouseId === main.id);
+    expect(mine).toBeDefined();
+    expect(mine!.balance).toBeCloseTo(-25, 4);
+    expect(mine!.warehouseName).toBe('انبار مرکزی');
+    await prisma.productVariant.delete({ where: { id: own.variantId } }).catch(() => undefined);
+  });
+
+  it('g10-12 warehouse turnover: period flows + full-history ending balance', async () => {
+    const rows = await service.warehouseTurnover(
+      INTEGRATION_COMPANY_ID,
+      new Date(Date.now() - 24 * 60 * 60 * 1000),
+      new Date(Date.now() + 24 * 60 * 60 * 1000),
+    );
+    const mine = rows.find((r) => r.variantId === variantId);
+    expect(mine).toBeDefined();
+    // this spec moved 40 in + 65 out on the shared variant (g10-11), plus
+    // g10-06's 100 in + 150 out — assert the relationships, not absolutes.
+    expect(mine!.inQty).toBeGreaterThanOrEqual(100);
+    expect(mine!.outQty).toBeGreaterThanOrEqual(150);
+    expect(mine!.endingBalance).toBeCloseTo(mine!.inQty - mine!.outQty, 4);
+    // invalid period rejected
+    await expect(
+      service.warehouseTurnover(INTEGRATION_COMPANY_ID, new Date(Date.now() + 86400000), new Date()),
+    ).rejects.toMatchObject({ message: 'REPORT_INVALID_PERIOD' });
+  });
 });

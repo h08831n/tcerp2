@@ -13,6 +13,7 @@ import {
 import { Request } from 'express';
 import { PriceRequestsService } from './price-requests.service';
 import { SupplierOffersService } from './supplier-offers.service';
+import { DecideOfferOutcomeDto } from './price-request.dto';
 import {
   AddOfferDto,
   AddPriceRequestLineDto,
@@ -193,6 +194,19 @@ export class PriceRequestsController {
   }
 
   // ── supplier offers ──
+
+  /** Phase 10: explicit WIN/LOSS decision on an offer (audited, re-decidable). */
+  @Post('offers/:offerId/outcome')
+  @RequirePermissions('price_request.manage_offers')
+  async decideOfferOutcome(
+    @Param('offerId', ParseUUIDPipe) offerId: string,
+    @Body() dto: DecideOfferOutcomeDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyIdOf(actor, request);
+    return this.offersService.decideOutcome(companyId, offerId, dto.outcome, actor, this.ctx(request));
+  }
 
   @Post('lines/:lineId/offers')
   @RequirePermissions('price_request.manage_offers')

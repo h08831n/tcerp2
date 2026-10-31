@@ -47,7 +47,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "تقویم", href: "/calendar", icon: <NavIcon d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /> },
   { label: "گردش کار", href: "/workflow", icon: <NavIcon d="M4 6h6v6H4zM14 12h6v6h-6zM10 9h2a2 2 0 012 2v1" /> },
   { label: "اعلان‌ها", href: "/notifications", icon: <NavIcon d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0" /> },
-  { label: "گزارش‌ها", href: "#", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
+  { label: "گزارش‌ها", href: "/reports", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
   { label: "تنظیمات", href: "#", icon: <NavIcon d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 00-2-1.2L14.5 2h-5L9 4.5a7.4 7.4 0 00-2 1.2l-2.5-1-2 3.5L4.6 9.8a7.4 7.4 0 000 2.4L2.5 13.8l2 3.5 2.5-1a7.4 7.4 0 002 1.2L9.5 20h5l.4-2.5a7.4 7.4 0 002-1.2l2.5 1 2-3.5-2.1-1.6c.1-.4.1-.8.1-1.2z" /> },
 ];
 
@@ -94,6 +94,7 @@ const TITLES: Record<string, string> = {
   "/approvals": "تاییدها",
   "/workflow": "گردش کار",
   "/notifications": "مرکز اعلان‌ها",
+  "/reports": "گزارش‌های مدیریتی",
 };
 
 /** Blocks rendering until /auth/me resolves; redirects to /login on failure. */
