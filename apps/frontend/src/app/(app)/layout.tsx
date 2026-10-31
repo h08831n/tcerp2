@@ -39,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "صف انتشار", href: "/publishing", icon: <NavIcon d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /> },
   { label: "بارگیری", href: "/loadings", icon: <NavIcon d="M1 3h15v13H1zM16 8h4l3 3v5h-7V8zM5.5 21a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm13 0a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" /> },
   { label: "انبار", href: "/inventory", icon: <NavIcon d="M4 21V8l8-5 8 5v13M9 21v-6h6v6M9 11h.01M15 11h.01" /> },
+  { label: "خزانه", href: "/treasury", icon: <NavIcon d="M3 7h18v13H3zM3 7l9-4 9 4M12 11v5M9 13h6" /> },
   { label: "حسابداری", href: "/accounting", icon: <NavIcon d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" /> },
   { label: "رویدادها و قواعد", href: "/accounting/events", icon: <NavIcon d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5" /> },
   { label: "فاکتور مالیاتی", href: "/tax-invoices", icon: <NavIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M9 13h6M9 17h4" /> },
@@ -98,6 +99,7 @@ const TITLES: Record<string, string> = {
   "/reports": "گزارش‌های مدیریتی",
   "/imports": "ورود اطلاعات",
   "/settings": "تنظیمات",
+  "/treasury": "خزانه",
 };
 
 /** Blocks rendering until /auth/me resolves; redirects to /login on failure. */
