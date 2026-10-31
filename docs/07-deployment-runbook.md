@@ -43,6 +43,36 @@ docker exec -i tcerp-postgres pg_restore --list "$BACKUP_FILE" | grep -cE "TABLE
 برای محیط استقرار به‌جای docker از snapshot/ابزار بکاپ همان محیط استفاده شود —
 اصل، اثبات خوانا بودن **همان فایل نام‌برده** است.
 
+#### ۱-ب. drill تأییدشدهٔ Restore (فاز ۱۱ / Gate G — اجرا و تأیید ۲۰۲۶-۱۰-۳۱)
+
+restor پذیرفته‌شدن بکاپ را با یک **رستور واقعی به دیتابیس scratch** اثبات می‌کند —
+خوانا بودن فایل به‌تنهایی کافی نیست. دستورات تأییدشده (کالسل تست tcerp_test):
+
+```bash
+# ۱) dump (plain-SQL، بدون owner/privileges تا رستور مستقل از roleها باشد)
+docker exec tcerp-postgres pg_dump -U tcerp -d tcerp_test --no-owner --no-privileges > drill.sql
+
+# ۲) رستور به دیتابیس scratch تازه
+psql -U tcerp -d postgres -c "DROP DATABASE IF EXISTS tcerp_restore_drill; CREATE DATABASE tcerp_restore_drill;"
+psql -U tcerp -d tcerp_restore_drill -f drill.sql   # باید بدون ERROR تمام شود
+
+# ۳) راستی‌آزمایی parity (هر چهار مورد باید برابر باشند)
+#    - تعداد جدول‌های public (۱۱۳/۱۱۳ در drill ثبت‌شده)
+#    - تعداد ردیف جداول کلیدی (companies/parties/journal_entries/audit_logs/…)
+#    - _prisma_migrations: ۴۱ ردیف، همه finished_at NOT NULL
+#    - pg_constraint (۳۳۲) و pg_indexes (۳۳۸)
+#    - جمع مالی: SELECT SUM(debit) FROM journal_lines; (دقیقاً برابر — 3388.0000)
+# ۴) پاک‌سازی: DROP DATABASE tcerp_restore_drill;
+```
+
+**نتیجهٔ ثبت‌شدهٔ drill**: ۱۱۳/۱۱۳ جدول، هر ۱۳ شمارش کلیدی برابر، ۴۱/۴۱ migration
+تکمیل‌شده، جمع `SUM(debit)` journal_lines دقیقاً برابر (۳۳۸۸.۰۰۰۰)،
+۳۳۲/۳۳۲ constraint و ۳۳۸/۳۳۸ index — بکاپ واقعاً قابل رستور است.
+
+**نکات**: برای بکاپ‌های زمان‌بندی‌شده تولیدی از فرمت `-Fc` (custom) با
+`pg_restore` استفاده شود (بخش ۱ بالا)؛ drill بالا با plain-SQL parity کامل را
+قابل مقایسهٔ متنی می‌کند. رستور روی دیتابیس scratch اجرا شود، هرگز روی اصل.
+
 ### ۲. توقف ارسال رویداد
 
 سرویس بک‌اند را موقتاً متوقف کنید تا بین migration و استارت بک‌اند جدید،
