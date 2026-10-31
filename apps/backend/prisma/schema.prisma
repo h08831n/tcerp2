@@ -55,6 +55,7 @@ model Company {
   notifications      Notification[]
   smsTemplates       SmsTemplate[]
   smsMessages        SmsMessage[]
+  importJobs         ImportJob[]
   queueJobs          QueueJob[]
   bankAccounts       BankAccount[]
   chartOfAccounts    ChartOfAccount[]
@@ -3196,6 +3197,76 @@ model Check {
 
   @@index([companyId, status, dueDate])
   @@map("checks")
+}
+
+// ─────────────── Phase 11 (Gate G): Import engine ───────────────
+// Durable, resumable CSV import. The JOB row carries the policy + counters;
+// every row is its OWN durable ImportJobRow (payload + per-row status) so a
+// crashed run resumes exactly where it stopped and the error report is the
+// data itself. Batch commits NEVER span the whole file (handover §31).
+
+enum ImportEntityType {
+  PARTY
+}
+
+enum ImportJobStatus {
+  VALIDATED
+  RUNNING
+  COMPLETED
+  PARTIALLY_FAILED
+  FAILED
+  CANCELLED
+}
+
+enum ImportRowStatus {
+  PENDING
+  OK
+  FAILED
+  DUPLICATE
+}
+
+model ImportJob {
+  id             String           @id @default(uuid()) @db.Uuid
+  companyId      String           @map("company_id") @db.Uuid
+  entityType     ImportEntityType
+  fileName       String           @map("file_name")
+  status         ImportJobStatus  @default(VALIDATED)
+  totalRows      Int              @default(0) @map("total_rows")
+  okCount        Int              @default(0) @map("ok_count")
+  updatedCount   Int              @default(0) @map("updated_count")
+  failedCount    Int              @default(0) @map("failed_count")
+  duplicateCount Int              @default(0) @map("duplicate_count")
+  commitMode     String           @default("PER_ROW")
+  batchSize      Int              @default(500) @map("batch_size")
+  options        Json?
+  columnMapping  Json             @map("column_mapping")
+  createdById    String           @map("created_by_id") @db.Uuid
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  startedAt      DateTime?        @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime?        @map("finished_at") @db.Timestamptz(6)
+
+  company Company         @relation(fields: [companyId], references: [id])
+  rows    ImportJobRow[]
+
+  @@index([companyId, createdAt])
+  @@map("import_jobs")
+}
+
+model ImportJobRow {
+  id        String          @id @default(uuid()) @db.Uuid
+  jobId     String          @map("job_id") @db.Uuid
+  rowIndex  Int             @map("row_index")
+  status    ImportRowStatus @default(PENDING)
+  payload   Json
+  error     String?
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, rowIndex])
+  @@map("import_job_rows")
 }
 
 // ───────────────────── Customer portal ─────────────────────

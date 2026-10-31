@@ -121,6 +121,10 @@ const PERMISSIONS: PermissionSeed[] = [
   { code: 'workflow.admin', module: 'workflow', action: 'admin', description: 'Manage workflow definitions (states, transitions, conditions)' },
   // management reports (Phase 10, Gate F)
   { code: 'reports.view', module: 'reports', action: 'view', description: 'View management reports, dashboards and global search' },
+  // import/export engine (Phase 11, Gate G)
+  { code: 'imports.view', module: 'imports', action: 'view', description: 'View import jobs, validation reports and CSV samples' },
+  { code: 'imports.run', module: 'imports', action: 'run', description: 'Create / run / cancel CSV import jobs' },
+  { code: 'imports.export', module: 'imports', action: 'export', description: 'Export company-wide CSV data (manager-only OWN-scope bypass)' },
   // workflow timers
   { code: 'workflowtimer.view', module: 'workflowtimer', action: 'view', description: 'View workflow timers' },
   { code: 'workflowtimer.edit', module: 'workflowtimer', action: 'edit', description: 'Schedule / cancel workflow timers' },
@@ -250,6 +254,8 @@ const ROLE_DEFS: {
       'workflow.view', 'workflow.start',
       // Phase 10: management reports.
       'reports.view',
+      // Phase 11: import/export (manager-level, export is a company-wide dump).
+      'imports.view', 'imports.run', 'imports.export',
       'inventory.view',
       'activities.view', 'activities.create', 'activities.edit', 'activities.view_all', 'activities.override', 'activities.delete',
       'parties.view', 'parties.create', 'parties.edit',
@@ -281,7 +287,8 @@ const ROLE_DEFS: {
       'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit', 'goods_receipt.confirm', 'goods_receipt.reverse',
       'inventory.view',
       'price_request.view', 'price_request.create', 'price_request.manage_offers',
-      'allocations.manage', 'approvals.request', 'reports.view'],
+      'allocations.manage', 'approvals.request', 'reports.view',
+      'imports.view', 'imports.run', 'imports.export'],
   },
   {
     code: 'accountant',
@@ -291,7 +298,7 @@ const ROLE_DEFS: {
     // powers — financial reports, fiscal calendar, posting rules. Never grant
     // accounting.* to operational roles by default.
     permissions: ['files.view', 'files.download', 'queue.view', 'treasury.view', 'treasury.create', 'treasury.edit', 'claims.view', 'claims.edit', 'tax.view', 'tax.create', 'tax.edit',
-      'sales.view', 'purchase.view', 'tax.submit', 'approvals.request', 'reports.view',
+      'sales.view', 'purchase.view', 'tax.submit', 'approvals.request', 'reports.view', 'imports.view',
       'accounting.report', 'accounting.fiscal.manage', 'accounting.posting.manage'],
   },
   {

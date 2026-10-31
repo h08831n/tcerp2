@@ -36,6 +36,7 @@ import { ApprovalsModule } from './approvals/approvals.module';
 import { WorkflowTimerModule } from './workflow-timer/workflow-timer.module';
 import { WorkflowModule } from './workflow/workflow.module';
 import { ReportsModule } from './reports/reports.module';
+import { ImportsModule } from './imports/imports.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PortalModule } from './portal/portal.module';
 import { IntegrationsModule } from './integrations/integrations.module';
@@ -89,6 +90,7 @@ import { HealthModule } from './health/health.module';
     WorkflowTimerModule,
     WorkflowModule,
     ReportsModule,
+    ImportsModule,
     NotificationsModule,
     PortalModule,
     IntegrationsModule,

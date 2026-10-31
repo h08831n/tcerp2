@@ -146,6 +146,36 @@
   (weighbridge-delta, incomplete).
 
 
+## Phase 11 — Import/Export (Gate G, slice 1 DONE — pending review)
+
+- **Durable resumable CSV import engine + parties export (DONE)**: migration
+  `20241101120000_phase11_import_jobs` (import_jobs + import_job_rows with
+  per-row status/payload — the error report IS the data). Flow: create
+  (CSV parse via RFC-4180 parser in common/utils/csv.ts + columnMapping
+  {field: header} + PRE-RUN validation of every row: nameFa required, type
+  enum, phone canonicalized via normalizeIranMobile, nationalId/economicCode
+  digit shapes; bad rows FAILED before any write) → run (resumable: only
+  PENDING rows, durable counters after EVERY batch; commitMode PER_ROW
+  default — row-isolated transactions — or BATCH chunk all-or-nothing,
+  explicit documented tradeoff; phone natural-key dedupe INSIDE the row tx so
+  same-file collisions become DUPLICATE; updateMatched option updates
+  matched-by-phone parties) → per-row error report + counts
+  ok/updated/duplicate/failed. Idempotent re-runs of COMPLETED jobs process
+  nothing new; CANCELLED/FAILED refuse. Permissions: imports.view / imports.run
+  / imports.export (export = company-wide dump → deliberate OWN-scope bypass
+  behind its own manager-only permission; salesperson holds none — g11-08).
+  Endpoints: POST/GET /imports, GET /imports/:id(/rows), POST :id/run,
+  POST :id/cancel, GET /imports/sample, GET /exports/parties.csv (UTF-8 BOM).
+  Frontend /imports (upload + auto-mapping + validation summary + run +
+  per-row drill-down + cancel + sample download). Tests: csv.spec unit 5 +
+  g11-01..08 integration (validation, neighbour-sparing PER_ROW, idempotent
+  re-run, simulated crash-resume, updateMatched both ways, BATCH rollback,
+  export company isolation, sample/seed contract). Doc:
+  docs/14-import-export.md. Deferred: XLSX reader, product/price/document
+  entities, queue-driven execution for huge files, backup/restore drill,
+  load test, monitoring wiring.
+
+
 
 ## Completed
 
