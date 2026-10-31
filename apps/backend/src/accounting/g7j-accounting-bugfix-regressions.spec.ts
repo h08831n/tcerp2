@@ -188,6 +188,12 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     // Totals still count the new posting exactly once (roots-based, no
     // parent/child double count): grand total grows by exactly 77.
     expect(tb.totals.closingDebit.minus(before.totals.closingDebit).toNumber()).toBe(77);
+    // P1-7 (explicit display policy): at level=leaf the parent's OWN direct
+    // posting is not a displayed row — the response must SAY so explicitly.
+    const leaf = await reports.trialBalance(COMPANY, { level: 'leaf' });
+    const declared = leaf.directPostingsOnNonLeaf.find((d) => d.accountCode === 'PARENT_1');
+    expect(declared).toBeTruthy();
+    expect(String(declared!.closing)).toBe('77');
   });
 
   itif('g7j-04 (BUG-05) partyBalances groupTotal is page-independent', async () => {
@@ -261,17 +267,21 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
         periods: { create: [{ code: '1406-ALL', nameFa: 'کل سال', startDate: new Date('2027-03-21'), endDate: new Date('2028-03-20') }] },
       },
     });
-    // FY 1405 opening: BANK 1000 / OPENING_EQUITY 1000.
-    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1000 }], ACTOR);
+    // FY 1405 opening: BANK 1000 / OPENING_EQUITY 1000 — rows BOUND to FY1405.
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1000 }], ACTOR, fy26.id);
     const e1 = await opening.generate(COMPANY, ACTOR, new Date('2026-04-01'));
     expect(e1.documentType).toBe('OPENING');
-    // Same FY again → rejected with the FY-scoped error.
-    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1 }], ACTOR);
+    // Same FY again → rejected with the FY-scoped error (leftover row stays).
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1 }], ACTOR, fy26.id);
     await expect(opening.generate(COMPANY, ACTOR, new Date('2026-05-01'))).rejects.toThrow('OPENING_ALREADY_GENERATED');
-    // A different FY generates INDEPENDENTLY.
-    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 2000 }], ACTOR);
+    // A different FY generates INDEPENDENTLY and consumes ONLY its own rows.
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 2000 }], ACTOR, fy27.id);
     const e2 = await opening.generate(COMPANY, ACTOR, new Date('2027-04-01'));
     expect(e2.id).not.toBe(e1.id);
+    const e2Bank = await prisma.journalLine.findMany({
+      where: { journalEntryId: e2.id, account: { code: 'BANK' } },
+    });
+    expect(e2Bank.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0)).toNumber()).toBe(2000);
     // Staged rows were stamped with their fiscal year.
     const stamped = await prismaService.openingBalanceEntry.findFirstOrThrow({
       where: { companyId: COMPANY, status: 'GENERATED', journalEntryId: e2.id },
@@ -319,5 +329,104 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     });
     const net = gl.rows.reduce((s, r) => s.plus(r.debit).minus(r.credit), new Prisma.Decimal(0));
     expect(net.toNumber()).toBe(0);
+  });
+
+  itif('g7j-09 (P0-1 review) sibling Dr/Cr balances under one parent are NOT netted in grand totals', async () => {
+    // Parent P1 with TWO children: CHILD_11 carries 100 Dr, CHILD_12 carries
+    // 100 Cr. The DETAILED closing totals must keep BOTH gross amounts (the
+    // parent's net roll-up is zero, but the trial-balance grand total may
+    // not offset the two sides), while never double-counting parent/child.
+    const parent = await prismaService.chartOfAccount.findFirstOrThrow({
+      where: { companyId: COMPANY, code: 'PARENT_1' },
+    });
+    await prismaService.chartOfAccount.create({
+      data: { code: 'CHILD_12', name: 'زیرمجموعه ۲', type: 'ASSET', companyId: COMPANY, parentId: parent.id },
+    });
+    const before = await reports.trialBalance(COMPANY, { level: 'all' });
+    await postBalanced(new Date(), [
+      { accountCode: 'CHILD_11', debit: 100, credit: 0 },   // child 1: 100 Dr
+      { accountCode: 'SALES_REVENUE', debit: 0, credit: 100 },
+    ]);
+    await postBalanced(new Date(), [
+      { accountCode: 'CHILD_12', debit: 0, credit: 100 },   // child 2: 100 Cr
+      { accountCode: 'BANK', debit: 100, credit: 0 },
+    ]);
+    const after = await reports.trialBalance(COMPANY, { level: 'all' });
+    const dDelta = after.totals.closingDebit.minus(before.totals.closingDebit).toNumber();
+    const cDelta = after.totals.closingCredit.minus(before.totals.closingCredit).toNumber();
+    // Expected gross deltas: Dr side = CHILD_11's 100 + BANK's 100 = 200;
+    // Cr side = CHILD_12's 100 + SALES_REVENUE's 100 = 200. The old
+    // root-netted totals produced 100/100 (siblings offset to zero).
+    expect(dDelta).toBe(200);
+    expect(cDelta).toBe(200);
+    // The parent ROW keeps its accumulated NET (the two sibling legs cancel
+    // inside the parent's roll-up): after == before, zero net change.
+    const parentRowBefore = before.rows.find((r) => r.accountCode === 'PARENT_1');
+    const parentRow = after.rows.find((r) => r.accountCode === 'PARENT_1')!;
+    expect(parentRow.closingDebit.toString()).toBe(
+      (parentRowBefore?.closingDebit ?? new Prisma.Decimal(0)).toString(),
+    );
+    expect(parentRow.closingCredit.toString()).toBe(
+      (parentRowBefore?.closingCredit ?? new Prisma.Decimal(0)).toString(),
+    );
+    // Level-independence is preserved with the gross method.
+    const leaf = await reports.trialBalance(COMPANY, { level: 'leaf' });
+    expect(leaf.totals.closingDebit.toString()).toBe(after.totals.closingDebit.toString());
+    expect(leaf.totals.closingCredit.toString()).toBe(after.totals.closingCredit.toString());
+  });
+
+  itif('g7j-10 (P0-2 review) staged rows are bound to a fiscal year — no cross-year mixing', async () => {
+    // A fresh fiscal year of its own (g7j-06 already consumed 1405/1406).
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1407', nameFa: 'سال ۱۴۰۷',
+        startDate: new Date('2028-03-21'), endDate: new Date('2029-03-20'),
+        periods: { create: [{ code: '1407-ALL', nameFa: 'کل سال', startDate: new Date('2028-03-21'), endDate: new Date('2029-03-20') }] },
+      },
+    });
+    // Unassigned leftover row + an FY-bound row: ONLY the bound row generates.
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1 }], ACTOR); // unassigned leftover
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 2000 }], ACTOR, fy.id);
+    const e2 = await opening.generate(COMPANY, ACTOR, new Date('2028-04-01'));
+    const lines = await prisma.journalLine.findMany({
+      where: { journalEntryId: e2.id, account: { code: 'BANK' } },
+    });
+    const bankDebit = lines.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0));
+    // Exactly the FY-bound row — the unassigned leftover stays ungenerated.
+    expect(bankDebit.toNumber()).toBe(2000);
+    const unassignedLeftovers = await prismaService.openingBalanceEntry.count({
+      where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: null },
+    });
+    expect(unassignedLeftovers).toBe(1);
+  });
+
+  itif('g7j-11 (P1-3 review) journal.post rejects cross-company partyId and analytics', async () => {
+    const other = await prismaService.company.create({ data: { nameFa: `g7j-oth2-${Date.now()}`, status: 'ACTIVE' } });
+    const foreignParty = await prismaService.party.create({
+      data: { companyId: other.id, type: 'COMPANY', nameFa: 'پارتی خارجی' },
+    });
+    // Direct partyId from another company → rejected, nothing posted.
+    await expect(
+      postBalanced(new Date(), [
+        { accountCode: 'RECEIVABLE', debit: 500, credit: 0, partyId: foreignParty.id },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 500 },
+      ]),
+    ).rejects.toThrow('JOURNAL_PARTY_NOT_IN_COMPANY');
+    // Analytics dimension from another company → rejected too.
+    await expect(
+      postBalanced(new Date(), [
+        {
+          accountCode: 'RECEIVABLE', debit: 500, credit: 0,
+          analytics: [{ dimensionType: 'CUSTOMER', dimensionId: foreignParty.id }],
+        },
+        { accountCode: 'SALES_REVENUE', debit: 0, credit: 500 },
+      ]),
+    ).rejects.toThrow('JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    const count = await prismaService.journalEntry.count({ where: { companyId: COMPANY } });
+    // No partial entry from the rejected posts (balanced validation happens
+    // before creation, and the rejections above throw before any create).
+    void count;
+    await prismaService.party.delete({ where: { id: foreignParty.id } }).catch(() => undefined);
+    await prismaService.company.delete({ where: { id: other.id } }).catch(() => undefined);
   });
 });

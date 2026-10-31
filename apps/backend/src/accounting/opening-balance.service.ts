@@ -34,13 +34,31 @@ export class OpeningBalanceService {
     private readonly auditService: AuditService,
   ) {}
 
+  /**
+   * Stage opening rows. P0-2 (review of 80502ae): rows are bound to a
+   * FISCAL YEAR at stage time — `fiscalYearId` must belong to this company
+   * and be OPEN. Without any fiscal calendar (legacy fallback) rows stay
+   * fiscalYearId=null and only the legacy company-wide generate consumes
+   * them; with a calendar, unassigned rows are never silently mixed into a
+   * year's entry (they stay STAGED and visible via list()).
+   */
   async stage(
     companyId: string,
     rows: OpeningBalanceRowInput[],
     actor: { id: string; username: string },
+    fiscalYearId?: string,
   ) {
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new ValidationError('OPENING_ROWS_REQUIRED');
+    }
+    let fiscalYear: { id: string; status: string } | null = null;
+    if (fiscalYearId !== undefined) {
+      fiscalYear = await this.prisma.fiscalYear.findFirst({
+        where: { id: fiscalYearId, companyId },
+        select: { id: true, status: true },
+      });
+      if (!fiscalYear) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
+      if (fiscalYear.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
     }
     const accounts = await this.prisma.chartOfAccount.findMany({
       where: { companyId },
@@ -94,6 +112,7 @@ export class OpeningBalanceService {
         const createdRow = await tx.openingBalanceEntry.create({
           data: {
             companyId,
+            fiscalYearId: fiscalYear?.id ?? null,
             accountCode: row.accountCode,
             partyId: row.partyId ?? null,
             partyName: row.partyName ?? null,
@@ -124,45 +143,41 @@ export class OpeningBalanceService {
   }
 
   /**
-   * Generate ONE balanced OPENING journal entry from all STAGED rows.
-   * BUG-07: the uniqueness scope is the FISCAL YEAR of the entry date, not
-   * the company — FY 1404 may carry an opening entry while FY 1405 generates
-   * its own independently; a duplicate within the SAME fiscal year is
-   * rejected. Without any fiscal calendar the legacy company-wide rule
-   * applies (documented fallback). Staged rows are a batch — they all flow
-   * into the generated entry and are stamped with the resolved fiscal year.
+   * Generate ONE balanced OPENING journal entry from the STAGED rows bound
+   * to the TARGET fiscal year — explicit `fiscalYearId`, else the fiscal
+   * year containing `entryDate`, else the legacy company-wide batch
+   * (fiscalYearId=null rows, no calendar). Rows staged for OTHER years (or
+   * unassigned rows while a calendar exists) are NEVER consumed — no
+   * cross-year mixing (P0-2). BUG-07: the uniqueness scope is the fiscal
+   * year of the entry; a duplicate within the SAME fiscal year is rejected.
    */
   async generate(
     companyId: string,
     actor: { id: string; username: string },
     entryDate?: Date,
+    fiscalYearId?: string,
   ) {
+    if (fiscalYearId !== undefined) {
+      const explicit = await this.prisma.fiscalYear.findFirst({
+        where: { id: fiscalYearId, companyId },
+        select: { id: true },
+      });
+      if (!explicit) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
+    }
+    const date = entryDate ?? new Date();
+    const fiscalYear = fiscalYearId
+      ? await this.prisma.fiscalYear.findFirst({
+          where: { id: fiscalYearId },
+          select: { id: true, startDate: true, endDate: true },
+        })
+      : await this.prisma.fiscalYear.findFirst({
+          where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
+          select: { id: true, startDate: true, endDate: true },
+        });
     const staged = await this.prisma.openingBalanceEntry.findMany({
-      where: { companyId, status: 'STAGED' },
+      where: { companyId, status: 'STAGED', fiscalYearId: fiscalYear?.id ?? null },
     });
     if (staged.length === 0) throw new ValidationError('NO_STAGED_OPENING_ROWS');
-
-    const date = entryDate ?? new Date();
-    const fiscalYear = await this.prisma.fiscalYear.findFirst({
-      where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
-      select: { id: true, startDate: true, endDate: true },
-    });
-    const existing = await this.prisma.journalEntry.findFirst({
-      where: {
-        companyId,
-        documentType: 'OPENING',
-        status: 'POSTED',
-        ...(fiscalYear
-          ? { entryDate: { gte: fiscalYear.startDate, lte: fiscalYear.endDate } }
-          : {}),
-      },
-    });
-    if (existing) {
-      throw new ConflictError(
-        fiscalYear ? 'OPENING_ALREADY_GENERATED_FOR_FISCAL_YEAR' : 'OPENING_ALREADY_GENERATED',
-        { entryNumber: existing.entryNumber },
-      );
-    }
 
     const result = await this.prisma.$transaction(async (tx: Tx) => {
       // Concurrency control: serialize generate() per company so two racing

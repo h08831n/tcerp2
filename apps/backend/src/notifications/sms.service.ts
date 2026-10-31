@@ -74,50 +74,151 @@ export class SmsService implements OnApplicationBootstrap {
   ) {}
 
   /**
-   * BUG-12 recovery sweep (boot time): a crash or DB hiccup between the
-   * QUEUED row insert and the queue.enqueue commit leaves the row QUEUED
-   * with queuedJobId=null — the message would silently never send. Re-enqueue
-   * with the SAME stable idempotency key (`sms-job:{id}`); the queue's unique
-   * key makes the sweep idempotent under concurrency and across replicas.
-   * The sweep never marks anything SENT — only the real sms.send handler may.
+   * P1-4/P1-5 recovery (review of 80502ae): NO SMS row may stay QUEUED
+   * forever. Runs once at boot AND on a periodic interval (unref'd — never
+   * keeps the process alive). Covers:
+   *  (a) rows with queuedJobId=null — crash/DB hiccup between the row insert
+   *      and the queue.commit → re-enqueue with the SAME stable key
+   *      (`sms-job:{id}`), honoring the persisted `scheduledFor` delay
+   *      (a 24h-delayed message is re-enqueued DELAYED, never fired early);
+   *  (b) rows whose QueueJob row vanished (deleted) → relink + re-enqueue;
+   *  (c) rows whose job reached a terminal state WITHOUT the handler
+   *      write-back (crash between send/finish and the SMS update) → the
+   *      row is marked FAILED with a reconcile note. NEVER auto-resent —
+   *      the true outcome is unknowable and a blind resend could double-
+   *      text a real customer; manual resend is the operator's decision.
+   * Redis-independent: enqueue is a durable DB row (BullMQ is only the
+   * transport). Idempotent under concurrency via the unique idempotencyKey.
    */
   async onApplicationBootstrap(): Promise<void> {
+    // Boot sweep + periodic sweep. clearInterval is never needed: the
+    // process-lifetime timer is intentionally unref'd.
+    void this.runSweep('boot');
+    const timer = setInterval(() => void this.runSweep('periodic'), SmsService.RECONCILE_INTERVAL_MS);
+    timer.unref?.();
+  }
+
+  private async runSweep(trigger: string): Promise<void> {
     try {
-      const recovered = await this.reconcileStuckQueued();
-      if (recovered > 0) this.logger.log(`sms reconcile: re-enqueued ${recovered} stuck QUEUED message(s)`);
+      const result = await this.reconcileStuckQueued();
+      const total = result.requeued + result.detached + result.markedFailed;
+      if (total > 0) {
+        this.logger.log(
+          `sms reconcile(${trigger}): requeued=${result.requeued} detached=${result.detached} ` +
+            `markedFailed=${result.markedFailed}`,
+        );
+      }
     } catch (error) {
-      // Never block boot; the sweep can also be invoked manually.
-      this.logger.warn(`sms reconcile failed (will retry next boot): ${String(error)}`);
+      this.logger.warn(`sms reconcile(${trigger}) failed (next sweep retries): ${String(error)}`);
     }
   }
 
-  async reconcileStuckQueued(): Promise<number> {
-    const stuck = await this.prisma.smsMessage.findMany({
-      where: { status: SmsMessageStatus.QUEUED, queuedJobId: null },
-      select: { id: true, companyId: true },
-      take: 200,
-    });
-    let recovered = 0;
-    for (const message of stuck) {
-      try {
-        const job = await this.queueService.enqueue({
-          jobType: 'sms.send',
-          companyId: message.companyId,
-          payload: { smsMessageId: message.id },
-          idempotencyKey: `sms-job:${message.id}`,
-          maxAttempts: 3,
-          priority: 'HIGH',
-        });
-        await this.prisma.smsMessage.update({
-          where: { id: message.id },
-          data: { queuedJobId: job.id },
-        });
-        recovered += 1;
-      } catch {
-        // Stays QUEUED/queuedJobId=null — reconcilable on the next sweep.
+  private static readonly RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
+
+  async reconcileStuckQueued(): Promise<{
+    requeued: number;
+    detached: number;
+    markedFailed: number;
+  }> {
+    let requeued = 0;
+    let detached = 0;
+    let markedFailed = 0;
+
+    // Pass A — rows that never got a job (crash window between row insert
+    // and queue.commit): re-enqueue with the SAME stable key, honoring the
+    // persisted scheduledFor (P1-5). Paged over 200s until exhausted.
+    for (;;) {
+      const orphans = await this.prisma.smsMessage.findMany({
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: null },
+        select: { id: true, companyId: true, scheduledFor: true },
+        take: 200,
+      });
+      if (orphans.length === 0) break;
+      for (const message of orphans) {
+        try {
+          await this.reenqueue(message.id, message.companyId, message.scheduledFor);
+          requeued += 1;
+        } catch {
+          // Stays reconcilable — the next sweep retries.
+        }
       }
     }
-    return recovered;
+
+    // Pass B — rows whose job reached a terminal state WITHOUT the handler
+    // write-back, or whose job row vanished. Terminal-without-write-back →
+    // mark FAILED with a reconcile note, NEVER auto-resent (the true outcome
+    // is unknowable; a blind resend could double-text a real customer —
+    // manual resend is the operator's decision). Missing job → detach and
+    // re-enqueue. Paged over 200s until exhausted.
+    for (;;) {
+      const linked = await this.prisma.smsMessage.findMany({
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: { not: null } },
+        select: { id: true, companyId: true, scheduledFor: true, queuedJobId: true },
+        take: 200,
+      });
+      if (linked.length === 0) break;
+      const jobIds = [...new Set(linked.map((m) => m.queuedJobId!))];
+      const jobs = await this.prisma.queueJob.findMany({
+        where: { id: { in: jobIds } },
+        select: { id: true, status: true },
+      });
+      const byId = new Map(jobs.map((j) => [j.id, j.status]));
+      let handledInPage = 0;
+      for (const message of linked) {
+        const status = byId.get(message.queuedJobId!);
+        try {
+          if (status === undefined) {
+            // (b) job row vanished — detach, then re-enqueue.
+            await this.prisma.smsMessage.update({
+              where: { id: message.id },
+              data: { queuedJobId: null },
+            });
+            detached += 1;
+            await this.reenqueue(message.id, message.companyId, message.scheduledFor);
+            requeued += 1;
+            handledInPage += 1;
+          } else if (status === 'FAILED' || status === 'SUCCEEDED') {
+            // (c) terminal without write-back → observable FAILED.
+            await this.prisma.smsMessage.update({
+              where: { id: message.id },
+              data: {
+                status: SmsMessageStatus.FAILED,
+                error: `reconcile: job ${status} without handler write-back`,
+              },
+            });
+            markedFailed += 1;
+            handledInPage += 1;
+          }
+          // PENDING/SCHEDULED/PROCESSING → the queue still owns it; skip.
+        } catch {
+          // Stays reconcilable — the next sweep retries.
+        }
+      }
+      // Guard against an infinite loop when a page cannot be progressed.
+      if (handledInPage === 0) break;
+    }
+    return { requeued, detached, markedFailed };
+  }
+
+  private async reenqueue(
+    messageId: string,
+    companyId: string,
+    scheduledFor: Date | null,
+  ): Promise<void> {
+    const delayMs = scheduledFor ? Math.max(0, scheduledFor.getTime() - Date.now()) : 0;
+    const job = await this.queueService.enqueue({
+      jobType: 'sms.send',
+      companyId,
+      payload: { smsMessageId: messageId },
+      idempotencyKey: `sms-job:${messageId}`,
+      maxAttempts: 3,
+      priority: 'HIGH',
+      delayMs,
+    });
+    await this.prisma.smsMessage.update({
+      where: { id: messageId },
+      data: { queuedJobId: job.id },
+    });
   }
 
   async render(
@@ -171,6 +272,12 @@ export class SmsService implements OnApplicationBootstrap {
           partyId: input.partyId,
           idempotencyKey: input.idempotencyKey,
           requestedById: input.requestedById,
+          // P1-5: persist the intended send time — the reconcile sweep
+          // re-enqueues crash-window rows with this SAME delay.
+          scheduledFor:
+            input.delayMs && input.delayMs > 0
+              ? new Date(Date.now() + input.delayMs)
+              : null,
         },
       });
     } catch (error) {

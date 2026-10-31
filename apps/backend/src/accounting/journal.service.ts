@@ -107,6 +107,57 @@ export class JournalService {
       throw new ValidationError('Unknown account code(s)', { missing });
     }
 
+    // P1-3 (review of 80502ae): every analytic reference must belong to THIS
+    // company — a cross-company partyId/dimensionId must be rejected before
+    // any row is written (no inter-company relation, no disclosure). Batched
+    // lookups keep this O(1) queries per entity kind, not per line. Direct
+    // line partyIds and analytics dimensionIds report DISTINCT error codes.
+    const directPartyIds = new Set<string>();
+    const analyticPartyIds = new Set<string>();
+    const refVariantIds = new Set<string>();
+    const refUserIds = new Set<string>();
+    for (const line of input.lines) {
+      if (line.partyId) directPartyIds.add(line.partyId);
+      for (const a of line.analytics ?? []) {
+        if (a.dimensionType === 'CUSTOMER' || a.dimensionType === 'SUPPLIER') analyticPartyIds.add(a.dimensionId);
+        else if (a.dimensionType === 'PRODUCT_VARIANT') refVariantIds.add(a.dimensionId);
+        else if (a.dimensionType === 'SALESPERSON' || a.dimensionType === 'EMPLOYEE') refUserIds.add(a.dimensionId);
+        // PROJECT / COST_CENTER have no owning table yet — label-level only.
+      }
+    }
+    const assertAllFound = (found: Set<string>, ids: Set<string>, code: string) => {
+      const notFound = [...ids].filter((id) => !found.has(id));
+      if (notFound.length > 0) throw new ValidationError(code, { notFound });
+    };
+    if (directPartyIds.size > 0) {
+      const found = await tx.party.findMany({
+        where: { id: { in: [...directPartyIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((p) => p.id)), directPartyIds, 'JOURNAL_PARTY_NOT_IN_COMPANY');
+    }
+    if (analyticPartyIds.size > 0) {
+      const found = await tx.party.findMany({
+        where: { id: { in: [...analyticPartyIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((p) => p.id)), analyticPartyIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+    if (refVariantIds.size > 0) {
+      const found = await tx.productVariant.findMany({
+        where: { id: { in: [...refVariantIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((v) => v.id)), refVariantIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+    if (refUserIds.size > 0) {
+      const found = await tx.userCompany.findMany({
+        where: { companyId: input.companyId, userId: { in: [...refUserIds] } },
+        select: { userId: true },
+      });
+      assertAllFound(new Set(found.map((u) => u.userId)), refUserIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+
     const { number: entryNumber } = await this.sequences.allocate(
       input.companyId,
       'JOURNAL_ENTRY',
