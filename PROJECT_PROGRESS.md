@@ -232,6 +232,15 @@
   closed; deferred remains only external monitoring wiring + backup/restore drill
   (HELD for final review per owner instruction).
 
+- **Gate G slice 7 (DONE — pending review)**: monitoring wiring — Prometheus
+  exposition endpoint GET /metrics (public, aggregate-only, no PII): families
+  tcerp_queue_jobs{status}, tcerp_import_jobs{status}, tcerp_approvals_pending,
+  tcerp_sms_queued/failed in text format v0.0.4 (HELP/TYPE with base family name +
+  labelled samples); degradation contract = failed family renders -1 instead of 500
+  so scrapers don't page target-down for a partial failure (g11-17 pins both paths
+  incl. Proxy-injected query failure). External scrape config documented in
+  docs/14 §12.
+
 
 
 ## Completed

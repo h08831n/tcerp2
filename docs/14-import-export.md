@@ -139,3 +139,15 @@ execution for huge files, backup/restore and load tests are NOT done yet.
   row by design for isolation). Production sizing: BATCH commit mode or larger
   batchSize raises throughput ~linearly at the cost of chunk-level atomicity —
   an explicit operator choice documented in §2.1.
+
+
+## 12. Slice 7 — Monitoring wiring (Prometheus exposition)
+
+- `GET /metrics` (public, aggregate-only): Prometheus text format v0.0.4 with the
+  operational families — `tcerp_queue_jobs{status}` (worker liveness), `tcerp_import_jobs{status}`
+  (stalled runs), `tcerp_approvals_pending` (SLA), `tcerp_sms_queued`/`tcerp_sms_failed`
+  (notification pipeline). Aggregate counters ONLY — no PII, no document contents.
+- Degradation contract: a counter-query failure renders `-1` for that family instead
+  of HTTP 500 — a scraping monitor must not page for target-down when only one
+  family is unreadable (g11-12 pattern extended; g11-17 pins both paths).
+- Scrape config: standard Prometheus `scrape_configs` entry against `/api/metrics`.
