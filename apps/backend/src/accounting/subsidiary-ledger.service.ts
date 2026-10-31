@@ -48,6 +48,20 @@ export class SubsidiaryLedgerService {
       LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`;
 
     const total = rows.length > 0 ? Number(rows[0].total) : 0;
+    // BUG-05: the group total is the signed sum over the ENTIRE filtered set,
+    // independent of the page window (LIMIT/OFFSET must not change it). The
+    // JOIN/WHERE shape mirrors the page query exactly — one filter contract.
+    const groupTotalRows = await this.prisma.$queryRaw<Array<{ total: Prisma.Decimal | string | null }>>`
+      SELECT SUM(l.debit - l.credit) AS total
+      FROM journal_lines l
+      JOIN journal_entries je ON je.id = l.journal_entry_id AND je.status IN ('POSTED', 'REVERSED')
+      JOIN chart_of_accounts a ON a.id = l.account_id AND a.code = ${opts.accountCode}
+      JOIN parties p ON p.id = l.party_id
+      JOIN party_roles pr ON pr.party_id = p.id AND pr.role = ${opts.role}::"PartyRoleType"
+      WHERE p.company_id = ${companyId}::uuid AND p.archived_at IS NULL
+        AND je.entry_date <= ${asOf}
+        ${opts.search ? Prisma.sql`AND p.name_fa ILIKE ${'%' + opts.search + '%'}` : Prisma.empty}`;
+    const groupTotal = new Prisma.Decimal(groupTotalRows[0]?.total ?? 0).times(sign);
     const partyIds = rows.map((r) => r.party_id);
     const opBalances = partyIds.length
       ? await this.prisma.partyOperationalBalance.findMany({
@@ -74,34 +88,54 @@ export class SubsidiaryLedgerService {
       };
     });
 
-    const groupTotal = items.reduce((s, i) => s.plus(i.accountingBalance), new Prisma.Decimal(0));
     return { items, groupTotal, page, pageSize, total };
   }
 
-  /** Per-party movement lines (drill-down). */
+  /** Per-party movement lines (drill-down). BUG-06: with a `from` filter the
+   *  balance BEFORE `from` opens the ledger — Closing = Opening + ΣDr - ΣCr. */
   async partyLedger(
     companyId: string,
     partyId: string,
     opts: { accountCode: string; from?: Date; to?: Date },
   ) {
-    const lines = await this.prisma.journalLine.findMany({
-      where: {
+    const sign = opts.accountCode === 'RECEIVABLE' ? 1 : -1;
+    const lineScope = {
+      companyId,
+      partyId,
+      entry: {
         companyId,
-        partyId,
-        entry: {
-          companyId,
-          status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] },
-          ...(opts.from || opts.to
-            ? {
-                entryDate: {
-                  ...(opts.from ? { gte: opts.from } : {}),
-                  ...(opts.to ? { lte: opts.to } : {}),
-                },
-              }
-            : {}),
-        },
-        account: { code: opts.accountCode },
+        status: { in: ['POSTED', 'REVERSED'] as ('POSTED' | 'REVERSED')[] },
+        ...(opts.from || opts.to
+          ? {
+              entryDate: {
+                ...(opts.from ? { gte: opts.from } : {}),
+                ...(opts.to ? { lte: opts.to } : {}),
+              },
+            }
+          : {}),
       },
+      account: { code: opts.accountCode },
+    };
+
+    let openingBalance = new Prisma.Decimal(0);
+    if (opts.from) {
+      const openingAgg = await this.prisma.journalLine.aggregate({
+        where: {
+          ...lineScope,
+          entry: {
+            ...lineScope.entry,
+            entryDate: { lt: opts.from },
+          },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      openingBalance = new Prisma.Decimal(openingAgg._sum.debit ?? 0)
+        .minus(new Prisma.Decimal(openingAgg._sum.credit ?? 0))
+        .times(sign);
+    }
+
+    const lines = await this.prisma.journalLine.findMany({
+      where: lineScope,
       orderBy: [{ entry: { entryDate: 'asc' } }, { id: 'asc' }],
       select: {
         id: true,
@@ -113,8 +147,7 @@ export class SubsidiaryLedgerService {
         },
       },
     });
-    const sign = opts.accountCode === 'RECEIVABLE' ? 1 : -1;
-    let running = new Prisma.Decimal(0);
+    let running = openingBalance;
     const rows = lines.map((l) => {
       running = running.plus(
         new Prisma.Decimal(l.debit).minus(new Prisma.Decimal(l.credit)).times(sign),
@@ -130,7 +163,7 @@ export class SubsidiaryLedgerService {
         runningBalance: running,
       };
     });
-    return { partyId, rows, closingBalance: running };
+    return { partyId, openingBalance, rows, closingBalance: running };
   }
 
   /**

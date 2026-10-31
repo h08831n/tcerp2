@@ -106,13 +106,21 @@ export class ReportsService {
 
     // Opening balance = signed sum BEFORE the window start. Without `from`
     // the window starts at history begin → opening is zero by definition
-    // (all rows appear in the ledger itself).
+    // (all rows appear in the ledger itself). It shares the party/analytic
+    // filters with the rows (BUG-02): a party-filtered ledger must open on
+    // THAT party's balance, or page-2 running balances (which re-aggregate
+    // with the filters) would disagree with page 1 and closingBalance would
+    // mix scopes.
     let openingBalance = new Prisma.Decimal(0);
     if (opts.from) {
       const openingAgg = await this.prisma.journalLine.aggregate({
         where: {
           companyId,
           accountId: { in: ids },
+          ...(opts.partyId ? { partyId: opts.partyId } : {}),
+          ...(opts.analyticType && opts.analyticId
+            ? { analytics: { some: { dimensionType: opts.analyticType as never, dimensionId: opts.analyticId } } }
+            : {}),
           entry: {
             companyId,
             status: { in: ['POSTED', 'REVERSED'] },
@@ -181,6 +189,9 @@ export class ReportsService {
 
     let running = openingBalance;
     if (cursorData) {
+      // BUG-01 (residual caught by g7j-01): the in-window before-cursor sum
+      // must CONTINUE from the opening balance, not replace it — with a
+      // `from` filter the pre-window balance lives only in openingBalance.
       const beforeCursor = await this.prisma.journalLine.aggregate({
         where: {
           AND: [
@@ -196,9 +207,11 @@ export class ReportsService {
         },
         _sum: { debit: true, credit: true },
       });
-      running = new Prisma.Decimal(beforeCursor._sum?.debit ?? 0)
-        .minus(new Prisma.Decimal(beforeCursor._sum?.credit ?? 0))
-        .times(sign);
+      running = openingBalance.plus(
+        new Prisma.Decimal(beforeCursor._sum?.debit ?? 0)
+          .minus(new Prisma.Decimal(beforeCursor._sum?.credit ?? 0))
+          .times(sign),
+      );
     }
 
     const rows: LedgerRow[] = page.map((l) => {
@@ -329,8 +342,13 @@ export class ReportsService {
     // eslint-disable-next-line no-console
 
     const leafBalances = new Map<string, { opening: Prisma.Decimal; periodDebit: Prisma.Decimal; periodCredit: Prisma.Decimal; closing: Prisma.Decimal }>();
+    // BUG-04 policy (documented): direct postings on a NON-leaf account are
+    // allowed (data imports/opening balances may carry parent codes) and are
+    // NEVER dropped — rollup(id) = own direct sums + descendants. BUG-03
+    // totals are computed over LEAF balances only, so the grand total is
+    // independent of the display level (all/leaf/summary) and can never
+    // double-count parents.
     for (const account of accounts) {
-      if (!leafIds.has(account.id)) continue;
       const b = beforeMap.get(account.id);
       const p = periodMap.get(account.id);
       leafBalances.set(account.id, {
@@ -359,8 +377,6 @@ export class ReportsService {
       return total;
     };
 
-    let totalDebit = new Prisma.Decimal(0);
-    let totalCredit = new Prisma.Decimal(0);
     const place = (v: Prisma.Decimal, normalDebit: boolean) => {
       if (v.isZero()) return { d: new Prisma.Decimal(0), c: new Prisma.Decimal(0) };
       const abs = v.gte(0) ? v : new Prisma.Decimal(0).minus(v);
@@ -372,6 +388,19 @@ export class ReportsService {
           ? { d: new Prisma.Decimal(0), c: abs }
           : { d: abs, c: new Prisma.Decimal(0) };
     };
+
+    // BUG-03: grand totals are the sum over ROOT accounts' rollups — every
+    // posting is counted EXACTLY once regardless of the display level.
+    // (Summing the displayed rows double-counts at level=all, where a parent
+    // row and its child rows are both visible.)
+    const roots = accounts.filter((a) => !a.parentId);
+    let totalDebit = new Prisma.Decimal(0);
+    let totalCredit = new Prisma.Decimal(0);
+    for (const root of roots) {
+      const placed = place(rollup(root.id, 'closing'), this.normalSide(root.type) === 'DEBIT');
+      totalDebit = totalDebit.plus(placed.d);
+      totalCredit = totalCredit.plus(placed.c);
+    }
 
     const rows = accounts
       .filter((a) => (level === 'leaf' ? leafIds.has(a.id) : level === 'summary' ? childrenOf.has(a.id) : true))
@@ -386,8 +415,6 @@ export class ReportsService {
         const normalDebit = this.normalSide(account.type) === 'DEBIT';
         const openingPlaced = place(rollup(account.id, 'opening'), normalDebit);
         const closingPlaced = place(rollup(account.id, 'closing'), normalDebit);
-        totalDebit = totalDebit.plus(closingPlaced.d);
-        totalCredit = totalCredit.plus(closingPlaced.c);
         return {
           accountCode: account.code,
           accountName: account.name,
@@ -408,10 +435,10 @@ export class ReportsService {
       level,
       rows,
       totals: {
-        openingDebit: rows.reduce((s, r) => s.plus(r.openingDebit), new Prisma.Decimal(0)),
-        openingCredit: rows.reduce((s, r) => s.plus(r.openingCredit), new Prisma.Decimal(0)),
-        debit: rows.reduce((s, r) => s.plus(r.debit), new Prisma.Decimal(0)),
-        credit: rows.reduce((s, r) => s.plus(r.credit), new Prisma.Decimal(0)),
+        openingDebit: roots.reduce((s, r) => s.plus(place(rollup(r.id, 'opening'), this.normalSide(r.type) === 'DEBIT').d), new Prisma.Decimal(0)),
+        openingCredit: roots.reduce((s, r) => s.plus(place(rollup(r.id, 'opening'), this.normalSide(r.type) === 'DEBIT').c), new Prisma.Decimal(0)),
+        debit: roots.reduce((s, r) => s.plus(rollup(r.id, 'periodDebit')), new Prisma.Decimal(0)),
+        credit: roots.reduce((s, r) => s.plus(rollup(r.id, 'periodCredit')), new Prisma.Decimal(0)),
         closingDebit: totalDebit,
         closingCredit: totalCredit,
       },

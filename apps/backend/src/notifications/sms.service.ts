@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import {
   NotificationRule,
   Prisma,
@@ -64,7 +64,7 @@ export interface EnqueueSmsInput {
  * existing row, never a second message or a second queue job).
  */
 @Injectable()
-export class SmsService {
+export class SmsService implements OnApplicationBootstrap {
   private readonly logger = new Logger('SmsService');
 
   constructor(
@@ -72,6 +72,54 @@ export class SmsService {
     private readonly queueService: QueueService,
     private readonly auditService: AuditService,
   ) {}
+
+  /**
+   * BUG-12 recovery sweep (boot time): a crash or DB hiccup between the
+   * QUEUED row insert and the queue.enqueue commit leaves the row QUEUED
+   * with queuedJobId=null — the message would silently never send. Re-enqueue
+   * with the SAME stable idempotency key (`sms-job:{id}`); the queue's unique
+   * key makes the sweep idempotent under concurrency and across replicas.
+   * The sweep never marks anything SENT — only the real sms.send handler may.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      const recovered = await this.reconcileStuckQueued();
+      if (recovered > 0) this.logger.log(`sms reconcile: re-enqueued ${recovered} stuck QUEUED message(s)`);
+    } catch (error) {
+      // Never block boot; the sweep can also be invoked manually.
+      this.logger.warn(`sms reconcile failed (will retry next boot): ${String(error)}`);
+    }
+  }
+
+  async reconcileStuckQueued(): Promise<number> {
+    const stuck = await this.prisma.smsMessage.findMany({
+      where: { status: SmsMessageStatus.QUEUED, queuedJobId: null },
+      select: { id: true, companyId: true },
+      take: 200,
+    });
+    let recovered = 0;
+    for (const message of stuck) {
+      try {
+        const job = await this.queueService.enqueue({
+          jobType: 'sms.send',
+          companyId: message.companyId,
+          payload: { smsMessageId: message.id },
+          idempotencyKey: `sms-job:${message.id}`,
+          maxAttempts: 3,
+          priority: 'HIGH',
+        });
+        await this.prisma.smsMessage.update({
+          where: { id: message.id },
+          data: { queuedJobId: job.id },
+        });
+        recovered += 1;
+      } catch {
+        // Stays QUEUED/queuedJobId=null — reconcilable on the next sweep.
+      }
+    }
+    return recovered;
+  }
+
   async render(
     companyId: string,
     input: { templateCode?: string; text?: string },
@@ -136,15 +184,26 @@ export class SmsService {
       }
       throw error;
     }
-    const job = await this.queueService.enqueue({
-      jobType: 'sms.send',
-      companyId,
-      payload: { smsMessageId: message.id },
-      idempotencyKey: `sms-job:${message.id}`,
-      maxAttempts: 3,
-      priority: 'HIGH',
-      delayMs: Math.max(0, input.delayMs ?? 0),
-    });
+    let job;
+    try {
+      job = await this.queueService.enqueue({
+        jobType: 'sms.send',
+        companyId,
+        payload: { smsMessageId: message.id },
+        idempotencyKey: `sms-job:${message.id}`,
+        maxAttempts: 3,
+        priority: 'HIGH',
+        delayMs: Math.max(0, input.delayMs ?? 0),
+      });
+    } catch (error) {
+      // BUG-12: the QUEUED row stays behind with queuedJobId=null —
+      // recoverable by the boot-time reconcile sweep (stable idempotency
+      // key). The failure is surfaced, never swallowed.
+      this.logger.error(
+        `sms enqueue failed for message ${message.id}; row stays QUEUED (reconcilable): ${String(error)}`,
+      );
+      throw error;
+    }
     message = await this.prisma.smsMessage.update({
       where: { id: message.id },
       data: { queuedJobId: job.id },

@@ -74,6 +74,23 @@ export class OpeningBalanceService {
           if (normalDebit && credit.gt(0)) throw new ValidationError('OPENING_SIDE_MISMATCH', { index });
           if (!normalDebit && debit.gt(0)) throw new ValidationError('OPENING_SIDE_MISMATCH', { index });
         }
+        // BUG-09: every staged reference must belong to THIS company — a
+        // cross-company party/variant id must be rejected outright so no
+        // inter-company relation or disclosure can enter an accounting doc.
+        if (row.partyId) {
+          const party = await tx.party.findFirst({
+            where: { id: row.partyId, companyId },
+            select: { id: true },
+          });
+          if (!party) throw new ValidationError('OPENING_PARTY_NOT_IN_COMPANY', { index });
+        }
+        if (row.productVariantId) {
+          const variant = await tx.productVariant.findFirst({
+            where: { id: row.productVariantId, companyId },
+            select: { id: true },
+          });
+          if (!variant) throw new ValidationError('OPENING_VARIANT_NOT_IN_COMPANY', { index });
+        }
         const createdRow = await tx.openingBalanceEntry.create({
           data: {
             companyId,
@@ -106,7 +123,15 @@ export class OpeningBalanceService {
     });
   }
 
-  /** Generate ONE balanced OPENING journal entry from all STAGED rows. */
+  /**
+   * Generate ONE balanced OPENING journal entry from all STAGED rows.
+   * BUG-07: the uniqueness scope is the FISCAL YEAR of the entry date, not
+   * the company — FY 1404 may carry an opening entry while FY 1405 generates
+   * its own independently; a duplicate within the SAME fiscal year is
+   * rejected. Without any fiscal calendar the legacy company-wide rule
+   * applies (documented fallback). Staged rows are a batch — they all flow
+   * into the generated entry and are stamped with the resolved fiscal year.
+   */
   async generate(
     companyId: string,
     actor: { id: string; username: string },
@@ -117,13 +142,49 @@ export class OpeningBalanceService {
     });
     if (staged.length === 0) throw new ValidationError('NO_STAGED_OPENING_ROWS');
 
-    const existing = await this.prisma.journalEntry.findFirst({
-      where: { companyId, documentType: 'OPENING', status: 'POSTED' },
-    });
-    if (existing) throw new ConflictError('OPENING_ALREADY_GENERATED', { entryNumber: existing.entryNumber });
-
     const date = entryDate ?? new Date();
+    const fiscalYear = await this.prisma.fiscalYear.findFirst({
+      where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
+      select: { id: true, startDate: true, endDate: true },
+    });
+    const existing = await this.prisma.journalEntry.findFirst({
+      where: {
+        companyId,
+        documentType: 'OPENING',
+        status: 'POSTED',
+        ...(fiscalYear
+          ? { entryDate: { gte: fiscalYear.startDate, lte: fiscalYear.endDate } }
+          : {}),
+      },
+    });
+    if (existing) {
+      throw new ConflictError(
+        fiscalYear ? 'OPENING_ALREADY_GENERATED_FOR_FISCAL_YEAR' : 'OPENING_ALREADY_GENERATED',
+        { entryNumber: existing.entryNumber },
+      );
+    }
+
     const result = await this.prisma.$transaction(async (tx: Tx) => {
+      // Concurrency control: serialize generate() per company so two racing
+      // requests cannot both pass the pre-check and post twin OPENING entries.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${companyId}))`;
+      const raced = await tx.journalEntry.findFirst({
+        where: {
+          companyId,
+          documentType: 'OPENING',
+          status: 'POSTED',
+          ...(fiscalYear
+            ? { entryDate: { gte: fiscalYear.startDate, lte: fiscalYear.endDate } }
+            : {}),
+        },
+        select: { id: true, entryNumber: true },
+      });
+      if (raced) {
+        throw new ConflictError(
+          fiscalYear ? 'OPENING_ALREADY_GENERATED_FOR_FISCAL_YEAR' : 'OPENING_ALREADY_GENERATED',
+          { entryNumber: raced.entryNumber },
+        );
+      }
       // Build ALL lines FIRST: staged rows + OPENING_EQUITY residual, then post
       // ONE balanced entry (integrity gate #11 — no post-then-patch).
       const lines: Array<{
@@ -173,7 +234,7 @@ export class OpeningBalanceService {
 
       await tx.openingBalanceEntry.updateMany({
         where: { id: { in: staged.map((r) => r.id) } },
-        data: { status: 'GENERATED', journalEntryId: entry.id },
+        data: { status: 'GENERATED', journalEntryId: entry.id, fiscalYearId: fiscalYear?.id ?? null },
       });
       await this.auditService.recordTx(tx, {
         entityType: 'opening_balance',

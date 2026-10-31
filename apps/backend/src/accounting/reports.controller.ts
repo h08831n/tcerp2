@@ -6,6 +6,7 @@ import { Req } from '@nestjs/common';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CompanyContextService } from '../companies/company-context.service';
+import { ValidationError } from '../common/errors';
 import { ReportsService } from './reports.service';
 import { ProfitReportService } from './profit-report.service';
 import { ValuationReportService } from './valuation-report.service';
@@ -114,12 +115,30 @@ export class ReportsController {
   @Get('trial-balance')
   @RequirePermissions('accounting.report')
   async trialBalance(
+    @Query('from') from: string | undefined,
+    @Query('to') to: string | undefined,
     @Query('asOf') asOf: string | undefined,
+    @Query('level') level: string | undefined,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.reports.trialBalance(companyId, { asOf: asOf ? new Date(asOf) : new Date() });
+    // BUG-10: the service has always supported real windows and display
+    // levels — the API now exposes them. Conflict rule is explicit: `asOf`
+    // means "everything up to that date" (from = null, to = asOf) and is
+    // rejected when combined with an explicit `to`.
+    if (to && asOf) {
+      throw new ValidationError('TRIAL_BALANCE_ASOF_TO_CONFLICT', { to, asOf });
+    }
+    if (level && !['leaf', 'summary', 'all'].includes(level)) {
+      throw new ValidationError('TRIAL_BALANCE_LEVEL_INVALID', { level });
+    }
+    return this.reports.trialBalance(companyId, {
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+      asOf: asOf ? new Date(asOf) : undefined,
+      level: level as 'leaf' | 'summary' | 'all' | undefined,
+    });
   }
 
   @Get('subsidiary-ledger')
@@ -180,6 +199,7 @@ export class ReportsController {
     @Query('from') from: string | undefined,
     @Query('to') to: string | undefined,
     @Query('customerId') customerId: string | undefined,
+    @Query('supplierId') supplierId: string | undefined,
     @Query('salespersonUserId') salespersonUserId: string | undefined,
     @Query('productVariantId') productVariantId: string | undefined,
     @CurrentUser() actor: { id: string; username: string },
@@ -190,6 +210,9 @@ export class ReportsController {
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
       customerId,
+      // BUG-11: the service has always filtered by supplier — the controller
+      // was dropping the parameter before it reached the service.
+      supplierId,
       salespersonUserId,
       productVariantId,
     });

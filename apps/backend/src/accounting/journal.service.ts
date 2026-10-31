@@ -208,7 +208,7 @@ export class JournalService {
     return this.prisma.$transaction(async (trx) => {
       const original = await trx.journalEntry.findUnique({
         where: { id: entryId },
-        include: { lines: true },
+        include: { lines: { include: { analytics: true } } },
       });
       if (!original) throw new NotFoundError('Journal entry not found', { entryId });
       if (original.status === 'REVERSED') {
@@ -240,6 +240,14 @@ export class JournalService {
           debit: new Prisma.Decimal(line.credit ?? 0),
           credit: new Prisma.Decimal(line.debit ?? 0),
           description: line.description ?? undefined,
+          // BUG-13: analytic dimensions must survive the reversal — a
+          // dimension-filtered report must net the original against its
+          // reversal to zero (partyId was carried; analytics were dropped).
+          analytics: (line.analytics ?? []).map((a) => ({
+            dimensionType: a.dimensionType,
+            dimensionId: a.dimensionId,
+            label: a.label ?? undefined,
+          })),
         })),
       });
 
