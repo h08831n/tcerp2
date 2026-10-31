@@ -21,9 +21,16 @@ export class CreateImportJobDto {
   @MaxLength(200)
   fileName?: string;
 
-  /** Raw CSV content (header row required). */
+  /** Raw CSV content (header row required). Mutually exclusive with xlsxBase64. */
+  @IsOptional()
   @IsString()
-  csv!: string;
+  csv?: string;
+
+  /** Base64-encoded .xlsx workbook (first worksheet used) — alternative to csv. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(30_000_000)
+  xlsxBase64?: string;
 
   /** {field: csvHeader} — nameFa is mandatory. */
   @IsOptional()

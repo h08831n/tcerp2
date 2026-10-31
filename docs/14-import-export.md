@@ -1,10 +1,11 @@
 # 14 — Import/Export Engine (Phase 11, Gate G — slice 1)
 
 > Status: **LOCALLY VERIFIED** (CSV unit 5/5 + g11 integration 8/8 on `tcerp_test`; CI green on push).
-> Scope: handover §31 — the durable import engine + parties CSV export + DAILY_PRICE
-> import (slice 2) + a 1500-row load smoke. **Deferred**: XLSX reader (needs a library
-> decision), product/document entities, backup/restore drill (held for the FINAL review
-> stage per the owner's explicit instruction), full load test, monitoring wiring.
+> Scope: handover §31 — durable import engine + parties CSV export + DAILY_PRICE import
+> (slice 2) + XLSX input and health queue observability (slice 3) + a 1500-row load
+> smoke. **Deferred**: product/document import entities, full load test, external
+> monitoring wiring; backup/restore drill held for the FINAL review stage per the
+> owner's explicit instruction.
 
 ## 1. Engine shape (handover §31 requirements → implementation)
 
@@ -71,3 +72,18 @@ execution for huge files, backup/restore and load tests are NOT done yet.
 - **Load smoke (g11-10)**: 1500-row party import (PER_ROW, batchSize 500) completes
   100% OK in ~26s (~58 rows/s) on the dev Docker Postgres — a scale-sanity bound, not
   a benchmark; real sizing happens on production hardware.
+
+
+## 8. Slice 3 — XLSX input + queue observability
+
+- **XLSX input** (`exceljs@4.4.0`): `CreateImportJobDto` accepts `xlsxBase64` (base64
+  .xlsx) as an ALTERNATIVE to `csv` — exactly one of the two (both/neither →
+  `IMPORT_INPUT_REQUIRED`; unreadable workbook → `IMPORT_XLSX_UNREADABLE`). The FIRST
+  worksheet becomes the grid and flows through the SAME mapping/validation/engine for
+  both entity types (g11-11 proves a PARTY workbook end-to-end incl. the invalid-row
+  path). Frontend accepts `.xlsx` (base64 in the browser) with manual column mapping
+  (headers are not detectable in XLSX without an extra parse on the client — documented
+  UX tradeoff).
+- **Health queue observability**: `GET /health` now reports `queue: {pending,
+  scheduled, failed}` (best-effort — a metrics failure never flips the liveness
+  verdict) so a dead worker or a poisoning job is visible to uptime monitors (g11-12).

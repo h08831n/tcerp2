@@ -64,6 +64,7 @@ export default function ImportsPage() {
   const [updateMatched, setUpdateMatched] = useState(false);
   const [commitMode, setCommitMode] = useState<"PER_ROW" | "BATCH">("PER_ROW");
   const [creating, setCreating] = useState(false);
+  const [xlsxBase64, setXlsxBase64] = useState<string | null>(null);
 
   // rows modal
   const [rowsTarget, setRowsTarget] = useState<ImportJobDto | null>(null);
@@ -114,13 +115,14 @@ export default function ImportsPage() {
       const job = await createImportJob({
         entityType,
         fileName: fileName || "import.csv",
-        csv,
-        columnMapping: mapping,
+        ...(xlsxBase64 ? { xlsxBase64 } : { csv }),
+        columnMapping: Object.keys(mapping).length > 0 ? mapping : undefined,
         updateMatched,
         commitMode,
       });
       setCreateOpen(false);
       setCsv("");
+      setXlsxBase64(null);
       setHeaders([]);
       setMapping({});
       setNotice(
@@ -303,7 +305,7 @@ export default function ImportsPage() {
             فایل CSV
             <input
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,text/csv"
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) void onFile(file);
@@ -311,9 +313,11 @@ export default function ImportsPage() {
               className="mt-1 block w-full text-sm"
             />
           </label>
-          {headers.length > 0 && (
+          {(headers.length > 0 || xlsxBase64) && (
             <div className="space-y-1">
-              <p className="text-xs font-bold text-slate-700">تطبیق ستون‌ها</p>
+              <p className="text-xs font-bold text-slate-700">
+                تطبیق ستون‌ها {xlsxBase64 && <span className="text-slate-400">(ستون‌های فایل اکسل را دستی انتخاب کنید)</span>}
+              </p>
               {(entityType === "DAILY_PRICE" ? DAILY_PRICE_FIELDS : PARTY_FIELDS).map((field) => (
                 <div key={field} className="flex items-center gap-2 text-xs">
                   <span className="w-28 text-slate-600" dir="ltr">
@@ -328,7 +332,12 @@ export default function ImportsPage() {
                     onChange={(e) => setMapping({ ...mapping, [field]: e.target.value })}
                   >
                     <option value="">—</option>
-                    {headers.map((h) => (
+                    {(headers.length > 0
+                      ? headers
+                      : entityType === "DAILY_PRICE"
+                        ? DAILY_PRICE_FIELDS
+                        : PARTY_FIELDS
+                    ).map((h) => (
                       <option key={h} value={h}>
                         {h}
                       </option>
@@ -359,7 +368,7 @@ export default function ImportsPage() {
               size="sm"
               disabled={
                 creating ||
-                !csv.trim() ||
+                (!csv.trim() && !xlsxBase64) ||
                 (entityType === "PARTY" ? !mapping.nameFa : !(mapping.variantSku && mapping.date && mapping.price))
               }
               onClick={() => void submit()}

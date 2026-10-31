@@ -459,4 +459,79 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       .deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: `g11-load-${stamp}` } } })
       .catch(() => undefined);
   });
+
+  it('g11-11 XLSX import: base64 workbook parses through the same engine (PARTY)', async () => {
+    const ExcelJS = (await import('exceljs')).default;
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Parties');
+    sheet.addRow(['nameFa', 'phone']);
+    sheet.addRow(['شرکت گ۱۱ اکسل', '09123330011']);
+    sheet.addRow(['', '09123330012']); // invalid row — validation must catch it too
+    const buffer = await workbook.xlsx.writeBuffer();
+    const xlsxBase64 = Buffer.from(buffer).toString('base64');
+
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PARTY',
+        fileName: 'g11-excel.xlsx',
+        xlsxBase64,
+        columnMapping: { nameFa: 'nameFa', phone: 'phone' },
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    expect(job.totalRows).toBe(2);
+    expect(job.failedCount).toBe(1); // the empty-name row validated FAILED from the XLSX grid
+    const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    expect(finished.okCount).toBe(1);
+    const created = await prisma.party.findFirst({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: 'شرکت گ۱۱ اکسل' },
+      select: { id: true, phones: { select: { normalizedValue: true } } },
+    });
+    expect(created).not.toBeNull();
+    if (created) {
+      partyIds.push(created.id);
+      expect(created.phones[0]?.normalizedValue).toBe('09123330011');
+    }
+    // both inputs at once → rejected
+    await expect(
+      service.createJob(
+        INTEGRATION_COMPANY_ID,
+        {
+          entityType: 'PARTY', fileName: 'x', csv: 'nameFa,x', xlsxBase64,
+          columnMapping: { nameFa: 'nameFa' },
+        },
+        ACTOR, ctx,
+      ),
+    ).rejects.toMatchObject({ message: 'IMPORT_INPUT_REQUIRED' });
+    // garbage base64 → IMPORT_XLSX_UNREADABLE
+    await expect(
+      service.createJob(
+        INTEGRATION_COMPANY_ID,
+        { entityType: 'PARTY', fileName: 'x', xlsxBase64: 'not-a-workbook' },
+        ACTOR, ctx,
+      ),
+    ).rejects.toMatchObject({ message: 'IMPORT_XLSX_UNREADABLE' });
+  });
+
+  it('g11-12 health: liveness ok + queue observability counters present', async () => {
+    const health = (prismaService as unknown as {
+      $queryRaw: typeof prisma.$queryRaw;
+    });
+    void health;
+    // direct controller-level check via a fresh PrismaService (public route)
+    const { HealthController } = await import('../health/health.controller');
+    const controller = new HealthController(prismaService);
+    const response = { status: () => response, send: () => undefined } as never;
+    const payload = (await controller.check(response)) as {
+      status: string;
+      database: string;
+      queue: { pending: number; scheduled: number; failed: number } | null;
+    };
+    expect(payload.status).toBe('ok');
+    expect(payload.database).toBe('up');
+    expect(payload.queue).not.toBeNull();
+    expect(typeof payload.queue!.pending).toBe('number');
+  });
 });

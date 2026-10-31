@@ -188,6 +188,18 @@
   decision), product/document entities, backup/restore drill (HELD for the final
   review stage per the owner's explicit instruction), full load test, monitoring.
 
+- **Gate G slice 3 (DONE — pending review)**: XLSX input via exceljs@4.4.0 —
+  CreateImportJobDto accepts xlsxBase64 as an ALTERNATIVE to csv (exactly one;
+  IMPORT_INPUT_REQUIRED / IMPORT_XLSX_UNREADABLE guards); first worksheet → the SAME
+  grid → same mapping/validation/engine for both entity types (g11-11 end-to-end incl.
+  invalid-row path); frontend accepts .xlsx with base64 conversion + manual column
+  mapping (headers not client-detectable for XLSX — documented UX tradeoff). Health
+  queue observability: GET /health reports queue {pending, scheduled, failed}
+  best-effort (metrics failure never flips liveness; g11-12). Dependency added:
+  exceljs ^4.4.0 (actively maintained; the npm `xlsx` package is stale/known-CVE).
+  Deferred: product/document import entities, full load test, external monitoring
+  wiring; backup/restore drill HELD for final review (owner instruction).
+
 
 
 ## Completed

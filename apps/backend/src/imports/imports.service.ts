@@ -8,6 +8,7 @@ import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
 import { normalizeIranMobile, normalizePhone } from '../common/utils/phone';
 import { normalizeHeader, toCsv } from '../common/utils/csv';
+import type * as ExcelJS from 'exceljs';
 import { CreateImportJobDto, ImportJobQueryDto } from './imports.dto';
 
 /** PARTY import field whitelist + per-field validation (handover §31). */
@@ -46,6 +47,44 @@ export class ImportsService {
 
   // ───────────────────── create + validate ─────────────────────
 
+  /**
+   * Resolve the upload into a cell grid: CSV text directly, or a base64
+   * .xlsx workbook parsed via exceljs (FIRST worksheet, header row expected).
+   * Exactly one of the two must be provided.
+   */
+  private async resolveGrid(dto: CreateImportJobDto): Promise<string[][]> {
+    const hasCsv = typeof dto.csv === 'string' && dto.csv.length > 0;
+    const hasXlsx = typeof dto.xlsxBase64 === 'string' && dto.xlsxBase64.length > 0;
+    if (hasCsv === hasXlsx) {
+      throw new ValidationError('IMPORT_INPUT_REQUIRED', {
+        hint: 'Provide exactly one of csv | xlsxBase64.',
+      });
+    }
+    if (hasCsv) {
+      const { parseCsv } = await import('../common/utils/csv');
+      return parseCsv(dto.csv as string);
+    }
+    const ExcelJS = (await import('exceljs')).default;
+    const workbook = new ExcelJS.Workbook();
+    try {
+      const buffer = Buffer.from(dto.xlsxBase64 as string, 'base64');
+      await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+    } catch {
+      throw new ValidationError('IMPORT_XLSX_UNREADABLE');
+    }
+    const sheet = workbook.worksheets[0];
+    if (!sheet) throw new ValidationError('IMPORT_XLSX_EMPTY');
+    const grid: string[][] = [];
+    sheet.eachRow({ includeEmpty: false }, (row) => {
+      const cells: string[] = [];
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        cells[colNumber - 1] = cell.value === null || cell.value === undefined ? '' : String(cell.value);
+      });
+      grid.push(cells);
+    });
+    return grid.filter((cells) => cells.some((c) => c !== ''));
+  }
+
   async createJob(
     companyId: string,
     dto: CreateImportJobDto,
@@ -62,9 +101,8 @@ export class ImportsService {
     const batchSize = Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000);
     const updateMatched = dto.updateMatched === true;
 
-    // ── parse + map ──
-    const { parseCsv } = await import('../common/utils/csv');
-    const grid = parseCsv(dto.csv);
+    // ── parse + map (csv or xlsx) ──
+    const grid = await this.resolveGrid(dto);
     if (grid.length < 2) {
       throw new ValidationError('IMPORT_CSV_NEEDS_HEADER_AND_ROW');
     }
@@ -418,8 +456,7 @@ export class ImportsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
-    const { parseCsv } = await import('../common/utils/csv');
-    const grid = parseCsv(dto.csv);
+    const grid = await this.resolveGrid(dto);
     if (grid.length < 2) {
       throw new ValidationError('IMPORT_CSV_NEEDS_HEADER_AND_ROW');
     }

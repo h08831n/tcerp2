@@ -30,7 +30,8 @@ export interface ImportRowDto {
 export function createImportJob(body: {
   entityType: "PARTY" | "DAILY_PRICE";
   fileName?: string;
-  csv: string;
+  csv?: string;
+  xlsxBase64?: string;
   columnMapping?: Record<string, string>;
   updateMatched?: boolean;
   commitMode?: "PER_ROW" | "BATCH";
