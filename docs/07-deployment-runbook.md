@@ -197,3 +197,37 @@ FROM _prisma_migrations WHERE migration_name LIKE '%source_event_id%';
 کد قبلی (قبل از `b83f693`) با ستون NULL سازگار است — در صورت نیاز به بازگشت
 کد، ستون و ایندکس را حذف نکنید؛ بی‌ضرر است. حذف ستون/ایندکس فقط با تصمیم
 صریح مالک محصول انجام شود.
+
+
+### ۷. Live HTTP Smoke Test (فاز ۱۱ / Gate G — اجرا و تأیید ۲۰۲۶-۱۰-۳۱)
+
+اولین smoke واقعی HTTP پروژه — سرور بوت، کوکی/گارد، CRUD و همهٔ endpointهای
+فازهای ۹ تا ۱۱ از طریق HTTP واقعی آزموده شد (تا پیش از این همه‌چیز
+service-level بود):
+
+```
+# ۱) دیتابیس dedicated: tcerp_shadow (مجاز در db-guard) + migrate + seed
+# ۲) بوت: DATABASE_URL=...tcerp_shadow PORT=3001 npm run start
+# ۳) نتایج:
+#    GET  /api/health                -> 200 (queue counters present)
+#    GET  /api/metrics               -> 200 (Prometheus families)
+#    GET  /api/parties بدون کوکی     -> 401 (global guard)
+#    POST /api/auth/login            -> 200 (کوکی)
+#    GET  /api/auth/me               -> 200
+#    GET  /api/reports/dashboard|debt-> 200
+#    GET  /api/workflow/definitions  -> 200
+#    GET  /api/imports               -> 200
+#    POST /api/parties               -> 201، GET -> 200، DELETE -> 200
+# ۴) پاک‌سازی: توقف سرور + DROP DATABASE tcerp_shadow
+```
+
+**دو یافتهٔ واقعی smoke (رفع‌شده در همین کامیت):**
+1. `MoadianDiagnosticService(fetchImpl?)` — Nest نمی‌تواند `typeof fetch` را
+   تزریق کند (metadata.Object)؛ از Phase 8 latent بود چون همهٔ تست‌ها دستی
+   می‌ساختند. رفع: `@Optional()` روی پارامتر + fallback `?? fetch`.
+2. `NotificationQueryDto.includePlatform` — boolean query-string رشته‌ای
+   `@IsBoolean` را رد می‌کرد (تست‌های service-level object می‌فرستادند).
+   رفع: `@Transform` به boolean.
+
+درس: `npm run start` پس از هر فاز باید یک‌بار اجرا شود — DI/errors که فقط در
+بوت ظاهر می‌شوند از تست‌های service-level پنهان می‌مانند.

@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -102,7 +103,10 @@ export class NotificationQueryDto extends PaginationDto {
   @IsIn(['UNREAD', 'READ'])
   status?: 'UNREAD' | 'READ';
 
+  // Query-string boolean: 'true'/'false' arrive as strings over HTTP —
+  // @IsBoolean alone would reject them (live smoke test finding, Gate G).
   @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
   @IsBoolean()
   includePlatform?: boolean;
 }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import * as crypto from 'node:crypto';
 import { Prisma, MoadianDiagnosticRunStatus } from '@prisma/client';
 import { MoadianPacket } from './moadian-adapter';
@@ -81,7 +81,10 @@ export class MoadianDiagnosticService {
 
   constructor(
     private readonly prisma: PrismaService,
-    fetchImpl?: typeof fetch,
+    // Nest cannot resolve `typeof fetch` (emits Object metadata) — mark
+    // @Optional so the DI container injects undefined and the fallback
+    // (`?? fetch`) applies. Tests pass the impl explicitly either way.
+    @Optional() fetchImpl?: typeof fetch,
   ) {
     this.fetchImpl = fetchImpl ?? fetch;
   }
