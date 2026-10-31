@@ -212,6 +212,18 @@
   share resolveGrid). Deferred: document import, full load test, external
   monitoring; backup/restore drill HELD for final review (owner instruction).
 
+- **Gate G slice 5 (DONE — pending review)**: SALES_DOCUMENT import (migration
+  20241101150000 enum value): each CSV row = one line; CONSECUTIVE rows sharing
+  documentNumber group into one document (head carries grouped lines[], followers
+  recorded DUPLICATE with GROUPED_INTO_ROW_<spreadsheet-row>); non-consecutive
+  repeats resolve as DUPLICATE at run (number exists). Columns: documentNumber,
+  customerPhone (canonical → CUSTOMER-role party), documentDate (calendar-
+  validated), salespersonUsername (ACTIVE + company member via companies relation),
+  variantSku, quantity>0, unitPrice>=0. Documents NEVER updated by import (number =
+  dedupe key only; corrections via document lifecycle). Created as DRAFT with
+  computed totals. Tests g11-14 (grouping 3-lines, DRAFT creation with totals,
+  non-consecutive repeat → run-time DUPLICATE, unknown phone → row FAILED).
+
 
 
 ## Completed

@@ -94,7 +94,8 @@ export class ImportsService {
     if (
       dto.entityType !== 'PARTY' &&
       dto.entityType !== 'DAILY_PRICE' &&
-      dto.entityType !== 'PRODUCT_VARIANT'
+      dto.entityType !== 'PRODUCT_VARIANT' &&
+      dto.entityType !== 'SALES_DOCUMENT'
     ) {
       throw new ValidationError('IMPORT_ENTITY_TYPE_UNSUPPORTED', { entityType: dto.entityType });
     }
@@ -103,6 +104,9 @@ export class ImportsService {
     }
     if (dto.entityType === 'PRODUCT_VARIANT') {
       return this.createVariantJob(companyId, dto, actor, ctx);
+    }
+    if (dto.entityType === 'SALES_DOCUMENT') {
+      return this.createSalesDocumentJob(companyId, dto, actor, ctx);
     }
     const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
     const batchSize = Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000);
@@ -266,6 +270,7 @@ export class ImportsService {
     const chunkSize = Math.max(job.batchSize, 1);
     const isDailyPrice = job.entityType === 'DAILY_PRICE';
     const isVariant = job.entityType === 'PRODUCT_VARIANT';
+    const isSalesDocument = job.entityType === 'SALES_DOCUMENT';
 
     // Process until no PENDING rows remain (batch after durable batch).
     for (;;) {
@@ -290,7 +295,9 @@ export class ImportsService {
                 ? await this.processDailyPriceRow(tx, companyId, row.payload as Record<string, string>, updateMatched, o)
                 : isVariant
                   ? await this.processVariantRow(tx, companyId, row.payload as Record<string, string>, updateMatched, o)
-                  : await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
+                  : isSalesDocument
+                    ? await this.processSalesDocumentRow(tx, companyId, row.payload as Record<string, unknown>, o)
+                    : await this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, o);
             }
             return o;
           });
@@ -327,11 +334,17 @@ export class ImportsService {
                       updated: 0,
                       duplicates: 0,
                     })
-                  : this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
-                      ok: 0,
-                      updated: 0,
-                      duplicates: 0,
-                    }),
+                  : isSalesDocument
+                    ? this.processSalesDocumentRow(tx, companyId, row.payload as Record<string, unknown>, {
+                        ok: 0,
+                        updated: 0,
+                        duplicates: 0,
+                      })
+                    : this.processRow(tx, companyId, row.rowIndex, row.payload as Record<string, string>, updateMatched, {
+                        ok: 0,
+                        updated: 0,
+                        duplicates: 0,
+                      }),
             );
             await this.prisma.importJobRow.update({
               where: { id: row.id },
@@ -884,7 +897,334 @@ export class ImportsService {
     return { ...counters, ok: counters.ok + 1 };
   }
 
+  // ───────────────────── SALES_DOCUMENT import (slice 5) ─────────────────────
+
+  /**
+   * اسناد فروش به‌صورت DRAFT — each CSV row is ONE LINE; consecutive rows
+   * sharing `documentNumber` group into a single document (first row carries
+   * the grouped payload; followers are recorded as DUPLICATE with a
+   * GROUPED_INTO_ROW note so the report stays truthful). The document number
+   * (company-unique, DB-backed) is the dedupe key and documents are NEVER
+   * updated by import — financial records are only ever corrected by
+   * reversal/credit documents (handover accounting rules).
+   *
+   * Columns: documentNumber, customerPhone (canonical mobile), documentDate
+   * (YYYY-MM-DD), salespersonUsername, variantSku, quantity, unitPrice.
+   * Salesperson must be an ACTIVE member of the company (validated at run —
+   * failure is a row FAILED, never a silent reassignment).
+   */
+  private async createSalesDocumentJob(
+    companyId: string,
+    dto: CreateImportJobDto,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<Prisma.ImportJobGetPayload<{ include: { _count: { select: { rows: true } } } }>> {
+    const grid = await this.resolveGrid(dto);
+    if (grid.length < 2) {
+      throw new ValidationError('IMPORT_CSV_NEEDS_HEADER_AND_ROW');
+    }
+    const headers = grid[0].map(normalizeHeader);
+    const mapping = dto.columnMapping ?? {};
+    const headerIndex = new Map<string, number>();
+    headers.forEach((h, i) => {
+      if (!headerIndex.has(h)) headerIndex.set(h, i);
+    });
+    const DOC_FIELDS = [
+      'documentNumber',
+      'customerPhone',
+      'documentDate',
+      'salespersonUsername',
+      'variantSku',
+      'quantity',
+      'unitPrice',
+    ] as const;
+    const fieldToIndex = new Map<(typeof DOC_FIELDS)[number], number>();
+    for (const [field, header] of Object.entries(mapping)) {
+      if (!(DOC_FIELDS as readonly string[]).includes(field as (typeof DOC_FIELDS)[number])) {
+        throw new ValidationError('IMPORT_UNKNOWN_FIELD', { field });
+      }
+      const idx = headerIndex.get(normalizeHeader(header));
+      if (idx === undefined) {
+        throw new ValidationError('IMPORT_MAPPING_HEADER_NOT_FOUND', { field, header });
+      }
+      fieldToIndex.set(field as (typeof DOC_FIELDS)[number], idx);
+    }
+    for (const required of [
+      'documentNumber',
+      'customerPhone',
+      'documentDate',
+      'salespersonUsername',
+      'variantSku',
+      'quantity',
+      'unitPrice',
+    ] as const) {
+      if (!fieldToIndex.has(required)) {
+        throw new ValidationError('IMPORT_DOC_MAPPING_REQUIRED', { field: required });
+      }
+    }
+
+    // Prefetch: canonical customer phones + variant skus of THIS company.
+    const [phones, variants] = await Promise.all([
+      this.prisma.partyPhone.findMany({
+        where: { party: { companyId, archivedAt: null }, kind: 'MOBILE' },
+        select: { normalizedValue: true },
+      }),
+      this.prisma.productVariant.findMany({ where: { companyId }, select: { sku: true } }),
+    ]);
+    const phoneBy = new Set(phones.map((p) => p.normalizedValue));
+    const skuBy = new Set(variants.map((v) => v.sku));
+
+    const dataRows = grid.slice(1);
+    if (dataRows.length > 20_000) {
+      throw new ValidationError('IMPORT_TOO_MANY_ROWS', { max: 20_000 });
+    }
+
+    const cell = (cells: string[], field: (typeof DOC_FIELDS)[number]): string => {
+      const idx = fieldToIndex.get(field);
+      return idx === undefined ? '' : String(cells[idx] ?? '').trim();
+    };
+    const validateLine = (cells: string[]): { payload: Record<string, string>; error: string | null } => {
+      const payload: Record<string, string> = {};
+      for (const field of DOC_FIELDS) {
+        const value = cell(cells, field);
+        if (value) payload[field] = value;
+      }
+      if (!payload.documentNumber) return { payload, error: 'DOCUMENT_NUMBER_REQUIRED' };
+      if (!payload.customerPhone) return { payload, error: 'CUSTOMER_PHONE_REQUIRED' };
+      try {
+        payload.customerPhone = normalizeIranMobile(payload.customerPhone);
+      } catch {
+        return { payload, error: 'INVALID_PHONE' };
+      }
+      if (!phoneBy.has(payload.customerPhone)) return { payload, error: 'CUSTOMER_NOT_FOUND' };
+      if (!payload.documentDate || !/^\d{4}-\d{2}-\d{2}$/.test(payload.documentDate)) {
+        return { payload, error: 'INVALID_DATE' };
+      }
+      const parsedDate = new Date(`${payload.documentDate}T00:00:00Z`);
+      if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== payload.documentDate) {
+        return { payload, error: 'INVALID_DATE' };
+      }
+      if (!payload.salespersonUsername) return { payload, error: 'SALESPERSON_REQUIRED' };
+      if (!payload.variantSku || !skuBy.has(payload.variantSku)) {
+        return { payload, error: 'VARIANT_NOT_FOUND' };
+      }
+      const quantity = Number(payload.quantity);
+      if (!payload.quantity || !Number.isFinite(quantity) || quantity <= 0) {
+        return { payload, error: 'INVALID_QUANTITY' };
+      }
+      const unitPrice = Number(payload.unitPrice);
+      if (!payload.unitPrice || !Number.isFinite(unitPrice) || unitPrice < 0) {
+        return { payload, error: 'INVALID_UNIT_PRICE' };
+      }
+      return { payload, error: null };
+    };
+
+    // Group CONSECUTIVE rows with the same document number into one payload.
+    const rowPayloads: Array<{
+      payload: Record<string, unknown>;
+      error: string | null;
+      groupedInto?: number;
+    }> = [];
+    let currentNumber: string | null = null;
+    let currentIndex = -1;
+    for (let i = 0; i < dataRows.length; i += 1) {
+      const cells = dataRows[i];
+      const number = cell(cells, 'documentNumber');
+      const line = validateLine(cells);
+      if (line.error) {
+        rowPayloads.push({ payload: line.payload, error: line.error });
+        continue;
+      }
+      if (number && number === currentNumber) {
+        // follower row: fold its line into the head row's payload
+        const head = rowPayloads[currentIndex];
+        if (head && !head.error) {
+          const lines = (head.payload.lines ?? []) as Array<Record<string, string>>;
+          lines.push({
+            variantSku: line.payload.variantSku,
+            quantity: line.payload.quantity,
+            unitPrice: line.payload.unitPrice,
+          });
+          head.payload.lines = lines;
+        }
+        rowPayloads.push({
+          payload: line.payload,
+          error: `GROUPED_INTO_ROW_${currentIndex + 2}`, // 1-based, header offset
+          groupedInto: currentIndex,
+        });
+        continue;
+      }
+      // head row of a new group
+      currentNumber = number || null;
+      currentIndex = rowPayloads.length;
+      rowPayloads.push({
+        payload: {
+          documentNumber: line.payload.documentNumber,
+          customerPhone: line.payload.customerPhone,
+          documentDate: line.payload.documentDate,
+          salespersonUsername: line.payload.salespersonUsername,
+          lines: [
+            {
+              variantSku: line.payload.variantSku,
+              quantity: line.payload.quantity,
+              unitPrice: line.payload.unitPrice,
+            },
+          ],
+        },
+        error: null,
+      });
+    }
+    const failedCount = rowPayloads.filter((r) => r.error && !r.error.startsWith('GROUPED_INTO_ROW')).length;
+    const commitMode = dto.commitMode === 'BATCH' ? 'BATCH' : 'PER_ROW';
+
+    const job = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.importJob.create({
+        data: {
+          companyId,
+          entityType: 'SALES_DOCUMENT',
+          fileName: dto.fileName?.slice(0, 200) || 'documents.csv',
+          status: ImportJobStatus.VALIDATED,
+          totalRows: dataRows.length,
+          failedCount,
+          commitMode,
+          batchSize: Math.min(Math.max(Math.floor(dto.batchSize ?? 500), 1), 5000),
+          options: { updateMatched: false } as Prisma.InputJsonValue,
+          columnMapping: dto.columnMapping as Prisma.InputJsonValue,
+          createdById: actor.id,
+        },
+      });
+      for (let i = 0; i < rowPayloads.length; i += 500) {
+        await tx.importJobRow.createMany({
+          data: rowPayloads.slice(i, i + 500).map((row, offset) => ({
+            jobId: created.id,
+            rowIndex: i + offset,
+            status:
+              row.error && !row.error.startsWith('GROUPED_INTO_ROW')
+                ? ImportRowStatus.FAILED
+                : row.error
+                  ? ImportRowStatus.DUPLICATE
+                  : ImportRowStatus.PENDING,
+            payload: row.payload as Prisma.InputJsonValue,
+            error: row.error,
+          })),
+        });
+      }
+      await this.auditService.recordTx(tx, {
+        entityType: 'import_job',
+        entityId: created.id,
+        action: AuditAction.CREATE,
+        companyId,
+        actor,
+        newValues: {
+          entityType: 'SALES_DOCUMENT',
+          totalRows: dataRows.length,
+          failedCount,
+        },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return created;
+    });
+    return this.getJob(companyId, job.id);
+  }
+
+  /** Create one DRAFT sales document (header + lines) from a grouped row. */
+  private async processSalesDocumentRow(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    payload: Record<string, unknown>,
+    counters: { ok: number; updated: number; duplicates: number },
+  ): Promise<{ ok: number; updated: number; duplicates: number }> {
+    const documentNumber = String(payload.documentNumber ?? '');
+    const existing = await tx.salesDocument.findFirst({
+      where: { companyId, documentNumber },
+      select: { id: true },
+    });
+    if (existing) return { ...counters, duplicates: counters.duplicates + 1 };
+
+    const customer = await tx.party.findFirst({
+      where: {
+        companyId,
+        archivedAt: null,
+        phones: { some: { normalizedValue: String(payload.customerPhone ?? '') } },
+      },
+      select: { id: true, roles: { select: { role: true } } },
+    });
+    if (!customer || !customer.roles.some((r) => r.role === 'CUSTOMER')) {
+      throw new NotFoundError('CUSTOMER_NOT_FOUND_OR_NOT_CUSTOMER', { phone: payload.customerPhone });
+    }
+    const salesperson = await tx.user.findFirst({
+      where: {
+        username: String(payload.salespersonUsername ?? ''),
+        status: 'ACTIVE',
+        companies: { some: { companyId } },
+      },
+      select: { id: true },
+    });
+    if (!salesperson) {
+      throw new NotFoundError('SALESPERSON_NOT_FOUND_OR_NOT_MEMBER', {
+        username: payload.salespersonUsername,
+      });
+    }
+    const documentDate = new Date(`${String(payload.documentDate ?? '')}T00:00:00Z`);
+    const lines = Array.isArray(payload.lines)
+      ? (payload.lines as Array<Record<string, string>>)
+      : [];
+    if (lines.length === 0) throw new ValidationError('DOCUMENT_NO_LINES');
+
+    const lineData: Array<{
+      companyId: string;
+      productVariantId: string;
+      orderedQuantity: Prisma.Decimal;
+      uomId: string;
+      unitPrice: Prisma.Decimal;
+      subtotal: Prisma.Decimal;
+      lineTotal: Prisma.Decimal;
+    }> = [];
+    let subtotal = new Prisma.Decimal(0);
+    for (const line of lines) {
+      const variant = await tx.productVariant.findFirst({
+        where: { companyId, sku: String(line.variantSku ?? '') },
+        select: { id: true, defaultUomId: true },
+      });
+      if (!variant) throw new NotFoundError('VARIANT_NOT_FOUND', { sku: line.variantSku });
+      if (!variant.defaultUomId) throw new ValidationError('VARIANT_UOM_UNSET', { sku: line.variantSku });
+      const quantity = new Prisma.Decimal(String(line.quantity ?? '0'));
+      const unitPrice = new Prisma.Decimal(String(line.unitPrice ?? '0'));
+      const lineSubtotal = quantity.times(unitPrice);
+      lineData.push({
+        companyId,
+        productVariantId: variant.id,
+        orderedQuantity: quantity,
+        uomId: variant.defaultUomId,
+        unitPrice,
+        subtotal: lineSubtotal,
+        lineTotal: lineSubtotal,
+      });
+      subtotal = subtotal.plus(lineSubtotal);
+    }
+
+    await tx.salesDocument.create({
+      data: {
+        companyId,
+        documentNumber,
+        customerPartyId: customer.id,
+        salespersonUserId: salesperson.id,
+        documentDate,
+        status: 'DRAFT',
+        subtotal,
+        discountTotal: new Prisma.Decimal(0),
+        taxTotal: new Prisma.Decimal(0),
+        total: subtotal,
+        createdBy: null,
+        lines: { create: lineData },
+      },
+    });
+    return { ...counters, ok: counters.ok + 1 };
+  }
+
   // ───────────────────── queries ─────────────────────
+
 
 
   async getJob(

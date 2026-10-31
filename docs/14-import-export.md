@@ -106,3 +106,21 @@ execution for huge files, backup/restore and load tests are NOT done yet.
   (`TEMPLATE_NOT_FOUND` / `SKU_REQUIRED` / `NAME_FA_REQUIRED` / `WEIGHT_UOM_REQUIRED` /
   `UOM_NOT_FOUND`). XLSX input works for this entity too (all creators share
   `resolveGrid`).
+
+
+## 10. Slice 5 — SALES_DOCUMENT import (DRAFT)
+
+- `entityType=SALES_DOCUMENT` (migration `20241101150000`): each CSV row is ONE LINE;
+  **consecutive rows sharing `documentNumber` group into one document** — the head row
+  carries the grouped `lines[]` payload, follower rows are recorded DUPLICATE with
+  `GROUPED_INTO_ROW_<spreadsheet-row>` (visible in the report). A repeated number
+  AFTER a different document is a NON-consecutive new head and resolves at RUN time
+  as DUPLICATE (number already exists).
+- Columns: `documentNumber`, `customerPhone` (canonical mobile → party with CUSTOMER
+  role), `documentDate` (calendar-validated), `salespersonUsername` (ACTIVE user and
+  company member — membership via the `companies` relation), `variantSku`,
+  `quantity` (>0), `unitPrice` (≥0).
+- **Documents are NEVER updated by import** — the number is a dedupe key only;
+  corrections go through the document lifecycle (handover accounting rules).
+  Created documents are DRAFT with computed totals (subtotal = Σ qty×price).
+- Prefetch validation: canonical customer phones + variant skus before any write.

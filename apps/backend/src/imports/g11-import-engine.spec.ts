@@ -42,6 +42,12 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   const categoryIds: string[] = [];
   const uomCategoryIds: string[] = [];
   const uomIds: string[] = [];
+  const userIds: string[] = [];
+
+  // Per-run unique phone generator — crashed runs leave orphans in the shared
+  // test company, so static phones would collide (unique per company+phone).
+  const phoneBase = 9110000000 + (Date.now() % 1_000_000); // 10 digits
+  const phone = (n: number): string => `0${phoneBase + n}`; // 0 + 10 digits = 11
 
   const cleanup = async () => {
     for (const jobId of jobIds) {
@@ -49,12 +55,16 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       await prisma.importJob.delete({ where: { id: jobId } }).catch(() => undefined);
     }
     await prisma.party.deleteMany({ where: { id: { in: partyIds } } }).catch(() => undefined);
+    await prisma.party.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, phones: { some: { normalizedValue: { startsWith: `0${phoneBase}` } } } },
+    }).catch(() => undefined);
     await prisma.dailyPrice.deleteMany({ where: { id: { in: dailyPriceIds } } }).catch(() => undefined);
     await prisma.productVariant.deleteMany({ where: { id: { in: variantIds } } }).catch(() => undefined);
     await prisma.productTemplate.deleteMany({ where: { id: { in: templateIds } } }).catch(() => undefined);
     await prisma.productCategory.deleteMany({ where: { id: { in: categoryIds } } }).catch(() => undefined);
     await prisma.uom.deleteMany({ where: { id: { in: uomIds } } }).catch(() => undefined);
     await prisma.uomCategory.deleteMany({ where: { id: { in: uomCategoryIds } } }).catch(() => undefined);
+    await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
     await prisma.company.deleteMany({ where: { id: { in: companyIds } } }).catch(() => undefined);
   };
 
@@ -75,8 +85,8 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   it('g11-01 create + validate: bad rows marked FAILED before anything runs; missing nameFa mapping rejected', async () => {
     const csv = csvOf([
       ['nameFa', 'type', 'phone'],
-      ['شرکت سالم', 'COMPANY', '09121110001'],
-      ['', 'COMPANY', '09121110002'],
+      ['شرکت سالم', 'COMPANY', phone(101)],
+      ['', 'COMPANY', phone(102)],
       ['تلفن بد', 'COMPANY', '12345'],
       ['نوع بد', 'GHOST', ''],
     ]);
@@ -115,10 +125,15 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   });
 
   it('g11-02 PER_ROW run creates parties with canonical phones; row-level failure spares neighbours', async () => {
+    // self-clean: crashed earlier runs may leave same-prefix parties
+    await prisma.party.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: 'شرکت گ۱۱ الف-' } },
+    }).catch(() => undefined);
+    const alfName = `شرکت گ۱۱ الف-${Date.now()}`;
     const csv = csvOf([
       ['nameFa', 'phone'],
-      ['شرکت گ۱۱ الف', '09122220001'],
-      ['شرکت گ۱۱ بد', 'BAD-NUMBER'], // pre-validation would catch; force via mapping skip: use phone2? keep simple: this row is INVALID at validation
+      [alfName, phone(1)],
+      ['شرکت گ۱۱ بد', 'BAD-NUMBER'],
     ]);
     // NOTE: invalid phone rows fail VALIDATION, so to test a RUNTIME failure use
     // a row that passes validation but fails at write time — a duplicate
@@ -144,7 +159,7 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       data: {
         status: 'PENDING',
         error: null,
-        payload: { nameFa: 'شرکت گ۱۱ هم‌شماره', phone: '09122220001' } as Prisma.InputJsonValue,
+        payload: { nameFa: 'شرکت گ۱۱ هم‌شماره', phone: phone(1) } as Prisma.InputJsonValue,
       },
     });
     const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
@@ -152,17 +167,17 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     expect(finished.okCount).toBe(1);
     expect(finished.duplicateCount).toBe(1);
     const created = await prisma.party.findFirst({
-      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: 'شرکت گ۱۱ الف' },
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: alfName },
       select: { id: true, phones: { select: { normalizedValue: true } } },
     });
     expect(created).not.toBeNull();
     if (created) {
       partyIds.push(created.id);
-      expect(created.phones[0]?.normalizedValue).toBe('09122220001');
+      expect(created.phones[0]?.normalizedValue).toBe(phone(1));
     }
     // exactly ONE party for the colliding phone — dedup held
     const count = await prisma.party.count({
-      where: { companyId: INTEGRATION_COMPANY_ID, phones: { some: { normalizedValue: '09122220001' } } },
+      where: { companyId: INTEGRATION_COMPANY_ID, phones: { some: { normalizedValue: phone(1) } } },
     });
     expect(count).toBe(1);
   });
@@ -170,7 +185,7 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   it('g11-03 idempotent re-run: a completed job run again processes nothing new', async () => {
     const csv = csvOf([
       ['nameFa', 'phone'],
-      ['شرکت گ۱۱ تکرار', '09122220003'],
+      ['شرکت گ۱۱ تکرار', phone(3)],
     ]);
     const job = await service.createJob(
       INTEGRATION_COMPANY_ID,
@@ -187,7 +202,7 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     const reRun = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
     expect(reRun.okCount).toBe(1); // unchanged — no PENDING rows
     const stillOne = await prisma.party.count({
-      where: { companyId: INTEGRATION_COMPANY_ID, phones: { some: { normalizedValue: '09122220003' } } },
+      where: { companyId: INTEGRATION_COMPANY_ID, phones: { some: { normalizedValue: phone(3) } } },
     });
     expect(stillOne).toBe(1);
   });
@@ -195,8 +210,8 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   it('g11-04 crash-resume: PENDING rows survive and a re-run processes ONLY them', async () => {
     const csv = csvOf([
       ['nameFa', 'phone'],
-      ['شرکت گ۱۱ رزومه ۱', '09122220004'],
-      ['شرکت گ۱۱ رزومه ۲', '09122220005'],
+      ['شرکت گ۱۱ رزومه ۱', phone(4)],
+      ['شرکت گ۱۱ رزومه ۲', phone(5)],
     ]);
     const job = await service.createJob(
       INTEGRATION_COMPANY_ID,
@@ -231,14 +246,14 @@ describeIntegration('g11 import engine (Phase 11)', () => {
         companyId: INTEGRATION_COMPANY_ID,
         nameFa: 'شرکت گ۱۱ موجود',
         type: 'COMPANY',
-        phones: { create: { companyId: INTEGRATION_COMPANY_ID, kind: 'MOBILE', rawValue: '09122220006', normalizedValue: '09122220006' } },
+        phones: { create: { companyId: INTEGRATION_COMPANY_ID, kind: 'MOBILE', rawValue: phone(6), normalizedValue: phone(6) } },
       },
       select: { id: true },
     });
     partyIds.push(existing.id);
     const csv = csvOf([
       ['nameFa', 'phone'],
-      ['شرکت گ۱۱ به‌روزشده', '09122220006'],
+      ['شرکت گ۱۱ به‌روزشده', phone(6)],
     ]);
 
     // updateMatched=false → DUPLICATE, party untouched
@@ -471,10 +486,14 @@ describeIntegration('g11 import engine (Phase 11)', () => {
   it('g11-11 XLSX import: base64 workbook parses through the same engine (PARTY)', async () => {
     const ExcelJS = (await import('exceljs')).default;
     const workbook = new ExcelJS.Workbook();
+    const excelName = `شرکت گ۱۱ اکسل-${Date.now()}`;
+    await prisma.party.deleteMany({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: 'شرکت گ۱۱ اکسل-' } },
+    }).catch(() => undefined);
     const sheet = workbook.addWorksheet('Parties');
     sheet.addRow(['nameFa', 'phone']);
-    sheet.addRow(['شرکت گ۱۱ اکسل', '09123330011']);
-    sheet.addRow(['', '09123330012']); // invalid row — validation must catch it too
+    sheet.addRow([excelName, phone(11)]);
+    sheet.addRow(['', phone(12)]); // invalid row — validation must catch it too
     const buffer = await workbook.xlsx.writeBuffer();
     const xlsxBase64 = Buffer.from(buffer).toString('base64');
 
@@ -494,13 +513,13 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
     expect(finished.okCount).toBe(1);
     const created = await prisma.party.findFirst({
-      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: 'شرکت گ۱۱ اکسل' },
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: excelName },
       select: { id: true, phones: { select: { normalizedValue: true } } },
     });
     expect(created).not.toBeNull();
     if (created) {
       partyIds.push(created.id);
-      expect(created.phones[0]?.normalizedValue).toBe('09123330011');
+      expect(created.phones[0]?.normalizedValue).toBe(phone(11));
     }
     // both inputs at once → rejected
     await expect(
@@ -670,5 +689,126 @@ describeIntegration('g11 import engine (Phase 11)', () => {
       where: { id: created.id }, select: { nameFa: true },
     });
     expect(updated.nameFa).toBe('نام تغییر');
+  });
+
+  it('g11-14 SALES_DOCUMENT import: consecutive-row grouping, DRAFT creation, number dedupe', async () => {
+    // fixture: customer with mobile + variant + salesperson user
+    const docPhone = `0917${String(Date.now()).slice(-7)}`; // per-run unique mobile
+    const customer = await prisma.party.create({
+      data: {
+        companyId: INTEGRATION_COMPANY_ID,
+        type: 'COMPANY',
+        nameFa: `g11-doc-customer-${Date.now()}`,
+        roles: { create: [{ role: 'CUSTOMER' }] },
+        phones: { create: { companyId: INTEGRATION_COMPANY_ID, kind: 'MOBILE', rawValue: docPhone, normalizedValue: docPhone } },
+      },
+      select: { id: true },
+    });
+    partyIds.push(customer.id);
+    const uoms = await (await import('../integrity-gate/g6-helpers')).seededUoms(prisma);
+    const variant = await (await import('../integrity-gate/g6-helpers')).createVariantEx(prisma, `${marker}-doc`, {
+      defaultUomId: uoms.tonId,
+      inventoryUomId: uoms.tonId,
+    });
+    variantIds.push(variant.variantId);
+    const variantSku = (await prisma.productVariant.findUniqueOrThrow({
+      where: { id: variant.variantId }, select: { sku: true },
+    })).sku;
+    // membership only — the document import checks ACTIVE + membership,
+    // not a specific role (SALESPERSON role assertion is the UI path).
+    const salesperson = await prisma.user.create({
+      data: {
+        username: `g11-doc-sales-${Date.now()}`, passwordHash: 'x', status: 'ACTIVE',
+        companies: { create: { companyId: INTEGRATION_COMPANY_ID } },
+      },
+      select: { id: true, username: true },
+    });
+    userIds.push(salesperson.id);
+
+    // CSV: doc-1 has TWO lines (consecutive rows); doc-2 one line; one unknown
+    // customer; one repeated doc-1 number in a LATER (non-consecutive) group
+    const docNumber = `P10SD-${Date.now()}`;
+    const doc2Number = `P10SD-2-${Date.now()}`;
+    const csv = csvOf([
+      ['documentNumber', 'customerPhone', 'documentDate', 'salespersonUsername', 'variantSku', 'quantity', 'unitPrice'],
+      [docNumber, docPhone, '2026-10-30', salesperson.username, variantSku, '10', '35000'],
+      [docNumber, docPhone, '2026-10-30', salesperson.username, variantSku, '5', '35000'],
+      [docNumber, docPhone, '2026-10-30', salesperson.username, variantSku, '2', '35000'],
+      [doc2Number, docPhone, '2026-10-30', salesperson.username, variantSku, '1', '1000'],
+      ['9991111222', '09999999999', '2026-10-30', salesperson.username, variantSku, '1', '1000'],
+      [docNumber, docPhone, '2026-10-30', salesperson.username, variantSku, '1', '35000'],
+    ]);
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'SALES_DOCUMENT', fileName: 'g11-docs.csv', csv,
+        columnMapping: {
+          documentNumber: 'documentNumber', customerPhone: 'customerPhone', documentDate: 'documentDate',
+          salespersonUsername: 'salespersonUsername', variantSku: 'variantSku', quantity: 'quantity', unitPrice: 'unitPrice',
+        },
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    // rows 1-2 of doc-1 were GROUPED at validation (consecutive same number)
+    const groupedRow = (await service.jobRows(INTEGRATION_COMPANY_ID, job.id, false)).find(
+      (r) => r.rowIndex === 1,
+    );
+    expect(groupedRow?.status).toBe('DUPLICATE');
+    // head data-row 0 = spreadsheet row 2 (1-based, header offset)
+    expect(groupedRow?.error).toContain('GROUPED_INTO_ROW_2');
+    const repeatedRow = (await service.jobRows(INTEGRATION_COMPANY_ID, job.id, false)).find(
+      (r) => r.rowIndex === 5,
+    );
+    expect(repeatedRow?.status).toBe('PENDING');
+
+    const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    expect(finished.status).toBe('PARTIALLY_FAILED');
+    // create-time failedCount (1 unknown-phone row) + run failures (0 — all
+    // three PENDING heads succeeded) = 1.
+    expect(finished.okCount).toBe(2); // doc-1 + doc-2 created
+    expect(finished.duplicateCount).toBe(1); // row 5 repeat
+    expect(finished.failedCount).toBe(1);
+
+    expect(finished.duplicateCount).toBe(1); // row 5: doc-1 number already created
+
+    // doc-1: THREE lines merged, DRAFT status, totals = (10+5+2) × 35000
+    const doc = await prisma.salesDocument.findFirstOrThrow({
+      where: { companyId: INTEGRATION_COMPANY_ID, documentNumber: docNumber },
+      include: { lines: true },
+    });
+    expect(doc.status).toBe('DRAFT');
+    expect(doc.lines).toHaveLength(3);
+    expect(Number(doc.total)).toBe(17 * 35000);
+    expect(doc.salespersonUserId).toBe(salesperson.id);
+    expect(doc.customerPartyId).toBe(customer.id);
+    // doc-2 created separately
+    const doc2 = await prisma.salesDocument.count({
+      where: { companyId: INTEGRATION_COMPANY_ID, documentNumber: doc2Number },
+    });
+    expect(doc2).toBe(1);
+
+    // re-import same number → DUPLICATE (documents never updated by import)
+    const dupJob = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'SALES_DOCUMENT', fileName: 'g11-docs-dup.csv', csv: csvOf([
+          ['documentNumber', 'customerPhone', 'documentDate', 'salespersonUsername', 'variantSku', 'quantity', 'unitPrice'],
+          [docNumber as string, docPhone, '2026-10-30', salesperson.username, variantSku, '1', '35000'],
+        ]),
+        columnMapping: {
+          documentNumber: 'documentNumber', customerPhone: 'customerPhone', documentDate: 'documentDate',
+          salespersonUsername: 'salespersonUsername', variantSku: 'variantSku', quantity: 'quantity', unitPrice: 'unitPrice',
+        },
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(dupJob.id);
+    const dupRun = await service.run(INTEGRATION_COMPANY_ID, dupJob.id, ACTOR, ctx);
+    expect(dupRun.duplicateCount).toBe(1);
+    const stillOne = await prisma.salesDocument.count({
+      where: { companyId: INTEGRATION_COMPANY_ID, documentNumber: docNumber },
+    });
+    expect(stillOne).toBe(1);
   });
 });

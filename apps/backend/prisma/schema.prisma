@@ -3209,6 +3209,7 @@ enum ImportEntityType {
   PARTY
   DAILY_PRICE
   PRODUCT_VARIANT
+  SALES_DOCUMENT
 }
 
 enum ImportJobStatus {
