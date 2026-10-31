@@ -734,8 +734,10 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
 - Docker Hub blocks `minio/minio` on this network — `docker-compose.yml` still references the
   official name; if the image is missing, pull via mirror and retag:
   `docker pull docker.arvancloud.ir/minio/minio:latest && docker tag docker.arvancloud.ir/minio/minio:latest minio/minio:latest`.
-- Frontend dashboard is a shell; widgets arrive in Phase 10. Auth gate is client-side in the
-  shell (fine for now; server middleware can be added later).
+- ~~Frontend dashboard is a shell~~ CLOSED (Gate F 2026-10-31): dashboard rebuilt with
+  live KPI cards, pending-orders/inactive-customers tables, Ctrl+K global search palette
+  and graceful degradation without reports.view. Backend permission guards cover every
+  route (final-review FR-01 sweep, unit-enforced); the client-side gate is UX only.
 - ~~Sales/purchase documents have no `notes` column~~ CLOSED (final review 2026-10-31):
   re-verified — the `notes` column EXISTS on both `sales_documents` and
   `purchase_documents` (DB + schema), the DTOs accept it and BOTH services persist it
