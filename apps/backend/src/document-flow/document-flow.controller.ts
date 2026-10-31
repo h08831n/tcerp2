@@ -1,4 +1,5 @@
 import { Controller, Get, Param, ParseUUIDPipe, Req } from '@nestjs/common';
+import { AuthenticatedOnly } from '../common/decorators/authenticated-only.decorator';
 import { Request } from 'express';
 import { DocumentRelationService } from './document-relation.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -18,6 +19,7 @@ export class DocumentRelationsController {
     private readonly companyContext: CompanyContextService,
   ) {}
 
+  @AuthenticatedOnly()
   @Get(':type/:id/relations')
   async list(
     @Param('type') type: string,

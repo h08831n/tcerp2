@@ -241,6 +241,19 @@
   incl. Proxy-injected query failure). External scrape config documented in
   docs/14 §12.
 
+- **Final review hardening sweep (DONE — pending review)**: static source sweep
+  (src/final-review/hardening.spec.ts, unit-enforced on every push):
+  FR-01 route-guard sweep over ALL ~50 controllers (git-tracked file list; class-
+  level guards, guards before/after route decorators, @AuthenticatedOnly marker)
+  — found and FIXED two REAL unguarded routes (approvals POST create + POST cancel
+  now resolve the effective permission set in-controller: approvals.request OR
+  approvals.decide OR view_all, plus service-level requester/decider rule) and
+  marked document-flow relations as AuthenticatedOnly (explicit decision decorator:
+  authentication + company scoping only, documented at the route); FR-02 no .env
+  committed to git (disk .env verified git-ignored; .env.example required);
+  FR-03 no committed PRIVATE KEY PEM blocks outside the documented throwaway
+  test-certs fixture (full-block regex, not marker strings). All three green.
+
 
 
 ## Completed

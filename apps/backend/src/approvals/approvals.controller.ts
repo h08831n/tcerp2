@@ -79,11 +79,15 @@ export class ApprovalsController {
 
   @Post()
   async create(
+    // Route gate (any-of semantics, resolved in-controller): a caller needs
+    // approvals.request OR approvals.decide — an authenticated user with NONE
+    // of them must never reach the service. The viewer() helper throws.
     @Body() dto: CreateApprovalDto,
     @CurrentUser() actor: { id: string; username: string },
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    await this.viewer(actor.id, companyId);
     return this.approvals.create(
       companyId,
       {
@@ -119,6 +123,8 @@ export class ApprovalsController {
 
   @Post(':id/cancel')
   async cancel(
+    // Route gate (any-of, in-controller): approvals.request OR approvals.decide;
+    // the service additionally restricts cancel to the requester or a decider.
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CancelApprovalDto,
     @CurrentUser() actor: { id: string; username: string },
@@ -126,6 +132,13 @@ export class ApprovalsController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     const effective = await this.permissionsService.getEffectivePermissions(actor.id, companyId);
+    if (
+      !effective.has('approvals.request') &&
+      !effective.has('approvals.decide') &&
+      !effective.has('approvals.view_all')
+    ) {
+      throw new ForbiddenError('APPROVAL_VIEW_FORBIDDEN');
+    }
     return this.approvals.cancel(
       companyId,
       id,
