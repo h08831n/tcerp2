@@ -221,6 +221,15 @@ service-level بود):
 # ۴) پاک‌سازی: توقف سرور + DROP DATABASE tcerp_shadow
 ```
 
+**Health Check اکنون سرویس‌های واقعی را می‌سنجد (Gate G — همین اسلایس):**
+`GET /api/health` علاوه بر DB، **Redis** (ping از طریق اتصال BullMQ؛ وقتی
+REDIS_URL تنظیم نشده = `disabled` چون صف روی DB-polling کار می‌کند) را می‌سنجد؛
+payload شامل `degraded: true` است وقتی Redis پایین باشد (صف به polling برمی‌گردد —
+برنامه 200 می‌ماند و مانیتور روی `redis: "down"` هشدار می‌دهد نه target-down).
+Storage (MinIO) فعلاً `disabled` گزارش می‌شود — کلاینت S3 تا اولین عملیات فایل I/O
+انجام نمی‌دهد و probe فعال به هر scrape تأخیر اضافه می‌کرد (مستند؛ در صورت نیاز
+با HeadBucket سبک قابل افزودن است).
+
 **دو یافتهٔ واقعی smoke (رفع‌شده در همین کامیت):**
 1. `MoadianDiagnosticService(fetchImpl?)` — Nest نمی‌تواند `typeof fetch` را
    تزریق کند (metadata.Object)؛ از Phase 8 latent بود چون همهٔ تست‌ها دستی

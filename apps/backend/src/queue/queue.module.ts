@@ -29,7 +29,7 @@ import { QueueWorkerManager } from './queue-worker.manager';
       },
     },
   ],
-  exports: [QueueService, QueueHandlerRegistry],
+  exports: [QueueService, QueueHandlerRegistry, QueueBullmqService],
 })
 export class QueueModule {}
 

@@ -241,6 +241,15 @@
   incl. Proxy-injected query failure). External scrape config documented in
   docs/14 §12.
 
+- **Health service-connectivity checks (DONE — final review)**: GET /api/health now
+  reports per-service status beyond the DB — redis: up (BullMQ connection ping,
+  1.5s timeout) / disabled (REDIS_URL unset, DB-polling driver is the fallback so
+  the app stays 200) / down (degraded:true so monitors alert on redis, not
+  target-down); storage: disabled by default (S3 client performs no I/O until the
+  first file operation — probe adds scrape latency; documented as an opt-in).
+  QueueBullmqService exposed via QueueModule exports. Health payload is typed
+  (HealthPayload) and stays 503 only when the DB is down.
+
 - **Final review hardening sweep (DONE — pending review)**: static source sweep
   (src/final-review/hardening.spec.ts, unit-enforced on every push):
   FR-01 route-guard sweep over ALL ~50 controllers (git-tracked file list; class-

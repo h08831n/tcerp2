@@ -21,7 +21,9 @@ export class QueueBullmqService implements OnModuleDestroy {
   private availabilityKnown = false;
   private available = false;
 
-  constructor(@Inject(CONFIG) private readonly config: AppConfig) {}  /** Shared Redis connection (null when REDIS_URL is not configured). */
+  constructor(@Inject(CONFIG) private readonly config: AppConfig) {}
+
+  /** Shared Redis connection (null when REDIS_URL is not configured). */
   getConnection(): IORedis | null {
     if (!this.config.REDIS_URL) return null;
     if (!this.connection) {

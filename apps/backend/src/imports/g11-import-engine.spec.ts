@@ -549,7 +549,7 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     void health;
     // direct controller-level check via a fresh PrismaService (public route)
     const { HealthController } = await import('../health/health.controller');
-    const controller = new HealthController(prismaService);
+    const controller = new HealthController(prismaService, { getConnection: () => null } as never);
     const response = { status: () => response, send: () => undefined } as never;
     const payload = (await controller.check(response)) as {
       status: string;
