@@ -241,6 +241,12 @@
   incl. Proxy-injected query failure). External scrape config documented in
   docs/14 §12.
 
+- **Keyboard navigation slice (DONE — final review)**: F2 on /parties opens
+  the new-party form from anywhere on the page (skips typing fields per §31
+  focus rules); version-conflict display was already present on the sales
+  detail page (verified); Ctrl+K palette + Esc + automation Ctrl+S pre-existing.
+  Frontend build green.
+
 - **Health service-connectivity checks (DONE — final review)**: GET /api/health now
   reports per-service status beyond the DB — redis: up (BullMQ connection ping,
   1.5s timeout) / disabled (REDIS_URL unset, DB-polling driver is the fallback so

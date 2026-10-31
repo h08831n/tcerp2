@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +26,22 @@ type SortField = "nameFa" | "createdAt" | "score";
 
 export default function PartiesPage() {
   const [searchInput, setSearchInput] = useState("");
+  const router = useRouter();
+  // §31: F2 opens the new-party form from anywhere on the page (skip typing contexts)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "F2" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+          return; // don't hijack typing fields
+        }
+        event.preventDefault();
+        router.push("/parties/new");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [router]);
   const [search, setSearch] = useState("");
   const [type, setType] = useState<PartyType | "">("");
   const [role, setRole] = useState<PartyRole | "">("");
