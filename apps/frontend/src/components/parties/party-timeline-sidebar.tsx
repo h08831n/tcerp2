@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { jalaliDateTime } from "@/lib/format";
+import { faDigits, jalaliDateTime } from "@/lib/format";
 import {
   fetchTimeline,
   partyErrorMessage,
@@ -28,15 +28,25 @@ function resolveLink(type: string, data: Record<string, unknown> | null): string
     case "QUOTATION_SENT":
     case "SALE_CONFIRMED":
     case "SALE_LOST":
-    case "ORDER_OVERRIDDEN": {
+    case "ORDER_OVERRIDDEN":
+    case "SALES_DOCUMENT_UPDATED":
+    case "SALES_LINE_ADDED":
+    case "SALES_LINE_UPDATED":
+    case "SALES_LINE_REMOVED": {
       const id = doc("salesDocumentId");
       return id ? `/sales/${id}` : null;
     }
-    case "PURCHASE_CREATED": {
+    case "PURCHASE_CREATED":
+    case "PURCHASE_DOCUMENT_UPDATED":
+    case "PURCHASE_LINE_ADDED":
+    case "PURCHASE_LINE_UPDATED":
+    case "PURCHASE_LINE_REMOVED": {
       const id = doc("purchaseDocumentId");
       return id ? `/purchases/${id}` : null;
     }
-    case "PRICE_REQUEST_CREATED": {
+    case "PRICE_REQUEST_CREATED":
+    case "PRICE_REQUEST_UPDATED":
+    case "PRICE_REQUEST_LINE_UPDATED": {
       // No per-request detail page exists — the worklist is the surface.
       return "/price-requests";
     }
@@ -81,8 +91,18 @@ const TYPE_LABELS: Record<string, string> = {
   SALE_CONFIRMED: "تأیید سفارش فروش",
   SALE_LOST: "از دست رفتن فروش",
   ORDER_OVERRIDDEN: "بازکردن قفل سفارش",
+  SALES_DOCUMENT_UPDATED: "ویرایش سند فروش",
+  SALES_LINE_ADDED: "افزودن ردیف فروش",
+  SALES_LINE_UPDATED: "ویرایش ردیف فروش",
+  SALES_LINE_REMOVED: "حذف ردیف فروش",
   PURCHASE_CREATED: "ثبت خرید",
+  PURCHASE_DOCUMENT_UPDATED: "ویرایش سند خرید",
+  PURCHASE_LINE_ADDED: "افزودن ردیف خرید",
+  PURCHASE_LINE_UPDATED: "ویرایش ردیف خرید",
+  PURCHASE_LINE_REMOVED: "حذف ردیف خرید",
   PRICE_REQUEST_CREATED: "ثبت استعلام قیمت",
+  PRICE_REQUEST_UPDATED: "ویرایش استعلام قیمت",
+  PRICE_REQUEST_LINE_UPDATED: "ویرایش ردیف استعلام",
   LOADING_REGISTERED: "ثبت بارگیری",
   LOADING_CONFIRMED: "تأیید بارگیری",
   LOADING_REVERSED: "برگشت بارگیری",
@@ -101,6 +121,64 @@ const TYPE_LABELS: Record<string, string> = {
   RECEIPT_REVERSED: "برگشت رسید",
   QUOTATION_FOLLOWUP: "پیگیری پیش‌فاکتور",
 };
+
+/** Human label per timeline event field key (fallback: the raw key). */
+const FIELD_LABELS: Record<string, string> = {
+  nameFa: "نام فارسی",
+  nameEn: "نام انگلیسی",
+  internalCode: "کد داخلی",
+  registrationNumber: "شماره ثبت",
+  nationalId: "شناسه ملی",
+  economicCode: "کد اقتصادی",
+  postalCode: "کد پستی",
+  website: "وب‌سایت",
+  email: "ایمیل",
+  firstName: "نام",
+  lastName: "نام خانوادگی",
+  gender: "جنسیت",
+  birthDate: "تاریخ تولد",
+  nationalCode: "کد ملی",
+  notes: "یادداشت",
+  ownerUserId: "کارشناس",
+  province: "استان",
+  city: "شهر",
+  line: "نشانی",
+  isPrimary: "اصلی",
+  position: "سمت",
+  documentDate: "تاریخ سند",
+  expirationDate: "تاریخ انضا",
+  paymentTermId: "شرایط پرداخت",
+  shippingAddressId: "نشانی حمل",
+  language: "زبان",
+  quotationTemplateCode: "کد قالب پیش‌فاکتور",
+  loadingDate: "تاریخ بارگیری",
+  route: "مسیر",
+  warehouseId: "انبار",
+  customerPartyId: "مشتری",
+  driverPartyId: "راننده",
+  carrierPartyId: "حمل‌کننده",
+  lines: "ردیف‌ها",
+  productVariantId: "کالا",
+  orderedQuantity: "تعداد",
+  quantity: "تعداد",
+  requestedQuantity: "تعداد درخواستی",
+  uomId: "واحد",
+  unitPrice: "مبلغ واحد",
+  discountAmount: "تخفیف",
+  printableDescription: "شرح قابل چاپ",
+  status: "وضعیت",
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Compact old/new value rendering; opaque ids collapse to «تغییر کرد». */
+function formatChangeValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "boolean") return value ? "بله" : "خیر";
+  const text = String(value);
+  if (UUID_RE.test(text)) return "تغییر کرد";
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+}
 
 export function PartyTimelineSidebar({ partyId, refreshToken = 0 }: PartyTimelineSidebarProps) {
   const [items, setItems] = useState<TimelineItemDto[] | null>(null);
@@ -165,6 +243,10 @@ export function PartyTimelineSidebar({ partyId, refreshToken = 0 }: PartyTimelin
           <ol className="relative space-y-4 border-s-2 border-slate-100 ps-4">
             {items.map((item) => {
               const href = resolveLink(item.type, item.data as Record<string, unknown> | null);
+              const data = (item.data ?? {}) as Record<string, unknown>;
+              const changeEntries = Object.entries(
+                (data.changes ?? {}) as Record<string, { old: unknown; new: unknown }>,
+              );
               const inner = (
                 <>
                   <span
@@ -187,6 +269,27 @@ export function PartyTimelineSidebar({ partyId, refreshToken = 0 }: PartyTimelin
                     <p className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-[11px] leading-4 text-slate-500">
                       {item.description}
                     </p>
+                  )}
+                  {changeEntries.length > 0 && (
+                    <div className="mt-1 space-y-0.5">
+                      {changeEntries.slice(0, 3).map(([field, change]) => (
+                        <p key={field} className="text-[11px] leading-4 text-slate-500">
+                          <span className="text-slate-400">{FIELD_LABELS[field] ?? field}: </span>
+                          <span className="line-through decoration-slate-300">
+                            {formatChangeValue(change.old)}
+                          </span>
+                          <span className="mx-1 text-slate-300" aria-hidden="true">←</span>
+                          <span className="font-medium text-slate-700">
+                            {formatChangeValue(change.new)}
+                          </span>
+                        </p>
+                      ))}
+                      {changeEntries.length > 3 && (
+                        <p className="text-[10px] text-slate-400">
+                          +{faDigits(changeEntries.length - 3)} مورد دیگر
+                        </p>
+                      )}
+                    </div>
                   )}
                   <p className="mt-0.5 text-[10px] tabular-nums text-slate-400">
                     {jalaliDateTime(item.createdAt)}

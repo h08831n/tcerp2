@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
-import { TimelineService } from '../parties/timeline.service';
+import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { SalesDocumentsService } from '../sales/sales-documents.service';
 import { PurchaseDocumentsService } from '../purchase/purchase-documents.service';
@@ -244,6 +244,22 @@ export class PriceRequestsService {
           version: { increment: 1 },
         },
       });
+      const headerChanges = buildChanges(request as unknown as Record<string, unknown>, {
+        customerPartyId: dto.customerPartyId,
+        notes: dto.notes,
+      });
+      if (Object.keys(headerChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: request.customerPartyId ? 'PARTY' : 'PRICE_REQUEST',
+          entityId: request.customerPartyId ?? request.id,
+          type: 'PRICE_REQUEST_UPDATED',
+          title: 'ویرایش استعلام قیمت',
+          description: `استعلام ${request.requestNumber}`,
+          data: { priceRequestId: request.id, changes: headerChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'price_request',
         entityId: row.id,
@@ -425,6 +441,19 @@ export class PriceRequestsService {
       ]);
       const { lineOrder: _ignored, ...updateData } = lineData[0];
       await tx.priceRequestLine.update({ where: { id: line.id }, data: updateData });
+      const lineChanges = buildChanges(line as unknown as Record<string, unknown>, updateData as Record<string, unknown>);
+      if (Object.keys(lineChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: request.customerPartyId ? 'PARTY' : 'PRICE_REQUEST',
+          entityId: request.customerPartyId ?? request.id,
+          type: 'PRICE_REQUEST_LINE_UPDATED',
+          title: 'ویرایش ردیف استعلام قیمت',
+          description: `استعلام ${request.requestNumber}`,
+          data: { priceRequestId: request.id, priceRequestLineId: line.id, changes: lineChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'price_request_line',
         entityId: line.id,

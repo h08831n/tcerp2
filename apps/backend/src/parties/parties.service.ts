@@ -21,7 +21,7 @@ import { Paginated } from '../common/dto/pagination.dto';
 import { asciiDigits, normalizeIranMobile, normalizePhone } from '../common/utils/phone';
 import { normalizePersianName } from '../common/utils/persian-name';
 import { assertInScope, RecordScope, scopeWhere } from './party-scope';
-import { TimelineService } from './timeline.service';
+import { TimelineService, buildChanges } from './timeline.service';
 import {
   AddPartyPhoneDto,
   AddRoleDto,
@@ -795,7 +795,7 @@ export class PartiesService {
           type: 'PARTY_UPDATED',
           title: 'ویرایش طرف حساب',
           description: oldParty.nameFa,
-          data: { partyId: id, fields: Object.keys(data).filter((k) => k !== 'version') },
+          data: { partyId: id, changes: buildChanges(oldParty, data) },
           actorUserId: actor.id,
         });
         // corr-05: business mutation + timeline + audit in ONE transaction.
@@ -1295,7 +1295,7 @@ export class PartiesService {
         type: 'CONTACT_UPDATED',
         title: 'ویرایش شخص رابط',
         description: updated.name,
-        data: { partyId: id, contactId: updated.id },
+        data: { partyId: id, contactId: updated.id, changes: buildChanges(existing as unknown as Record<string, unknown>, data as Record<string, unknown>) },
         actorUserId: actor.id,
       });
       // corr-05: business mutation + timeline + audit in ONE transaction.
@@ -1445,7 +1445,7 @@ export class PartiesService {
         type: 'ADDRESS_UPDATED',
         title: 'ویرایش نشانی',
         description: updated.line,
-        data: { partyId: id, addressId: updated.id },
+        data: { partyId: id, addressId: updated.id, changes: buildChanges(existing as unknown as Record<string, unknown>, data as Record<string, unknown>) },
         actorUserId: actor.id,
       });
       // corr-05: business mutation + timeline + audit in ONE transaction.

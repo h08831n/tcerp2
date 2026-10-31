@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
-import { TimelineService } from '../parties/timeline.service';
+import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { assertActiveCompanyMember } from '../common/utils/company-member';
@@ -512,6 +512,23 @@ export class PurchaseDocumentsService {
           version: { increment: 1 },
         },
       });
+      const headerChanges = buildChanges(doc as unknown as Record<string, unknown>, {
+        documentDate: dto.documentDate ? new Date(dto.documentDate) : undefined,
+        paymentTermId: dto.paymentTermId,
+        notes: dto.notes,
+      });
+      if (Object.keys(headerChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: doc.supplierPartyId,
+          type: 'PURCHASE_DOCUMENT_UPDATED',
+          title: 'ویرایش سند خرید',
+          description: `سند ${doc.documentNumber}`,
+          data: { purchaseDocumentId: doc.id, changes: headerChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'purchase_document',
         entityId: row.id,
@@ -551,10 +568,29 @@ export class PurchaseDocumentsService {
         _max: { lineOrder: true },
       });
       const lineData = await this.normalizeLines(tx, companyId, doc.id, [dto]);
-      await tx.purchaseLine.create({
+      const createdLine = await tx.purchaseLine.create({
         data: { ...lineData[0], lineOrder: (maxOrder._max.lineOrder ?? -1) + 1 },
       });
       await this.recomputeDocumentTotals(tx, doc.id);
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: doc.supplierPartyId,
+        type: 'PURCHASE_LINE_ADDED',
+        title: 'افزودن ردیف به سند خرید',
+        description: `سند ${doc.documentNumber}`,
+        data: {
+          purchaseDocumentId: doc.id,
+          purchaseLineId: createdLine.id,
+          added: {
+            productVariantId: createdLine.productVariantId,
+            orderedQuantity: createdLine.orderedQuantity,
+            uomId: createdLine.uomId,
+            unitPrice: createdLine.unitPrice,
+          },
+        },
+        actorUserId: actor.id,
+      });
       await this.auditService.recordTx(tx, {
         entityType: 'purchase_line',
         entityId: doc.id,
@@ -616,6 +652,19 @@ export class PurchaseDocumentsService {
         },
       });
       await this.recomputeDocumentTotals(tx, doc.id);
+      const lineChanges = buildChanges(line as unknown as Record<string, unknown>, updateData as Record<string, unknown>);
+      if (Object.keys(lineChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: doc.supplierPartyId,
+          type: 'PURCHASE_LINE_UPDATED',
+          title: 'ویرایش ردیف سند خرید',
+          description: `سند ${doc.documentNumber}`,
+          data: { purchaseDocumentId: doc.id, purchaseLineId: line.id, changes: lineChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'purchase_line',
         entityId: line.id,
@@ -657,6 +706,25 @@ export class PurchaseDocumentsService {
     await this.prisma.$transaction(async (tx) => {
       await tx.purchaseLine.delete({ where: { id: line.id } });
       await this.recomputeDocumentTotals(tx, doc.id);
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: doc.supplierPartyId,
+        type: 'PURCHASE_LINE_REMOVED',
+        title: 'حذف ردیف از سند خرید',
+        description: `سند ${doc.documentNumber}`,
+        data: {
+          purchaseDocumentId: doc.id,
+          purchaseLineId: line.id,
+          removed: {
+            productVariantId: line.productVariantId,
+            orderedQuantity: line.orderedQuantity,
+            uomId: line.uomId,
+            unitPrice: line.unitPrice,
+          },
+        },
+        actorUserId: actor.id,
+      });
       await this.auditService.recordTx(tx, {
         entityType: 'purchase_line',
         entityId: line.id,

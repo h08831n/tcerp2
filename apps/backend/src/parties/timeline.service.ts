@@ -19,6 +19,43 @@ export interface TimelineInput {
 }
 
 /**
+ * Normalize a value for JSON storage + comparison: undefined → null,
+ * Date → ISO string, Decimal/bigint → string (Decimal.toJSON is a string).
+ */
+export function normalizeTimelineValue(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'bigint') return value.toString();
+  if (value !== null && typeof value === 'object' && 'toJSON' in (value as object)) {
+    return (value as { toJSON: () => unknown }).toJSON();
+  }
+  return value;
+}
+
+/**
+ * Field-level diff for update timeline events: `{ field: { old, new } }` for
+ * every field whose value actually differs from the stored row. Keys whose
+ * patch value is `undefined` mean "not provided" (Prisma PATCH semantics) and
+ * are skipped; an explicit `null` IS a change. `version` is never diffed
+ * (optimistic-concurrency bookkeeping).
+ */
+export function buildChanges(
+  oldRow: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, { old: unknown; new: unknown }> {
+  const changes: Record<string, { old: unknown; new: unknown }> = {};
+  for (const key of Object.keys(patch)) {
+    if (key === 'version' || patch[key] === undefined) continue;
+    const oldValue = normalizeTimelineValue(oldRow[key]);
+    const newValue = normalizeTimelineValue(patch[key]);
+    if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+      changes[key] = { old: oldValue, new: newValue };
+    }
+  }
+  return changes;
+}
+
+/**
  * Generic timeline foundation (Phase 3A: PARTY entities). Append-only,
  * company-scoped, written inside the same transaction as the mutation
  * whenever the caller has one.

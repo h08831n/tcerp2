@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SequencesService } from '../sequences/sequences.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
-import { TimelineService } from '../parties/timeline.service';
+import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { assertActiveCompanyMember } from '../common/utils/company-member';
@@ -553,10 +553,30 @@ export class SalesDocumentsService {
         _max: { lineOrder: true },
       });
       const lineData = await this.normalizeLines(tx, companyId, doc.id, [dto], [dto.printableDescription]);
-      await tx.salesLine.create({
+      const createdLine = await tx.salesLine.create({
         data: { ...lineData[0], lineOrder: (maxOrder._max.lineOrder ?? -1) + 1 },
       });
       await this.recomputeDocumentTotals(tx, doc.id);
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: doc.customerPartyId,
+        type: 'SALES_LINE_ADDED',
+        title: 'افزودن ردیف به سند فروش',
+        description: `سند ${doc.documentNumber}`,
+        data: {
+          salesDocumentId: doc.id,
+          salesLineId: createdLine.id,
+          added: {
+            productVariantId: createdLine.productVariantId,
+            orderedQuantity: createdLine.orderedQuantity,
+            uomId: createdLine.uomId,
+            unitPrice: createdLine.unitPrice,
+            discountAmount: createdLine.discountAmount,
+          },
+        },
+        actorUserId: actor.id,
+      });
       await this.auditService.recordTx(tx, {
         entityType: 'sales_line',
         entityId: doc.id,
@@ -667,6 +687,19 @@ export class SalesDocumentsService {
         },
       });
       await this.recomputeDocumentTotals(tx, doc.id);
+      const lineChanges = buildChanges(line as unknown as Record<string, unknown>, updateData as Record<string, unknown>);
+      if (Object.keys(lineChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: doc.customerPartyId,
+          type: 'SALES_LINE_UPDATED',
+          title: 'ویرایش ردیف سند فروش',
+          description: `سند ${doc.documentNumber}`,
+          data: { salesDocumentId: doc.id, salesLineId: line.id, changes: lineChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'sales_line',
         entityId: line.id,
@@ -757,6 +790,26 @@ export class SalesDocumentsService {
     await this.prisma.$transaction(async (tx) => {
       await tx.salesLine.delete({ where: { id: line.id } });
       await this.recomputeDocumentTotals(tx, doc.id);
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: 'PARTY',
+        entityId: doc.customerPartyId,
+        type: 'SALES_LINE_REMOVED',
+        title: 'حذف ردیف از سند فروش',
+        description: `سند ${doc.documentNumber}`,
+        data: {
+          salesDocumentId: doc.id,
+          salesLineId: line.id,
+          removed: {
+            productVariantId: line.productVariantId,
+            orderedQuantity: line.orderedQuantity,
+            uomId: line.uomId,
+            unitPrice: line.unitPrice,
+            discountAmount: line.discountAmount,
+          },
+        },
+        actorUserId: actor.id,
+      });
       await this.auditService.recordTx(tx, {
         entityType: 'sales_line',
         entityId: line.id,
@@ -846,6 +899,28 @@ export class SalesDocumentsService {
           version: { increment: 1 },
         },
       });
+      // undefined = untouched (PATCH semantics) — buildChanges skips them.
+      const headerChanges = buildChanges(doc as unknown as Record<string, unknown>, {
+        documentDate: dto.documentDate ? new Date(dto.documentDate) : undefined,
+        expirationDate: dto.expirationDate ? new Date(dto.expirationDate) : undefined,
+        paymentTermId: dto.paymentTermId,
+        shippingAddressId: dto.shippingAddressId,
+        language: dto.language,
+        quotationTemplateCode: dto.quotationTemplateCode,
+        notes: dto.notes,
+      });
+      if (Object.keys(headerChanges).length > 0) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: doc.customerPartyId,
+          type: 'SALES_DOCUMENT_UPDATED',
+          title: 'ویرایش سند فروش',
+          description: `سند ${doc.documentNumber}`,
+          data: { salesDocumentId: doc.id, changes: headerChanges },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'sales_document',
         entityId: row.id,

@@ -9,7 +9,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { TimelineService } from '../parties/timeline.service';
+import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { AccountingEventService } from '../accounting/accounting-event.service';
 import { AccountingEventType } from '@prisma/client';
@@ -361,6 +361,16 @@ export class LoadingService {
         });
         const partyId = row.customerPartyId ?? row.driverPartyId ?? row.carrierPartyId;
         if (partyId) {
+          const loadingChanges = buildChanges(existing as unknown as Record<string, unknown>, {
+            loadingDate: input.loadingDate ? new Date(input.loadingDate) : undefined,
+            route: input.route,
+            warehouseId: input.warehouseId,
+            customerPartyId: input.customerPartyId,
+            driverPartyId: input.driverPartyId,
+            carrierPartyId: input.carrierPartyId,
+            notes: input.notes,
+            ...(lines ? { lines: `replaced with ${lines.length} line(s)` } : {}),
+          });
           await this.timeline.record(tx, {
             companyId,
             entityType: 'PARTY',
@@ -368,7 +378,7 @@ export class LoadingService {
             type: 'LOADING_UPDATED',
             title: 'بارگیری ویرایش شد',
             description: 'پیش‌نویس بارگیری ویرایش شد',
-            data: { loadingId: row.id },
+            data: { loadingId: row.id, changes: loadingChanges },
             actorUserId: actor.id,
           });
         }
