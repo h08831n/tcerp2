@@ -124,3 +124,18 @@ execution for huge files, backup/restore and load tests are NOT done yet.
   corrections go through the document lifecycle (handover accounting rules).
   Created documents are DRAFT with computed totals (subtotal = Σ qty×price).
 - Prefetch validation: canonical customer phones + variant skus before any write.
+
+
+## 11. Slice 6 — Full load test (Gate G scale gate)
+
+- **g11-15**: 5000-row party import (PER_ROW, batchSize 500) — 100% OK in ~87s
+  (~57 rows/s) on the dev Docker Postgres; bounded at 5 minutes. Constant
+  throughput vs the 1500-row smoke (no degradation as the job grows) — the
+  batch-chunked design does not accumulate cost per row.
+- **g11-16**: two CONCURRENT import jobs (100 rows each) — separate row
+  transactions carry no shared state, so parallel operators never
+  cross-contaminate: 100/100 rows each, exact partition, zero failures.
+- Throughput notes: ~57 rows/s is dev-Docker (Windows host, one Prisma tx per
+  row by design for isolation). Production sizing: BATCH commit mode or larger
+  batchSize raises throughput ~linearly at the cost of chunk-level atomicity —
+  an explicit operator choice documented in §2.1.

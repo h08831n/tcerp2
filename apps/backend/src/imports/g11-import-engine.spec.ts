@@ -811,4 +811,96 @@ describeIntegration('g11 import engine (Phase 11)', () => {
     });
     expect(stillOne).toBe(1);
   });
+
+  it('g11-15 full load: 5000-row import completes 100% OK (Gate G scale gate)', async () => {
+    const stamp = `${Date.now()}`.slice(-7);
+    const base = 2_000_000 + (Number(stamp) % 1_000_000);
+    const rows: string[][] = [['nameFa', 'phone']];
+    for (let i = 0; i < 5000; i += 1) {
+      rows.push([`g11-full-${stamp}-${i}`, `0918${String(base + i).padStart(7, '0')}`]);
+    }
+    const started = Date.now();
+    const job = await service.createJob(
+      INTEGRATION_COMPANY_ID,
+      {
+        entityType: 'PARTY', fileName: `g11-full-${stamp}.csv`, csv: csvOf(rows),
+        columnMapping: { nameFa: 'nameFa', phone: 'phone' },
+        commitMode: 'PER_ROW', batchSize: 500,
+      },
+      ACTOR, ctx,
+    );
+    jobIds.push(job.id);
+    const finished = await service.run(INTEGRATION_COMPANY_ID, job.id, ACTOR, ctx);
+    const seconds = (Date.now() - started) / 1000;
+    expect(finished.okCount).toBe(5000);
+    expect(finished.failedCount).toBe(0);
+    expect(finished.status).toBe('COMPLETED');
+    // scale gate: 5000 rows inside 5 minutes (dev-hardware bound, not prod)
+    expect(seconds).toBeLessThan(300);
+    // eslint-disable-next-line no-console
+    console.log(`[g11-15] full load: 5000 rows in ${seconds.toFixed(1)}s (${(5000 / seconds).toFixed(0)} rows/s)`);
+    await prisma.party
+      .deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: `g11-full-${stamp}` } } })
+      .catch(() => undefined);
+  });
+
+  it('g11-16 concurrent jobs: two parallel imports never cross-contaminate rows', async () => {
+    const stamp = `${Date.now()}`.slice(-7);
+    const baseA = 3_000_000 + (Number(stamp) % 1_000_000);
+    const baseB = 3_100_000 + (Number(stamp) % 1_000_000);
+    const mkCsv = (prefix: string, base: number): string => {
+      const rows: string[][] = [['nameFa', 'phone']];
+      for (let i = 0; i < 100; i += 1) {
+        rows.push([`${prefix}-${i}`, `0919${String(base + i).padStart(7, '0')}`]);
+      }
+      return csvOf(rows);
+    };
+    const [jobA, jobB] = await Promise.all([
+      service.createJob(
+        INTEGRATION_COMPANY_ID,
+        {
+          entityType: 'PARTY', fileName: `g11-conc-A-${stamp}.csv`, csv: mkCsv(`g11-conc-A-${stamp}`, baseA),
+          columnMapping: { nameFa: 'nameFa', phone: 'phone' },
+        },
+        ACTOR, ctx,
+      ),
+      service.createJob(
+        INTEGRATION_COMPANY_ID,
+        {
+          entityType: 'PARTY', fileName: `g11-conc-B-${stamp}.csv`, csv: mkCsv(`g11-conc-B-${stamp}`, baseB),
+          columnMapping: { nameFa: 'nameFa', phone: 'phone' },
+        },
+        ACTOR, ctx,
+      ),
+    ]);
+    jobIds.push(jobA.id, jobB.id);
+    // run BOTH concurrently — separate transactions per row, no shared state
+    const [finA, finB] = await Promise.all([
+      service.run(INTEGRATION_COMPANY_ID, jobA.id, ACTOR, ctx),
+      service.run(INTEGRATION_COMPANY_ID, jobB.id, ACTOR, ctx),
+    ]);
+    expect(finA.okCount).toBe(100);
+    expect(finB.okCount).toBe(100);
+    expect(finA.failedCount).toBe(0);
+    expect(finB.failedCount).toBe(0);
+    const countA = await prisma.party.count({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: `g11-conc-A-${stamp}` } },
+    });
+    const countB = await prisma.party.count({
+      where: { companyId: INTEGRATION_COMPANY_ID, nameFa: { startsWith: `g11-conc-B-${stamp}` } },
+    });
+    expect(countA).toBe(100);
+    expect(countB).toBe(100);
+    await prisma.party
+      .deleteMany({
+        where: {
+          companyId: INTEGRATION_COMPANY_ID,
+          OR: [
+            { nameFa: { startsWith: `g11-conc-A-${stamp}` } },
+            { nameFa: { startsWith: `g11-conc-B-${stamp}` } },
+          ],
+        },
+      })
+      .catch(() => undefined);
+  });
 });
