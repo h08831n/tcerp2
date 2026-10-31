@@ -706,10 +706,10 @@ Docs synced with the post-gate schema: `docs/01-domain-map.md`, `docs/02-erd.md`
   `docker pull docker.arvancloud.ir/minio/minio:latest && docker tag docker.arvancloud.ir/minio/minio:latest minio/minio:latest`.
 - Frontend dashboard is a shell; widgets arrive in Phase 10. Auth gate is client-side in the
   shell (fine for now; server middleware can be added later).
-- Sales/purchase documents have no `notes` column yet (REQUIREMENTS §9 lists `notes` among
-  the quotation header fields) — the DTOs accept `notes` for forward-compatibility but it is
-  NOT persisted; add the column with the next schema change (same pattern as the
-  `tax_definitions` `used_at` note in `apps/backend/README.md`).
+- ~~Sales/purchase documents have no `notes` column~~ CLOSED (final review 2026-10-31):
+  re-verified — the `notes` column EXISTS on both `sales_documents` and
+  `purchase_documents` (DB + schema), the DTOs accept it and BOTH services persist it
+  (create + update + audit old/new values). The entry was stale.
 
 ## Next steps
 1. Phase 7D is COMPLETE and awaiting review (accounting UI + fiscal lifecycle). Phase 8
