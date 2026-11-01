@@ -218,13 +218,19 @@ export class JournalService {
     companyId: string,
     date: Date,
   ): Promise<void> {
+    // R3-5: fiscal years/periods are CALENDAR dates (db DATE = midnight) —
+    // the comparison uses the entry's calendar DAY, so a timestamp at
+    // 12:00 on the LAST day of a year/period still belongs to it.
+    const calendarDay = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
     // Optional-chain + guard: some callers (legacy unit tests) hand a stubbed
     // tx without fiscal delegates — treated as "no fiscal calendar".
     const year = (await tx.fiscalYear?.findFirst?.({
       where: {
         companyId,
-        startDate: { lte: date },
-        endDate: { gte: date },
+        startDate: { lte: calendarDay },
+        endDate: { gte: calendarDay },
       },
     })) ?? null;
     if (!year) return; // no fiscal calendar → unguarded (documented)
@@ -234,8 +240,8 @@ export class JournalService {
     const period = (await tx.fiscalPeriod?.findFirst?.({
       where: {
         fiscalYearId: year.id,
-        startDate: { lte: date },
-        endDate: { gte: date },
+        startDate: { lte: calendarDay },
+        endDate: { gte: calendarDay },
       },
     })) ?? null;
     if (period) {

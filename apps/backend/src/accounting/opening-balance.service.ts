@@ -61,12 +61,26 @@ export class OpeningBalanceService {
       if (!fiscalYear) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
       if (fiscalYear.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
     } else {
-      // R-4: auto-bind to the current fiscal year when a calendar exists.
+      // R3-2: auto-bind to the current fiscal year when a calendar exists.
+      // A calendar WITHOUT an open year containing today is an EXPLICIT
+      // error — silently creating fiscalYearId=null rows that no annual
+      // generate can consume is exactly the trap this design removes.
+      // The legacy null-batch stays available ONLY for companies with NO
+      // fiscal calendar at all.
       const today = new Date();
       fiscalYear = await this.prisma.fiscalYear.findFirst({
         where: { companyId, startDate: { lte: today }, endDate: { gte: today }, status: { not: 'CLOSED' } },
         select: { id: true, status: true },
       });
+      if (!fiscalYear) {
+        const calendarExists = await this.prisma.fiscalYear.count({ where: { companyId } });
+        if (calendarExists > 0) throw new ValidationError('OPENING_FISCAL_YEAR_REQUIRED', { today });
+      }
+    }
+    if (fiscalYear) {
+      // R3-6: staging into a year that already carries a POSTED OPENING
+      // document would create rows no generate can ever consume.
+      await OpeningBalanceService.assertNoOpeningDoc(this.prisma, companyId, fiscalYear.id);
     }
     const accounts = await this.prisma.chartOfAccount.findMany({
       where: { companyId },
@@ -166,6 +180,10 @@ export class OpeningBalanceService {
     fiscalYearId?: string,
   ) {
     const date = entryDate ?? new Date();
+    // R3-5: fiscal years are CALENDAR dates (db DATE = midnight) while the
+    // entry date is a TIMESTAMP — the LAST calendar day belongs to the year
+    // up to 23:59:59.999, not only to its midnight instant.
+    const endOfDayExclusive = (d: Date): number => d.getTime() + 86_400_000;
     let fiscalYear: { id: string; startDate: Date; endDate: Date; status: string } | null;
     if (fiscalYearId !== undefined) {
       // R-3: an explicit FY must exist, be OPEN, and CONTAIN the entry date —
@@ -179,8 +197,10 @@ export class OpeningBalanceService {
       if (explicit.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
       if (
         date.getTime() < explicit.startDate.getTime() ||
-        date.getTime() > explicit.endDate.getTime()
+        date.getTime() >= endOfDayExclusive(explicit.endDate)
       ) {
+        // Request well-formedness FIRST — an out-of-year date is reported
+        // even when the year already carries an OPENING document.
         throw new ValidationError('OPENING_DATE_OUTSIDE_FISCAL_YEAR', {
           entryDate: date.toISOString(),
           fiscalYearId,
@@ -188,11 +208,35 @@ export class OpeningBalanceService {
       }
       fiscalYear = explicit;
     } else {
+      // Calendar-day comparison for the implicit path as well.
+      const dayStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
       fiscalYear = await this.prisma.fiscalYear.findFirst({
-        where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
+        where: { companyId, startDate: { lte: dayStart }, endDate: { gte: dayStart } },
         select: { id: true, startDate: true, endDate: true, status: true },
       });
       if (fiscalYear?.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+    }
+    // Uniqueness FIRST (R3-review follow-up): an already-generated year must
+    // report OPENING_ALREADY_GENERATED, not a misleading NO_STAGED rows error.
+    if (fiscalYear) {
+      const existing = await this.prisma.journalEntry.findFirst({
+        where: {
+          companyId,
+          documentType: 'OPENING',
+          status: 'POSTED',
+          entryDate: {
+            gte: fiscalYear.startDate,
+            lt: new Date(endOfDayExclusive(fiscalYear.endDate)),
+          },
+        },
+        select: { id: true, entryNumber: true },
+      });
+      if (existing) {
+        throw new ConflictError(
+          'OPENING_ALREADY_GENERATED_FOR_FISCAL_YEAR',
+          { entryNumber: existing.entryNumber },
+        );
+      }
     }
     const staged = await this.prisma.openingBalanceEntry.findMany({
       where: { companyId, status: 'STAGED', fiscalYearId: fiscalYear?.id ?? null },
@@ -307,35 +351,89 @@ export class OpeningBalanceService {
     companyId: string,
     fiscalYearId: string,
     actor: { id: string; username: string },
-  ): Promise<number> {
+    opts: { rowIds?: string[]; preview?: boolean } = {},
+  ): Promise<number | { count: number; rows: Array<{ id: string; accountCode: string; debit: unknown; credit: unknown }> }> {
     const fiscalYear = await this.prisma.fiscalYear.findFirst({
       where: { id: fiscalYearId, companyId },
       select: { id: true, status: true },
     });
     if (!fiscalYear) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
     if (fiscalYear.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+    // R3-6: never assign into a year that already has its OPENING document.
+    await OpeningBalanceService.assertNoOpeningDoc(this.prisma, companyId, fiscalYear.id);
+
+    // Candidate pool: unassigned STAGED rows of this company, optionally
+    // restricted to an explicit selection (R3-1: the operation is SELECTIVE).
+    const pool = await this.prisma.openingBalanceEntry.findMany({
+      where: {
+        companyId,
+        status: 'STAGED',
+        fiscalYearId: null,
+        ...(opts.rowIds ? { id: { in: opts.rowIds } } : {}),
+      },
+      select: { id: true, accountCode: true, debit: true, credit: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (opts.rowIds) {
+      // Every explicitly requested row must exist in the assignable pool.
+      const poolIds = new Set(pool.map((r) => r.id));
+      const missing = opts.rowIds.filter((id) => !poolIds.has(id));
+      if (missing.length > 0) {
+        throw new ValidationError('OPENING_ROW_NOT_ASSIGNABLE', { missing });
+      }
+    }
+    if (opts.preview) {
+      // Preview mutates NOTHING and writes NO audit row.
+      return { count: pool.length, rows: pool };
+    }
+    if (pool.length === 0) return 0;
     const result = await this.prisma.$transaction(async (tx: Tx) => {
-      const unassigned = await tx.openingBalanceEntry.findMany({
-        where: { companyId, status: 'STAGED', fiscalYearId: null },
-        select: { id: true },
-      });
-      if (unassigned.length === 0) return 0;
+      // CAS: rows may only move while still STAGED and unassigned.
       const updated = await tx.openingBalanceEntry.updateMany({
-        where: { id: { in: unassigned.map((r) => r.id) } },
+        where: { id: { in: pool.map((r) => r.id) }, status: 'STAGED', fiscalYearId: null },
         data: { fiscalYearId },
       });
+      if (updated.count === 0) return 0;
+      // R3-1: row-LEVEL audit — the exact id list that moved.
       await this.auditService.recordTx(tx, {
         entityType: 'opening_balance',
-        entityId: unassigned[0].id,
+        entityId: pool[0].id,
         action: 'ASSIGN',
         companyId,
         actor,
-        oldValues: { unassignedRows: unassigned.length, fiscalYearId: null },
-        newValues: { rows: updated.count, fiscalYearId },
+        oldValues: { rows: pool.length, fiscalYearId: null },
+        newValues: { rows: updated.count, rowIds: pool.map((r) => r.id), fiscalYearId },
       });
       return updated.count;
     });
     return result;
+  }
+
+  /** R3-6 guard: a POSTED OPENING document inside the fiscal year's window
+   *  (calendar-day inclusive) blocks further staging/assignment. */
+  private static async assertNoOpeningDoc(
+    client: PrismaService | Tx,
+    companyId: string,
+    fiscalYearId: string,
+  ): Promise<void> {
+    const fy = await client.fiscalYear.findUniqueOrThrow({
+      where: { id: fiscalYearId },
+      select: { startDate: true, endDate: true },
+    });
+    const existing = await client.journalEntry.findFirst({
+      where: {
+        companyId,
+        documentType: 'OPENING',
+        status: 'POSTED',
+        entryDate: { gte: fy.startDate, lt: new Date(fy.endDate.getTime() + 86_400_000) },
+      },
+      select: { entryNumber: true },
+    });
+    if (existing) {
+      throw new ConflictError('OPENING_FISCAL_YEAR_ALREADY_GENERATED', {
+        entryNumber: existing.entryNumber,
+      });
+    }
   }
 
   /** Ledger-side validation helper used by tests/reports: staged balance check. */

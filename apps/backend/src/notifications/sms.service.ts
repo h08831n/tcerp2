@@ -71,7 +71,18 @@ export class SmsService implements OnApplicationBootstrap {
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
     private readonly auditService: AuditService,
-  ) {}
+    options?: { passRowLimit?: number },
+  ) {
+    // R3-3: per-PASS row bound — Pass B always gets its budget even when
+    // Pass A exhausts its own (the single shared bound could starve it).
+    this.passRowLimit = options?.passRowLimit ?? 10_000;
+  }
+
+  private readonly passRowLimit: number;
+  /** Sweep cursors persist ACROSS sweeps (rotation) — rows beyond a bound
+   *  are reached by the next sweep instead of being starved forever. */
+  private passACursor = '';
+  private passBCursor = '';
 
   /**
    * P1-4/P1-5 recovery (review of 80502ae): NO SMS row may stay QUEUED
@@ -114,8 +125,6 @@ export class SmsService implements OnApplicationBootstrap {
   }
 
   private static readonly RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
-  /** Hard safety bound per sweep (rows examined) — defense in depth. */
-  private static readonly RECONCILE_MAX_ROWS = 20_000;
 
   async reconcileStuckQueued(): Promise<{
     requeued: number;
@@ -125,39 +134,46 @@ export class SmsService implements OnApplicationBootstrap {
     let requeued = 0;
     let detached = 0;
     let markedFailed = 0;
-    let swept = 0;
+    let passAttempts = 0;
     // R-1/R-2 (review of 96f9af0): BOTH passes page with a STABLE id cursor
     // and always advance — a persistently failing enqueue or a page of
-    // in-progress jobs can never re-read the same page, so the sweep is
-    // bounded and rows beyond page 1 are always reached. Rows whose enqueue
-    // fails are SKIPPED for this sweep and retried by the NEXT sweep.
-    const bounded = (): boolean => {
-      if (swept <= SmsService.RECONCILE_MAX_ROWS) return false;
-      this.logger.error(`sms reconcile hit the per-sweep row bound (${SmsService.RECONCILE_MAX_ROWS}) — continuing next sweep`);
-      return true;
-    };
+    // in-progress jobs can never re-read the same page. Rows whose enqueue
+    // fails are SKIPPED for this sweep and retried by the NEXT cycle.
+    // R3-3 (review of 0b4b1aa): each pass owns its bound, and the cursors
+    // PERSIST across sweeps — after a bound-limited pass the next sweep
+    // continues where this one stopped (fairness, no starvation).
 
     // Pass A — rows that never got a job (crash window between row insert
     // and queue.commit): re-enqueue with the SAME stable key, honoring the
     // persisted scheduledFor (P1-5).
-    let cursorA = '';
-    for (;;) {
+    passA: for (;;) {
       const orphans = await this.prisma.smsMessage.findMany({
-        where: { status: SmsMessageStatus.QUEUED, queuedJobId: null, ...(cursorA ? { id: { gt: cursorA } } : {}) },
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: null, ...(this.passACursor ? { id: { gt: this.passACursor } } : {}) },
         orderBy: { id: 'asc' },
         select: { id: true, companyId: true, scheduledFor: true },
         take: 200,
       });
-      if (orphans.length === 0) break;
-      cursorA = orphans[orphans.length - 1].id;
+      if (orphans.length === 0) {
+        this.passACursor = ''; // cycle complete — restart from the top next time
+        break;
+      }
       for (const message of orphans) {
-        swept += 1;
-        if (bounded()) return { requeued, detached, markedFailed };
+        // The bound counts ATTEMPTS, not successes — a persistently failing
+        // queue hits it exactly like a slow one. Hitting it ends THIS PASS
+        // only; Pass B always gets its own budget (R3-3). The cursor is
+        // PER-ROW: a bound break resumes EXACTLY after the last attempted
+        // row next sweep (no skip, no re-read).
+        if (passAttempts >= this.passRowLimit) {
+          this.logger.warn(`sms reconcile: Pass A hit its ${this.passRowLimit}-row bound — Pass B continues, remainder next sweep`);
+          break passA; // labeled: exit BOTH loops, never spin on fresh pages
+        }
+        passAttempts += 1;
+        this.passACursor = message.id;
         try {
           await this.reenqueue(message.id, message.companyId, message.scheduledFor);
           requeued += 1;
         } catch {
-          // Stays reconcilable — retried by the NEXT sweep, never re-read here.
+          // Attempted — retried next CYCLE (cursor wraps), never re-read here.
         }
       }
     }
@@ -168,16 +184,18 @@ export class SmsService implements OnApplicationBootstrap {
     // is unknowable; a blind resend could double-text a real customer —
     // manual resend is the operator's decision). Missing job → detach and
     // re-enqueue. PENDING/SCHEDULED/PROCESSING/RETRYING → queue owns them.
-    let cursorB = '';
-    for (;;) {
+    passAttempts = 0; // R3-3: Pass B owns a FRESH budget of its own
+    passB: for (;;) {
       const linked = await this.prisma.smsMessage.findMany({
-        where: { status: SmsMessageStatus.QUEUED, queuedJobId: { not: null }, ...(cursorB ? { id: { gt: cursorB } } : {}) },
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: { not: null }, ...(this.passBCursor ? { id: { gt: this.passBCursor } } : {}) },
         orderBy: { id: 'asc' },
         select: { id: true, companyId: true, scheduledFor: true, queuedJobId: true },
         take: 200,
       });
-      if (linked.length === 0) break;
-      cursorB = linked[linked.length - 1].id;
+      if (linked.length === 0) {
+        this.passBCursor = ''; // cycle complete
+        break;
+      }
       const jobIds = [...new Set(linked.map((m) => m.queuedJobId!))];
       const jobs = await this.prisma.queueJob.findMany({
         where: { id: { in: jobIds } },
@@ -185,29 +203,38 @@ export class SmsService implements OnApplicationBootstrap {
       });
       const byId = new Map(jobs.map((j) => [j.id, j.status]));
       for (const message of linked) {
-        swept += 1;
-        if (bounded()) return { requeued, detached, markedFailed };
+        if (passAttempts >= this.passRowLimit) {
+          this.logger.warn(`sms reconcile: Pass B hit its ${this.passRowLimit}-row bound — remainder next sweep`);
+          break passB; // labeled: exit BOTH loops
+        }
+        passAttempts += 1;
+        this.passBCursor = message.id; // per-row resume point
         const status = byId.get(message.queuedJobId!);
         try {
           if (status === undefined) {
-            // (b) job row vanished — detach, then re-enqueue.
-            await this.prisma.smsMessage.update({
-              where: { id: message.id },
+            // (b) job row vanished — CAS-detach (only while still QUEUED with
+            // the SAME link). A lost CAS = a worker/another replica moved it
+            // first → skip (never overwrite newer state).
+            const detachedNow = await this.prisma.smsMessage.updateMany({
+              where: { id: message.id, status: SmsMessageStatus.QUEUED, queuedJobId: message.queuedJobId },
               data: { queuedJobId: null },
             });
+            if (detachedNow.count === 0) continue;
             detached += 1;
             await this.reenqueue(message.id, message.companyId, message.scheduledFor);
             requeued += 1;
           } else if (status === 'FAILED' || status === 'SUCCEEDED') {
-            // (c) terminal without write-back → observable FAILED.
-            await this.prisma.smsMessage.update({
-              where: { id: message.id },
+            // (c) terminal without write-back → observable FAILED — CAS on
+            // status=QUEUED so a NEWER worker write-back (SENT/FAILED) is
+            // never overwritten (R3-4).
+            const markedNow = await this.prisma.smsMessage.updateMany({
+              where: { id: message.id, status: SmsMessageStatus.QUEUED, queuedJobId: message.queuedJobId },
               data: {
                 status: SmsMessageStatus.FAILED,
                 error: `reconcile: job ${status} without handler write-back`,
               },
             });
-            markedFailed += 1;
+            if (markedNow.count === 1) markedFailed += 1;
           }
         } catch {
           // Stays reconcilable — retried by the NEXT sweep.
@@ -232,8 +259,10 @@ export class SmsService implements OnApplicationBootstrap {
       priority: 'HIGH',
       delayMs,
     });
-    await this.prisma.smsMessage.update({
-      where: { id: messageId },
+    // CAS link: only while still QUEUED and unlinked — a worker that already
+    // wrote back must not be relinked by the sweep.
+    await this.prisma.smsMessage.updateMany({
+      where: { id: messageId, status: SmsMessageStatus.QUEUED, queuedJobId: null },
       data: { queuedJobId: job.id },
     });
   }

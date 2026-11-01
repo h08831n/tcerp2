@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
-import { IsArray, IsDateString, IsOptional, IsString, IsUUID, MaxLength, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsOptional, IsString, IsUUID, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { Request } from 'express';
 import { Req } from '@nestjs/common';
@@ -69,10 +69,19 @@ class GenerateOpeningDto {
   fiscalYearId?: string;
 }
 
-/** R-4: assign legacy unassigned STAGED rows to an OPEN fiscal year. */
+/** R3-1: SELECTIVE + PREVIEWABLE assignment of unassigned STAGED rows. */
 class AssignOpeningDto {
   @IsUUID()
   fiscalYearId!: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  rowIds?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  preview?: boolean;
 }
 
 /**
@@ -366,6 +375,10 @@ export class OpeningBalanceController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return { assigned: await this.opening.assignTo(companyId, dto.fiscalYearId, actor) };
+    const result = await this.opening.assignTo(companyId, dto.fiscalYearId, actor, {
+      rowIds: dto.rowIds,
+      preview: dto.preview,
+    });
+    return typeof result === 'number' ? { assigned: result } : result;
   }
 }
