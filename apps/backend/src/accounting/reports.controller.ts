@@ -69,13 +69,34 @@ class GenerateOpeningDto {
   fiscalYearId?: string;
 }
 
+/** R-4: assign legacy unassigned STAGED rows to an OPEN fiscal year. */
+class AssignOpeningDto {
+  @IsUUID()
+  fiscalYearId!: string;
+}
+
 /**
- * P1-6 (review of 80502ae): report query dates are validated at the
+ * P1-6 + R-5 (review of 96f9af0): report query dates are validated at the
  * controller boundary — an unparseable date reached Prisma as `Invalid Date`
- * (500) and a reversed window silently returned misleading reports.
+ * (500), a reversed window silently returned misleading reports, and JS
+ * `new Date` silently ROLLS calendar-invalid dates (2026-02-30 → March 2),
+ * shifting report windows by days. Strict calendar round-trip check.
  */
 function parseReportDate(value: string | undefined, field: string): Date | undefined {
   if (value === undefined || value === '') return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!match) throw new ValidationError('REPORT_DATE_INVALID', { field, value });
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new ValidationError('REPORT_DATE_INVALID', { field, value });
+  }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     throw new ValidationError('REPORT_DATE_INVALID', { field, value });
@@ -191,10 +212,11 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const asOfDate = parseReportDate(asOf, 'asOf');
     return this.subsidiary.partyBalances(companyId, {
       role: role === 'SUPPLIER' ? 'SUPPLIER' : 'CUSTOMER',
       accountCode: accountCode || (role === 'SUPPLIER' ? 'PAYABLE' : 'RECEIVABLE'),
-      asOf: asOf ? new Date(asOf) : undefined,
+      asOf: asOfDate,
       search,
       page: page ? Number(page) : undefined,
       pageSize: pageSize ? Number(pageSize) : undefined,
@@ -331,8 +353,19 @@ export class OpeningBalanceController {
     return this.opening.generate(
       companyId,
       actor,
-      dto.entryDate ? new Date(dto.entryDate) : undefined,
+      parseReportDate(dto.entryDate, 'entryDate'),
       dto.fiscalYearId,
     );
+  }
+
+  @Post('assign')
+  @RequirePermissions('accounting.fiscal.manage')
+  async assign(
+    @Body() dto: AssignOpeningDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return { assigned: await this.opening.assignTo(companyId, dto.fiscalYearId, actor) };
   }
 }

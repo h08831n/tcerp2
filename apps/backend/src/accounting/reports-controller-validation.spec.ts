@@ -78,4 +78,33 @@ describe('reports controller parameter validation', () => {
       controller.operationalProfit('2026-02-01', '2026-01-01', undefined, undefined, undefined, undefined, ACTOR, REQ),
     ).rejects.toThrow('REPORT_RANGE_REVERSED');
   });
+
+  it('R-5 (review 96f9af0): CALENDAR-invalid dates like 2026-02-30 are rejected, not rolled over', async () => {
+    // JS new Date('2026-02-30') silently rolls to 2026-03-02 — the report
+    // window would silently shift by days. Must be rejected.
+    await expect(
+      controller.generalLedger('BANK', '2026-02-30', undefined, undefined, undefined, undefined, undefined, undefined, undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+    await expect(
+      controller.trialBalance('2026-02-30', undefined, undefined, undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+    await expect(
+      controller.trialBalance(undefined, undefined, '2026-04-31', undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+    await expect(
+      controller.operationalProfit('2026-13-01', undefined, undefined, undefined, undefined, undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+    // Valid ISO timestamps still parse.
+    await controller.generalLedger('BANK', '2026-02-01T00:00:00Z', '2026-02-28T23:59:59Z', undefined, undefined, undefined, undefined, undefined, undefined, ACTOR, REQ);
+    expect(calls.gl.length).toBeGreaterThan(0);
+  });
+
+  it('R-5 (review 96f9af0): subsidiaryBalances asOf is validated (garbage + calendar-invalid)', async () => {
+    await expect(
+      controller.subsidiaryBalances('CUSTOMER', 'RECEIVABLE', 'garbage', undefined, undefined, undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+    await expect(
+      controller.subsidiaryBalances('CUSTOMER', 'RECEIVABLE', '2026-02-30', undefined, undefined, undefined, ACTOR, REQ),
+    ).rejects.toThrow('REPORT_DATE_INVALID');
+  });
 });

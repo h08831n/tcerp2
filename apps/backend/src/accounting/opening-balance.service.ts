@@ -35,12 +35,13 @@ export class OpeningBalanceService {
   ) {}
 
   /**
-   * Stage opening rows. P0-2 (review of 80502ae): rows are bound to a
-   * FISCAL YEAR at stage time — `fiscalYearId` must belong to this company
-   * and be OPEN. Without any fiscal calendar (legacy fallback) rows stay
-   * fiscalYearId=null and only the legacy company-wide generate consumes
-   * them; with a calendar, unassigned rows are never silently mixed into a
-   * year's entry (they stay STAGED and visible via list()).
+   * Stage opening rows. P0-2: rows are bound to a FISCAL YEAR at stage time.
+   * R-4 (review of 96f9af0): WITHOUT an explicit fiscalYearId the rows are
+   * auto-bound to the fiscal year containing TODAY (API-backward-compatible,
+   * and never trapped as null rows that no annual generate can consume);
+   * when the company has NO fiscal calendar they stay null (legacy
+   * single-batch path). An explicit fiscalYearId must belong to this
+   * company and be OPEN.
    */
   async stage(
     companyId: string,
@@ -59,6 +60,13 @@ export class OpeningBalanceService {
       });
       if (!fiscalYear) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
       if (fiscalYear.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+    } else {
+      // R-4: auto-bind to the current fiscal year when a calendar exists.
+      const today = new Date();
+      fiscalYear = await this.prisma.fiscalYear.findFirst({
+        where: { companyId, startDate: { lte: today }, endDate: { gte: today }, status: { not: 'CLOSED' } },
+        select: { id: true, status: true },
+      });
     }
     const accounts = await this.prisma.chartOfAccount.findMany({
       where: { companyId },
@@ -157,23 +165,35 @@ export class OpeningBalanceService {
     entryDate?: Date,
     fiscalYearId?: string,
   ) {
+    const date = entryDate ?? new Date();
+    let fiscalYear: { id: string; startDate: Date; endDate: Date; status: string } | null;
     if (fiscalYearId !== undefined) {
+      // R-3: an explicit FY must exist, be OPEN, and CONTAIN the entry date —
+      // an out-of-year date would post an OPENING entry outside the year the
+      // uniqueness scope protects.
       const explicit = await this.prisma.fiscalYear.findFirst({
         where: { id: fiscalYearId, companyId },
-        select: { id: true },
+        select: { id: true, startDate: true, endDate: true, status: true },
       });
       if (!explicit) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
-    }
-    const date = entryDate ?? new Date();
-    const fiscalYear = fiscalYearId
-      ? await this.prisma.fiscalYear.findFirst({
-          where: { id: fiscalYearId },
-          select: { id: true, startDate: true, endDate: true },
-        })
-      : await this.prisma.fiscalYear.findFirst({
-          where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
-          select: { id: true, startDate: true, endDate: true },
+      if (explicit.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+      if (
+        date.getTime() < explicit.startDate.getTime() ||
+        date.getTime() > explicit.endDate.getTime()
+      ) {
+        throw new ValidationError('OPENING_DATE_OUTSIDE_FISCAL_YEAR', {
+          entryDate: date.toISOString(),
+          fiscalYearId,
         });
+      }
+      fiscalYear = explicit;
+    } else {
+      fiscalYear = await this.prisma.fiscalYear.findFirst({
+        where: { companyId, startDate: { lte: date }, endDate: { gte: date } },
+        select: { id: true, startDate: true, endDate: true, status: true },
+      });
+      if (fiscalYear?.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+    }
     const staged = await this.prisma.openingBalanceEntry.findMany({
       where: { companyId, status: 'STAGED', fiscalYearId: fiscalYear?.id ?? null },
     });
@@ -276,6 +296,46 @@ export class OpeningBalanceService {
       orderBy: { createdAt: 'asc' },
       take: 500,
     });
+  }
+
+  /**
+   * R-4: safely assign ALL unassigned (fiscalYearId=null) STAGED rows of the
+   * company to a validated OPEN fiscal year — the migration path for rows
+   * staged by older versions. Rows are UPDATED, never deleted; audited.
+   */
+  async assignTo(
+    companyId: string,
+    fiscalYearId: string,
+    actor: { id: string; username: string },
+  ): Promise<number> {
+    const fiscalYear = await this.prisma.fiscalYear.findFirst({
+      where: { id: fiscalYearId, companyId },
+      select: { id: true, status: true },
+    });
+    if (!fiscalYear) throw new ValidationError('FISCAL_YEAR_NOT_FOUND');
+    if (fiscalYear.status === 'CLOSED') throw new ValidationError('FISCAL_YEAR_CLOSED');
+    const result = await this.prisma.$transaction(async (tx: Tx) => {
+      const unassigned = await tx.openingBalanceEntry.findMany({
+        where: { companyId, status: 'STAGED', fiscalYearId: null },
+        select: { id: true },
+      });
+      if (unassigned.length === 0) return 0;
+      const updated = await tx.openingBalanceEntry.updateMany({
+        where: { id: { in: unassigned.map((r) => r.id) } },
+        data: { fiscalYearId },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'opening_balance',
+        entityId: unassigned[0].id,
+        action: 'ASSIGN',
+        companyId,
+        actor,
+        oldValues: { unassignedRows: unassigned.length, fiscalYearId: null },
+        newValues: { rows: updated.count, fiscalYearId },
+      });
+      return updated.count;
+    });
+    return result;
   }
 
   /** Ledger-side validation helper used by tests/reports: staged balance check. */

@@ -114,6 +114,8 @@ export class SmsService implements OnApplicationBootstrap {
   }
 
   private static readonly RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
+  /** Hard safety bound per sweep (rows examined) — defense in depth. */
+  private static readonly RECONCILE_MAX_ROWS = 20_000;
 
   async reconcileStuckQueued(): Promise<{
     requeued: number;
@@ -123,23 +125,39 @@ export class SmsService implements OnApplicationBootstrap {
     let requeued = 0;
     let detached = 0;
     let markedFailed = 0;
+    let swept = 0;
+    // R-1/R-2 (review of 96f9af0): BOTH passes page with a STABLE id cursor
+    // and always advance — a persistently failing enqueue or a page of
+    // in-progress jobs can never re-read the same page, so the sweep is
+    // bounded and rows beyond page 1 are always reached. Rows whose enqueue
+    // fails are SKIPPED for this sweep and retried by the NEXT sweep.
+    const bounded = (): boolean => {
+      if (swept <= SmsService.RECONCILE_MAX_ROWS) return false;
+      this.logger.error(`sms reconcile hit the per-sweep row bound (${SmsService.RECONCILE_MAX_ROWS}) — continuing next sweep`);
+      return true;
+    };
 
     // Pass A — rows that never got a job (crash window between row insert
     // and queue.commit): re-enqueue with the SAME stable key, honoring the
-    // persisted scheduledFor (P1-5). Paged over 200s until exhausted.
+    // persisted scheduledFor (P1-5).
+    let cursorA = '';
     for (;;) {
       const orphans = await this.prisma.smsMessage.findMany({
-        where: { status: SmsMessageStatus.QUEUED, queuedJobId: null },
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: null, ...(cursorA ? { id: { gt: cursorA } } : {}) },
+        orderBy: { id: 'asc' },
         select: { id: true, companyId: true, scheduledFor: true },
         take: 200,
       });
       if (orphans.length === 0) break;
+      cursorA = orphans[orphans.length - 1].id;
       for (const message of orphans) {
+        swept += 1;
+        if (bounded()) return { requeued, detached, markedFailed };
         try {
           await this.reenqueue(message.id, message.companyId, message.scheduledFor);
           requeued += 1;
         } catch {
-          // Stays reconcilable — the next sweep retries.
+          // Stays reconcilable — retried by the NEXT sweep, never re-read here.
         }
       }
     }
@@ -149,22 +167,26 @@ export class SmsService implements OnApplicationBootstrap {
     // mark FAILED with a reconcile note, NEVER auto-resent (the true outcome
     // is unknowable; a blind resend could double-text a real customer —
     // manual resend is the operator's decision). Missing job → detach and
-    // re-enqueue. Paged over 200s until exhausted.
+    // re-enqueue. PENDING/SCHEDULED/PROCESSING/RETRYING → queue owns them.
+    let cursorB = '';
     for (;;) {
       const linked = await this.prisma.smsMessage.findMany({
-        where: { status: SmsMessageStatus.QUEUED, queuedJobId: { not: null } },
+        where: { status: SmsMessageStatus.QUEUED, queuedJobId: { not: null }, ...(cursorB ? { id: { gt: cursorB } } : {}) },
+        orderBy: { id: 'asc' },
         select: { id: true, companyId: true, scheduledFor: true, queuedJobId: true },
         take: 200,
       });
       if (linked.length === 0) break;
+      cursorB = linked[linked.length - 1].id;
       const jobIds = [...new Set(linked.map((m) => m.queuedJobId!))];
       const jobs = await this.prisma.queueJob.findMany({
         where: { id: { in: jobIds } },
         select: { id: true, status: true },
       });
       const byId = new Map(jobs.map((j) => [j.id, j.status]));
-      let handledInPage = 0;
       for (const message of linked) {
+        swept += 1;
+        if (bounded()) return { requeued, detached, markedFailed };
         const status = byId.get(message.queuedJobId!);
         try {
           if (status === undefined) {
@@ -176,7 +198,6 @@ export class SmsService implements OnApplicationBootstrap {
             detached += 1;
             await this.reenqueue(message.id, message.companyId, message.scheduledFor);
             requeued += 1;
-            handledInPage += 1;
           } else if (status === 'FAILED' || status === 'SUCCEEDED') {
             // (c) terminal without write-back → observable FAILED.
             await this.prisma.smsMessage.update({
@@ -187,15 +208,11 @@ export class SmsService implements OnApplicationBootstrap {
               },
             });
             markedFailed += 1;
-            handledInPage += 1;
           }
-          // PENDING/SCHEDULED/PROCESSING → the queue still owns it; skip.
         } catch {
-          // Stays reconcilable — the next sweep retries.
+          // Stays reconcilable — retried by the NEXT sweep.
         }
       }
-      // Guard against an infinite loop when a page cannot be progressed.
-      if (handledInPage === 0) break;
     }
     return { requeued, detached, markedFailed };
   }

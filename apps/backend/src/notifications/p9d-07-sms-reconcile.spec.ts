@@ -168,6 +168,100 @@ describeIntegration('p9d-07 sms stuck-QUEUED reconciliation', () => {
     expect(marked.error).toContain('reconcile');
   });
 
+  it('R-1 (review 96f9af0): Pass A TERMINATES with a persistently failing queue (no infinite loop)', async () => {
+    const breakingQueue = {
+      enqueue: async () => {
+        throw new Error('persistant queue outage');
+      },
+    };
+    const broken = new SmsService(prisma as never, breakingQueue as unknown as QueueService, {
+      record: async () => undefined,
+    } as never);
+    const stuck = await makeStuckRow();
+
+    // The sweep must RETURN (bounded, observable) — never spin forever.
+    const result = await Promise.race([
+      broken.reconcileStuckQueued(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('sweep did not terminate within 5s — infinite loop')), 5000),
+      ),
+    ]);
+    expect(result).toEqual({ requeued: 0, detached: 0, markedFailed: 0 });
+    // The row stays QUEUED/queuedJobId=null — the NEXT sweep retries it.
+    const after = await prisma.smsMessage.findUniqueOrThrow({ where: { id: stuck.id } });
+    expect(after.status).toBe('QUEUED');
+    expect(after.queuedJobId).toBeNull();
+  });
+
+  it('R-2 (review 96f9af0): Pass B examines ALL pages — 520 linked rows, 500 in-progress + 20 terminal', async () => {
+    // Deterministic ids (hex-sorted): the 500 PENDING-linked rows come FIRST
+    // so any take-200 sweep that does not advance its cursor stops after the
+    // first page and never reaches the 20 FAILED-linked rows on page 3.
+    const stamp = Date.now();
+    const mkId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    // Fixture-only id space (mkId 1..2000 covers sms rows 1..520 + job rows
+    // 1001..1520 across runs) — clear leftovers from an interrupted run first.
+    const fixtureIds = Array.from({ length: 2000 }, (_, i) => mkId(i + 1));
+    await prisma.smsMessage.deleteMany({ where: { id: { in: fixtureIds } } });
+    await prisma.queueJob.deleteMany({ where: { id: { in: fixtureIds } } });
+    const smsRows = Array.from({ length: 520 }, (_, i) => ({
+      id: mkId(i + 1),
+      companyId: INTEGRATION_COMPANY_ID,
+      to: '09120000003',
+      text: `R-2 sweep ${stamp} #${i + 1}`,
+      status: 'QUEUED' as const,
+      source: 'NOTIFICATION_RULE' as const,
+      idempotencyKey: `r2-${stamp}-${i + 1}`,
+      queuedJobId: mkId(1000 + i + 1),
+    }));
+    const jobRows = smsRows.map((s, i) => ({
+      id: s.queuedJobId!,
+      companyId: INTEGRATION_COMPANY_ID,
+      jobType: 'sms.send',
+      payload: { smsMessageId: s.id },
+      status: i >= 500 ? ('FAILED' as const) : ('PENDING' as const),
+      maxAttempts: 3,
+      idempotencyKey: `sms-job:${s.id}`,
+    }));
+    await prisma.queueJob.createMany({ data: jobRows });
+    await prisma.smsMessage.createMany({ data: smsRows });
+    messageIds.push(...smsRows.map((s) => s.id));
+
+    const result = await sms.reconcileStuckQueued();
+    // ALL 20 terminal rows must be examined regardless of page boundaries.
+    expect(result.markedFailed).toBe(20);
+    // In-progress rows belong to the queue — untouched.
+    const stillQueued = await prisma.smsMessage.count({
+      where: { id: { in: smsRows.slice(0, 500).map((s) => s.id) }, status: 'QUEUED' },
+    });
+    expect(stillQueued).toBe(500);
+  }, 120_000);
+
+  it('R-3 (review 96f9af0): two replicas racing the sweep produce exactly ONE job per row', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const row = await makeStuckRow();
+      ids.push(row.id);
+    }
+    // Two independent service instances (replicas) sweep concurrently.
+    const replicaA = new SmsService(prisma as never, makeQueueService(prisma) as never, {
+      record: async () => undefined,
+    } as never);
+    const replicaB = new SmsService(prisma as never, makeQueueService(prisma) as never, {
+      record: async () => undefined,
+    } as never);
+    await Promise.all([replicaA.reconcileStuckQueued(), replicaB.reconcileStuckQueued()]);
+
+    for (const id of ids) {
+      const jobs = await prisma.queueJob.findMany({
+        where: { companyId: INTEGRATION_COMPANY_ID, idempotencyKey: `sms-job:${id}` },
+      });
+      expect(jobs).toHaveLength(1); // unique stable key — no duplicate job
+      const row = await prisma.smsMessage.findUniqueOrThrow({ where: { id } });
+      expect(row.queuedJobId).toBe(jobs[0].id);
+    }
+  });
+
   afterAll(async () => {
     await prisma.queueJob.deleteMany({
       where: { companyId: INTEGRATION_COMPANY_ID, OR: messageIds.map((id) => ({ idempotencyKey: `sms-job:${id}` })) },

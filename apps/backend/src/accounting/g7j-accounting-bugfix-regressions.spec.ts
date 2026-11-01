@@ -392,12 +392,14 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
       where: { journalEntryId: e2.id, account: { code: 'BANK' } },
     });
     const bankDebit = lines.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0));
-    // Exactly the FY-bound row — the unassigned leftover stays ungenerated.
+    // Exactly the FY-bound row — the leftover stays ungenerated.
     expect(bankDebit.toNumber()).toBe(2000);
-    const unassignedLeftovers = await prismaService.openingBalanceEntry.count({
-      where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: null },
+    // R-4 invariant: the leftover is AUTO-BOUND (never a null trap) and
+    // still STAGED — untouched by the other year's generation.
+    const leftover = await prismaService.openingBalanceEntry.findFirstOrThrow({
+      where: { companyId: COMPANY, status: 'STAGED', debit: new Prisma.Decimal(1) },
     });
-    expect(unassignedLeftovers).toBe(1);
+    expect(leftover.fiscalYearId).toBeTruthy();
   });
 
   itif('g7j-11 (P1-3 review) journal.post rejects cross-company partyId and analytics', async () => {
@@ -428,5 +430,126 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     void count;
     await prismaService.party.delete({ where: { id: foreignParty.id } }).catch(() => undefined);
     await prismaService.company.delete({ where: { id: other.id } }).catch(() => undefined);
+  });
+
+  it('g7j-12 (R-3 review): explicit fiscalYearId rejects an out-of-year entryDate', async () => {
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1408', nameFa: 'سال ۱۴۰۸',
+        startDate: new Date('2028-03-21'), endDate: new Date('2029-03-20'),
+        periods: { create: [{ code: '1408-ALL', nameFa: 'کل سال', startDate: new Date('2028-03-21'), endDate: new Date('2029-03-20') }] },
+      },
+    });
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 300 }], ACTOR, fy.id);
+    // entryDate OUTSIDE the explicit FY → rejected (was silently accepted).
+    await expect(
+      opening.generate(COMPANY, ACTOR, new Date('2026-11-15'), fy.id),
+    ).rejects.toThrow('OPENING_DATE_OUTSIDE_FISCAL_YEAR');
+  });
+
+  it('g7j-13 (R-3 review): generate rejects a CLOSED fiscal year', async () => {
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1409', nameFa: 'سال ۱۴۰۹',
+        startDate: new Date('2029-03-21'), endDate: new Date('2030-03-20'),
+        periods: { create: [{ code: '1409-ALL', nameFa: 'کل سال', startDate: new Date('2029-03-21'), endDate: new Date('2030-03-20') }] },
+      },
+    });
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 400 }], ACTOR, fy.id);
+    // Close AFTER staging (staging into a closed year is already rejected).
+    await prismaService.fiscalYear.update({ where: { id: fy.id }, data: { status: 'CLOSED' } });
+    await expect(opening.generate(COMPANY, ACTOR, new Date('2029-04-01'))).rejects.toThrow('FISCAL_YEAR_CLOSED');
+  });
+
+  it('g7j-14 (R-3 review): two concurrent generates of one FY — exactly one wins', async () => {
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1410', nameFa: 'سال ۱۴۱۰',
+        startDate: new Date('2030-03-21'), endDate: new Date('2031-03-20'),
+        periods: { create: [{ code: '1410-ALL', nameFa: 'کل سال', startDate: new Date('2030-03-21'), endDate: new Date('2031-03-20') }] },
+      },
+    });
+    await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 900 }], ACTOR, fy.id);
+    const results = await Promise.allSettled([
+      opening.generate(COMPANY, ACTOR, new Date('2030-04-01')),
+      opening.generate(COMPANY, ACTOR, new Date('2030-04-01')),
+    ]);
+    const succeeded = results.filter((r) => r.status === 'fulfilled');
+    const conflicted = results.filter(
+      (r) => r.status === 'rejected' && String((r as PromiseRejectedResult).reason?.message ?? '').includes('OPENING_ALREADY_GENERATED'),
+    );
+    expect(succeeded).toHaveLength(1);
+    expect(conflicted).toHaveLength(1);
+  });
+
+  it('g7j-15 (R-4 review): stage WITHOUT fiscalYearId auto-binds to the current FY and generates', async () => {
+    // Isolated company so the FY-containing-today anchor is unambiguous.
+    const c2 = await prismaService.company.create({ data: { nameFa: `g7j-c15-${Date.now()}`, status: 'ACTIVE' } });
+    const C2 = c2.id;
+    try {
+      for (const a of [
+        { code: 'BANK', name: 'بانک', type: 'ASSET' as const },
+        { code: 'OPENING_EQUITY', name: 'سرمایه', type: 'EQUITY' as const },
+      ]) {
+        await prismaService.chartOfAccount.create({ data: { ...a, companyId: C2 } });
+      }
+      await prismaService.sequence.create({
+        data: { companyId: C2, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
+      });
+      await prismaService.fiscalYear.create({
+        data: {
+          companyId: C2, code: 'CURR', nameFa: 'سال جاری',
+          startDate: new Date('2026-01-01'), endDate: new Date('2027-01-31'),
+          periods: { create: [{ code: 'CURR-ALL', nameFa: 'کل سال', startDate: new Date('2026-01-01'), endDate: new Date('2027-01-31') }] },
+        },
+      });
+      // Legacy API call — no fiscalYearId.
+      await opening.stage(C2, [{ accountCode: 'BANK', debit: 1234 }], ACTOR);
+      const stagedRow = await prismaService.openingBalanceEntry.findFirstOrThrow({
+        where: { companyId: C2, status: 'STAGED' },
+      });
+      expect(stagedRow.fiscalYearId).toBeTruthy(); // auto-bound, NOT null
+      const entry = await opening.generate(C2, ACTOR, new Date('2026-11-15'));
+      const bank = await prisma.journalLine.findMany({
+        where: { journalEntryId: entry.id, account: { code: 'BANK' } },
+      });
+      expect(bank.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0)).toNumber()).toBe(1234);
+    } finally {
+      const lineIds = (await prismaService.journalLine.findMany({ where: { companyId: C2 }, select: { id: true } })).map((l) => l.id);
+      await prismaService.journalLineAnalytic.deleteMany({ where: { journalLineId: { in: lineIds } } });
+      await prismaService.journalLine.deleteMany({ where: { companyId: C2 } });
+      await prismaService.journalEntry.deleteMany({ where: { companyId: C2 } });
+      await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: C2 } });
+      await prismaService.fiscalYear.deleteMany({ where: { companyId: C2 } });
+      await prismaService.chartOfAccount.deleteMany({ where: { companyId: C2 } });
+      await prismaService.sequence.deleteMany({ where: { companyId: C2 } });
+      await prismaService.company.delete({ where: { id: C2 } }).catch(() => undefined);
+    }
+  });
+
+  it('g7j-16 (R-4 review): legacy NULL-staged rows are safely assigned — never deleted', async () => {
+    // Simulate 80502ae-era data: an unassigned STAGED row.
+    const legacy = await prismaService.openingBalanceEntry.create({
+      data: {
+        companyId: COMPANY, accountCode: 'BANK', debit: new Prisma.Decimal(555),
+        status: 'STAGED', createdBy: ACTOR.id,
+      },
+    });
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1411', nameFa: 'سال ۱۴۱۱',
+        startDate: new Date('2031-03-21'), endDate: new Date('2032-03-20'),
+        periods: { create: [{ code: '1411-ALL', nameFa: 'کل سال', startDate: new Date('2031-03-21'), endDate: new Date('2032-03-20') }] },
+      },
+    });
+    const assigned = await opening.assignTo(COMPANY, fy.id, ACTOR);
+    expect(assigned).toBeGreaterThanOrEqual(1);
+    const row = await prismaService.openingBalanceEntry.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect(row.fiscalYearId).toBe(fy.id); // preserved, not deleted
+    const entry = await opening.generate(COMPANY, ACTOR, new Date('2031-04-01'));
+    const bank = await prisma.journalLine.findMany({
+      where: { journalEntryId: entry.id, account: { code: 'BANK' } },
+    });
+    expect(bank.reduce((s, l) => s.plus(l.debit), new Prisma.Decimal(0)).toNumber()).toBe(555);
   });
 });
