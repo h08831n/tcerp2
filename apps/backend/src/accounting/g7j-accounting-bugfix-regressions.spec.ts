@@ -119,27 +119,27 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
   itif('g7j-01 (BUG-02) party-filtered GL: opening, closing and page-2 running all share the filter', async () => {
     const a = await makeParty(`g7j-A-${Date.now()}`);
     const b = await makeParty(`g7j-B-${Date.now()}`);
-    // January: A debit 300, B debit 100 — February: A debit 50, credit 20.
-    await postBalanced(new Date('2026-01-10'), [
+    // «January» (early 1405): A debit 300, B debit 100 — «February»: A debit 50, credit 20.
+    await postBalanced(new Date('2026-04-10'), [
       { accountCode: 'RECEIVABLE', debit: 300, credit: 0, partyId: a.id },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 300 },
     ]);
-    await postBalanced(new Date('2026-01-20'), [
+    await postBalanced(new Date('2026-04-20'), [
       { accountCode: 'RECEIVABLE', debit: 100, credit: 0, partyId: b.id },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 100 },
     ]);
-    await postBalanced(new Date('2026-02-05'), [
+    await postBalanced(new Date('2026-05-05'), [
       { accountCode: 'RECEIVABLE', debit: 50, credit: 0, partyId: a.id },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 50 },
     ]);
-    await postBalanced(new Date('2026-02-06'), [
+    await postBalanced(new Date('2026-05-06'), [
       { accountCode: 'RECEIVABLE', debit: 0, credit: 20, partyId: a.id },
       { accountCode: 'BANK', debit: 20, credit: 0 },
     ]);
 
     const gl = await reports.generalLedger(COMPANY, {
       accountCode: 'RECEIVABLE',
-      from: new Date('2026-02-01'),
+      from: new Date('2026-05-01'),
       partyId: a.id,
     });
     // Opening = A's January balance ONLY (B's 100 must not leak in).
@@ -147,10 +147,10 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     // Closing = opening + A's February movement (50 - 20).
     expect(gl.totals.closingBalance.toNumber()).toBe(330);
     // Page-2 continuity: the cursor seed equals the same filter's aggregate.
-    const page1 = await reports.generalLedger(COMPANY, { accountCode: 'RECEIVABLE', from: new Date('2026-02-01'), partyId: a.id, limit: 1 });
+    const page1 = await reports.generalLedger(COMPANY, { accountCode: 'RECEIVABLE', from: new Date('2026-05-01'), partyId: a.id, limit: 1 });
     expect(page1.nextCursor).toBeTruthy();
     const page2 = await reports.generalLedger(COMPANY, {
-      accountCode: 'RECEIVABLE', from: new Date('2026-02-01'), partyId: a.id, limit: 10, cursor: page1.nextCursor,
+      accountCode: 'RECEIVABLE', from: new Date('2026-05-01'), partyId: a.id, limit: 10, cursor: page1.nextCursor,
     });
     const lastRow = page2.rows[page2.rows.length - 1];
     expect(lastRow.runningBalance.toString()).toBe(page2.totals.closingBalance.toString());
@@ -229,21 +229,21 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
 
   itif('g7j-05 (BUG-06) partyLedger closing = opening + period movement', async () => {
     const p = await makeParty(`g7j-L-${Date.now()}`);
-    await postBalanced(new Date('2026-01-05'), [
+    await postBalanced(new Date('2026-04-05'), [
       { accountCode: 'RECEIVABLE', debit: 500, credit: 0, partyId: p.id },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 500 },
     ]);
-    await postBalanced(new Date('2026-02-10'), [
+    await postBalanced(new Date('2026-05-10'), [
       { accountCode: 'RECEIVABLE', debit: 200, credit: 0, partyId: p.id },
       { accountCode: 'SALES_REVENUE', debit: 0, credit: 200 },
     ]);
-    await postBalanced(new Date('2026-02-11'), [
+    await postBalanced(new Date('2026-05-11'), [
       { accountCode: 'RECEIVABLE', debit: 0, credit: 100, partyId: p.id },
       { accountCode: 'BANK', debit: 100, credit: 0 },
     ]);
     const full = await subsidiary.partyLedger(COMPANY, p.id, { accountCode: 'RECEIVABLE' });
     const windowed = await subsidiary.partyLedger(COMPANY, p.id, {
-      accountCode: 'RECEIVABLE', from: new Date('2026-02-01'), to: new Date('2026-02-28'),
+      accountCode: 'RECEIVABLE', from: new Date('2026-05-01'), to: new Date('2026-05-31'),
     });
     expect(full.closingBalance.toNumber()).toBe(600);
     expect(windowed.openingBalance.toNumber()).toBe(500);
@@ -867,6 +867,120 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     });
     const newValues = audits[0]?.newValues as { rowIds?: string[] };
     expect(newValues.rowIds).toEqual([row1.id]);
+  });
+
+  itif('g7j-26 (R5-P0 review): a STAGED row committed while generate waits on the lock is NOT left behind', async () => {
+    // Interleaving with TWO connections:
+    //   1. generate reads the STAGED snapshot (sees only row A);
+    //   2. row B commits TOGETHER WITH the advisory lock release (connB);
+    //   3. generate acquires the lock and continues.
+    // The final entry MUST carry BOTH rows and NO row may remain STAGED in
+    // a year that already has its OPENING document.
+    const { PrismaService: S } = await import('../prisma/prisma.service');
+    const connB = new S();
+    await connB.$connect();
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1420', nameFa: 'سال ۱۴۲۰',
+        startDate: new Date('2041-03-21'), endDate: new Date('2042-03-20'),
+        periods: { create: [{ code: '1420-ALL', nameFa: 'کل سال', startDate: new Date('2041-03-21'), endDate: new Date('2042-03-20') }] },
+      },
+    });
+    try {
+      await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 1000 }], ACTOR, fy.id); // row A
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      // connB: hold the lock and commit row B atomically with its release —
+      // exactly the window between generate's snapshot read and its lock.
+      const hold = connB.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${COMPANY}))`;
+        await tx.openingBalanceEntry.create({
+          data: { companyId: COMPANY, fiscalYearId: fy.id, accountCode: 'BANK', debit: new Prisma.Decimal(250), status: 'STAGED', createdBy: ACTOR.id },
+        });
+        await sleep(700); // generate reads its STALE snapshot while we hold
+      });
+      await sleep(200); // generate launched and parked on the lock
+      const genPromise = opening.generate(COMPANY, ACTOR, new Date('2041-04-01'));
+      await sleep(300); // generate is now blocked (snapshot already taken)
+      await hold; // commit row B + release the lock
+      await genPromise;
+
+      // The posted entry must carry BOTH rows (1000 + 250).
+      const entry = await prismaService.journalEntry.findFirstOrThrow({
+        where: { companyId: COMPANY, documentType: 'OPENING', status: 'POSTED', entryDate: { gte: fy.startDate, lt: new Date(fy.endDate.getTime() + 86_400_000) } },
+      });
+      const bank = await prismaService.journalLine.findMany({
+        where: { journalEntryId: entry.id, account: { code: 'BANK' } },
+      });
+      expect(bank.reduce((sum, l) => sum.plus(l.debit), new Prisma.Decimal(0)).toNumber()).toBe(1250);
+      // NO un-generatable row may remain in the generated year.
+      const leftover = await prismaService.openingBalanceEntry.count({
+        where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: fy.id },
+      });
+      expect(leftover).toBe(0);
+    } finally {
+      const lineIds = (await prismaService.journalLine.findMany({ where: { companyId: COMPANY }, select: { id: true } })).map((l) => l.id);
+      await prismaService.journalLineAnalytic.deleteMany({ where: { journalLineId: { in: lineIds } } });
+      await prismaService.journalLine.deleteMany({ where: { companyId: COMPANY } });
+      await prismaService.journalEntry.deleteMany({ where: { companyId: COMPANY, documentType: 'OPENING' } });
+      await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: COMPANY, fiscalYearId: fy.id } });
+      await prismaService.fiscalYear.deleteMany({ where: { id: fy.id } });
+      await connB.$disconnect();
+    }
+  }, 30_000);
+
+  itif('g7j-27 (R5-P1 review): posting OUTSIDE every fiscal year of a calendar company is rejected', async () => {
+    // The hermetic company HAS a fiscal calendar (1405..1420) — a document
+    // dated outside ALL year windows must not post unguarded.
+    await expect(
+      prismaService.$transaction((tx) =>
+        journal.post(tx, {
+          companyId: COMPANY,
+          entryDate: new Date('2045-06-01'), // outside every FY window
+          journalCode: 'OPERATIONAL',
+          documentType: 'G7J_TEST',
+          lines: [
+            { accountCode: 'BANK', debit: 1, credit: 0 },
+            { accountCode: 'SALES_REVENUE', debit: 0, credit: 1 },
+          ] as never,
+          createdBy: ACTOR.id,
+        }),
+      ),
+    ).rejects.toThrow('FISCAL_YEAR_NOT_FOUND_FOR_DATE');
+  });
+
+  itif('g7j-28 (R5-P1 review): a company with NO fiscal calendar still posts (documented legacy policy)', async () => {
+    const c2 = await prismaService.company.create({ data: { nameFa: `g7j-c28-${Date.now()}`, status: 'ACTIVE' } });
+    const C2 = c2.id;
+    try {
+      for (const a of [
+        { code: 'BANK', name: 'بانک', type: 'ASSET' as const },
+        { code: 'SALES_REVENUE', name: 'درآمد', type: 'REVENUE' as const },
+      ]) {
+        await prismaService.chartOfAccount.create({ data: { ...a, companyId: C2 } });
+      }
+      await prismaService.sequence.create({
+        data: { companyId: C2, documentType: 'JOURNAL_ENTRY', name: 'سند', prefix: 'JE', padding: 5, resetCycle: 'NEVER' },
+      });
+      const posted = await prismaService.$transaction((tx) =>
+        journal.post(tx, {
+          companyId: C2,
+          entryDate: new Date(),
+          journalCode: 'OPERATIONAL',
+          documentType: 'G7J_TEST',
+          lines: [
+            { accountCode: 'BANK', debit: 9, credit: 0 },
+            { accountCode: 'SALES_REVENUE', debit: 0, credit: 9 },
+          ] as never,
+          createdBy: ACTOR.id,
+        }),
+      );
+      expect(posted.status).toBe('POSTED');
+    } finally {
+      await prismaService.journalEntry.deleteMany({ where: { companyId: C2 } });
+      await prismaService.sequence.deleteMany({ where: { companyId: C2 } });
+      await prismaService.chartOfAccount.deleteMany({ where: { companyId: C2 } });
+      await prismaService.company.delete({ where: { id: C2 } }).catch(() => undefined);
+    }
   });
 
   it('g7j-16 (R-4 review): legacy NULL-staged rows are safely assigned — never deleted', async () => {

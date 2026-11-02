@@ -221,6 +221,12 @@ export class JournalService {
     // R3-5: fiscal years/periods are CALENDAR dates (db DATE = midnight) —
     // the comparison uses the entry's calendar DAY, so a timestamp at
     // 12:00 on the LAST day of a year/period still belongs to it.
+    // R5-P1 TIMEZONE POLICY (documented): the calendar day is derived from
+    // the entry timestamp's UTC components. An entry at 2026-03-20T20:30Z
+    // (= 2026-03-21 00:00 in Asia/Tehran, +03:30) is attributed to March 20
+    // by this policy. Switching the anchor to Asia/Tehran would shift every
+    // fiscal boundary and requires an explicit owner decision — recorded as
+    // an open item in the merge-readiness report, NOT silently changed.
     const calendarDay = new Date(
       Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
     );
@@ -233,7 +239,20 @@ export class JournalService {
         endDate: { gte: calendarDay },
       },
     })) ?? null;
-    if (!year) return; // no fiscal calendar → unguarded (documented)
+    if (!year) {
+      // R5-P1 policy: a company with NO fiscal calendar at all posts
+      // unguarded (legacy, documented). A company WITH a calendar must NOT
+      // post a document dated outside every year window silently — that is
+      // an explicit configuration/request error.
+      const calendarExists =
+        (await tx.fiscalYear?.count?.({ where: { companyId } })) ?? 0;
+      if (calendarExists > 0) {
+        throw new ValidationError('FISCAL_YEAR_NOT_FOUND_FOR_DATE', {
+          date: date.toISOString(),
+        });
+      }
+      return; // truly no calendar → legacy unguarded (documented)
+    }
     if (year.status === 'CLOSED') {
       throw new ValidationError('FISCAL_YEAR_CLOSED', { fiscalYearCode: year.code });
     }

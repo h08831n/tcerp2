@@ -249,11 +249,6 @@ export class OpeningBalanceService {
         );
       }
     }
-    const staged = await this.prisma.openingBalanceEntry.findMany({
-      where: { companyId, status: 'STAGED', fiscalYearId: fiscalYear?.id ?? null },
-    });
-    if (staged.length === 0) throw new ValidationError('NO_STAGED_OPENING_ROWS');
-
     const result = await this.prisma.$transaction(async (tx: Tx) => {
       // Concurrency control: serialize generate() per company so two racing
       // requests cannot both pass the pre-check and post twin OPENING entries.
@@ -273,6 +268,15 @@ export class OpeningBalanceService {
           { entryNumber: raced.entryNumber },
         );
       }
+      // R5-P0: the STAGED set is read HERE — after the lock and the
+      // uniqueness re-check — so a row committed by a concurrent stage while
+      // generate was waiting is INCLUDED. Every computation, the posting,
+      // the status flip and the audit are driven by THIS authoritative set;
+      // no row can be left un-generatable behind the entry.
+      const staged = await tx.openingBalanceEntry.findMany({
+        where: { companyId, status: 'STAGED', fiscalYearId: fiscalYear?.id ?? null },
+      });
+      if (staged.length === 0) throw new ValidationError('NO_STAGED_OPENING_ROWS');
       // Build ALL lines FIRST: staged rows + OPENING_EQUITY residual, then post
       // ONE balanced entry (integrity gate #11 — no post-then-patch).
       const lines: Array<{
