@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import {
   NotificationRule,
   Prisma,
@@ -71,7 +71,10 @@ export class SmsService implements OnApplicationBootstrap {
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
     private readonly auditService: AuditService,
-    options?: { passRowLimit?: number },
+    // R4-1: a plain-object ctor param emits design:paramtypes=Object which
+    // Nest cannot resolve (UnknownDependenciesException at bootstrap).
+    // @Optional() skips resolution; tests pass it explicitly.
+    @Optional() options?: { passRowLimit?: number },
   ) {
     // R3-3: per-PASS row bound — Pass B always gets its budget even when
     // Pass A exhausts its own (the single shared bound could starve it).
@@ -330,9 +333,18 @@ export class SmsService implements OnApplicationBootstrap {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         // Duplicate request — the existing row IS the authority (no second
         // queue job; a racing enqueue reconciles to the same message).
-        const existing = await this.prisma.smsMessage.findUniqueOrThrow({
-          where: { idempotencyKey: input.idempotencyKey },
+        // R4-9: the unique is COMPANY-SCOPED — the refetch is composite, so
+        // another company's row can never be returned (no cross-company
+        // leak of record, text, recipient or status).
+        const existing = await this.prisma.smsMessage.findUnique({
+          where: {
+            companyId_idempotencyKey: {
+              companyId,
+              idempotencyKey: input.idempotencyKey,
+            },
+          },
         });
+        if (!existing) throw error; // defensive: composite scope mismatch
         return { message: existing, created: false };
       }
       throw error;

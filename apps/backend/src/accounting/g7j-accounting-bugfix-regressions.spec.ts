@@ -549,9 +549,18 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     await expect(
       opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 42 }], ACTOR, fy1405.id),
     ).rejects.toThrow('OPENING_FISCAL_YEAR_ALREADY_GENERATED');
+    // A REAL assignment attempt (staged row + explicit selection) into the
+    // generated year must hit the same guard.
+    const row = await prismaService.openingBalanceEntry.create({
+      data: { companyId: COMPANY, accountCode: 'BANK', debit: new Prisma.Decimal(42), status: 'STAGED', createdBy: ACTOR.id },
+    });
+    await expect(
+      opening.assignTo(COMPANY, fy1405.id, ACTOR, { rowIds: [row.id] }),
+    ).rejects.toThrow('OPENING_FISCAL_YEAR_ALREADY_GENERATED');
     await expect(opening.assignTo(COMPANY, fy1405.id, ACTOR, { rowIds: [] })).rejects.toThrow(
-      'OPENING_FISCAL_YEAR_ALREADY_GENERATED',
+      'OPENING_ROW_SELECTION_REQUIRED',
     );
+    await prismaService.openingBalanceEntry.delete({ where: { id: row.id } });
     // Nothing was written.
     const count = await prismaService.openingBalanceEntry.count({
       where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: fy1405.id },
@@ -613,6 +622,215 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
       }),
     );
     expect(posted.status).toBe('POSTED');
+  });
+
+  itif('g7j-21 (R4-4/5/6 review): two CONCURRENT generates at last-day-noon → exactly ONE POSTED entry', async () => {
+    // Two INDEPENDENT Prisma connections — the real race, not a shared client.
+    const { PrismaService: S } = await import('../prisma/prisma.service');
+    const connB = new S();
+    await connB.$connect();
+    try {
+      const fy = await prismaService.fiscalYear.create({
+        data: {
+          companyId: COMPANY, code: '1416', nameFa: 'سال ۱۴۱۶',
+          startDate: new Date('2037-03-21'), endDate: new Date('2038-03-20'),
+          periods: { create: [{ code: '1416-ALL', nameFa: 'کل سال', startDate: new Date('2037-03-21'), endDate: new Date('2038-03-20') }] },
+        },
+      });
+      const openingB = new OpeningBalanceService(
+        connB as never,
+        new JournalService(connB as never, new SequencesService(connB as never, new AuditService(connB as never))),
+        new SequencesService(connB as never, new AuditService(connB as never)),
+        new AuditService(connB as never),
+      );
+      await opening.stage(COMPANY, [{ accountCode: 'BANK', debit: 700 }], ACTOR, fy.id);
+      const noon = new Date('2038-03-20T12:00:00Z'); // LAST calendar day, midday
+      const results = await Promise.allSettled([
+        opening.generate(COMPANY, ACTOR, noon),
+        openingB.generate(COMPANY, ACTOR, noon),
+      ]);
+      const succeeded = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      // Exactly ONE POSTED OPENING entry may exist for the fiscal year.
+      const posted = await prismaService.journalEntry.count({
+        where: { companyId: COMPANY, documentType: 'OPENING', status: 'POSTED', entryDate: { gte: new Date('2037-03-21'), lt: new Date('2038-03-21') } },
+      });
+      expect(posted).toBe(1);
+      expect(succeeded).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(String((rejected[0] as PromiseRejectedResult).reason)).toContain('OPENING_ALREADY_GENERATED');
+    } finally {
+      await connB.$disconnect();
+    }
+  });
+
+  itif('g7j-22 (R4-10 review): stage auto-bind recognizes TODAY at noon on an FY last day', async () => {
+    // Isolated company whose fiscal year ENDS TODAY — the auto-bind anchor
+    // must use the calendar DAY, not midnight-vs-timestamp comparison.
+    const c2 = await prismaService.company.create({ data: { nameFa: `g7j-c22-${Date.now()}`, status: 'ACTIVE' } });
+    const C2 = c2.id;
+    try {
+      await prismaService.chartOfAccount.create({ data: { code: 'BANK', name: 'بانک', type: 'ASSET', companyId: C2 } });
+      const now = new Date();
+      const fyStart = new Date(now.getTime() - 300 * 86_400_000);
+      const fyEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); // TODAY (midnight DATE)
+      await prismaService.fiscalYear.create({
+        data: {
+          companyId: C2, code: 'LASTDAY', nameFa: 'سال تمام‌شده امروز', startDate: fyStart, endDate: fyEnd,
+          periods: { create: [{ code: 'LASTDAY-ALL', nameFa: 'کل سال', startDate: fyStart, endDate: fyEnd }] },
+        },
+      });
+      // Runs at some hour of TODAY — noon-like timestamps must still match.
+      await opening.stage(C2, [{ accountCode: 'BANK', debit: 99 }], ACTOR);
+      const row = await prismaService.openingBalanceEntry.findFirstOrThrow({
+        where: { companyId: C2, status: 'STAGED' },
+      });
+      expect(row.fiscalYearId).toBeTruthy(); // bound, not OPENING_FISCAL_YEAR_REQUIRED
+    } finally {
+      await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: C2 } });
+      await prismaService.fiscalYear.deleteMany({ where: { companyId: C2 } });
+      await prismaService.chartOfAccount.deleteMany({ where: { companyId: C2 } });
+      await prismaService.company.delete({ where: { id: C2 } }).catch(() => undefined);
+    }
+  });
+
+  itif('g7j-23 (R4-11 review): stage/assign cannot slip rows in once the OPENING doc exists', async () => {
+    // Deterministic interleaving with TWO connections: connection B runs
+    // generate's critical section (advisory lock + uncommitted OPENING doc,
+    // held open by an in-tx delay). Connection A's stage must BLOCK on the
+    // lock (insert nothing) and, once B commits, FAIL the re-check.
+    const { PrismaService: S } = await import('../prisma/prisma.service');
+    const connB = new S();
+    await connB.$connect();
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1417', nameFa: 'سال ۱۴۱۷',
+        startDate: new Date('2038-03-21'), endDate: new Date('2039-03-20'),
+        periods: { create: [{ code: '1417-ALL', nameFa: 'کل سال', startDate: new Date('2038-03-21'), endDate: new Date('2039-03-20') }] },
+      },
+    });
+    const entryNumber = `JE-R4-${Date.now()}`;
+    try {
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const txDone = connB.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${COMPANY}))`;
+        await tx.journalEntry.create({
+          data: {
+            companyId: COMPANY,
+            entryNumber,
+            entryDate: new Date('2038-04-01T12:00:00Z'),
+            journalCode: 'OPENING',
+            documentType: 'OPENING',
+            status: 'POSTED',
+            postedAt: new Date(),
+            lines: { create: [] },
+          },
+        });
+        await sleep(600); // hold the lock while A's stage reaches it
+      });
+      await sleep(250); // B's entry exists (uncommitted), lock held
+      // A stages CONCURRENTLY — it blocks on the lock, inserts nothing.
+      let inFlightError: unknown = null;
+      const inFlight = opening
+        .stage(COMPANY, [{ accountCode: 'BANK', debit: 5 }], ACTOR, fy.id)
+        .catch((e: unknown) => {
+          inFlightError = e;
+          return null;
+        });
+      await sleep(400); // A is now parked on the advisory lock
+      const slipped = await prismaService.openingBalanceEntry.count({
+        where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: fy.id },
+      });
+      expect(slipped).toBe(0); // nothing slipped in while blocked
+      await txDone; // commit → releases the lock
+      await inFlight; // A's blocked stage re-checks the COMMITTED doc
+      expect(String(inFlightError)).toContain('OPENING_FISCAL_YEAR_ALREADY_GENERATED');
+      // Assign is equally guarded after the doc exists.
+      const row = await prismaService.openingBalanceEntry.create({
+        data: { companyId: COMPANY, accountCode: 'BANK', debit: new Prisma.Decimal(7), status: 'STAGED', createdBy: ACTOR.id },
+      });
+      await expect(
+        opening.assignTo(COMPANY, fy.id, ACTOR, { rowIds: [row.id] }),
+      ).rejects.toThrow('OPENING_FISCAL_YEAR_ALREADY_GENERATED');
+      await prismaService.openingBalanceEntry.delete({ where: { id: row.id } });
+      const staged = await prismaService.openingBalanceEntry.count({
+        where: { companyId: COMPANY, status: 'STAGED', fiscalYearId: fy.id },
+      });
+      expect(staged).toBe(0);
+    } finally {
+      await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: COMPANY, fiscalYearId: fy.id } });
+      await prismaService.journalEntry.deleteMany({ where: { companyId: COMPANY, entryNumber } });
+      await prismaService.fiscalYear.deleteMany({ where: { id: fy.id } });
+      await connB.$disconnect();
+    }
+  }, 30_000);
+
+  itif('g7j-24 (R4-12 review): mutation assignment REQUIRES an explicit row selection', async () => {
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1418', nameFa: 'سال ۱۴۱۸',
+        startDate: new Date('2039-03-21'), endDate: new Date('2040-03-20'),
+        periods: { create: [{ code: '1418-ALL', nameFa: 'کل سال', startDate: new Date('2039-03-21'), endDate: new Date('2040-03-20') }] },
+      },
+    });
+    await prismaService.openingBalanceEntry.create({
+      data: { companyId: COMPANY, accountCode: 'BANK', debit: new Prisma.Decimal(3), status: 'STAGED', createdBy: ACTOR.id },
+    });
+    // No rowIds in MUTATION mode → rejected (blind bulk assignment forbidden).
+    await expect(opening.assignTo(COMPANY, fy.id, ACTOR)).rejects.toThrow('OPENING_ROW_SELECTION_REQUIRED');
+    // Preview without rowIds stays allowed (survey of unassigned rows).
+    const preview = (await opening.assignTo(COMPANY, fy.id, ACTOR, { preview: true })) as {
+      count: number;
+    };
+    expect(preview.count).toBe(1);
+  });
+
+  itif('g7j-25 (R4-13 review): concurrent overlapping assignments audit ONLY their actually-moved rows', async () => {
+    const { PrismaService: S } = await import('../prisma/prisma.service');
+    const connB = new S();
+    await connB.$connect();
+    const fy = await prismaService.fiscalYear.create({
+      data: {
+        companyId: COMPANY, code: '1419', nameFa: 'سال ۱۴۱۹',
+        startDate: new Date('2040-03-21'), endDate: new Date('2041-03-20'),
+        periods: { create: [{ code: '1419-ALL', nameFa: 'کل سال', startDate: new Date('2040-03-21'), endDate: new Date('2040-03-21') }] },
+      },
+    });
+    const openingB = new OpeningBalanceService(
+      connB as never,
+      new JournalService(connB as never, new SequencesService(connB as never, new AuditService(connB as never))),
+      new SequencesService(connB as never, new AuditService(connB as never)),
+      new AuditService(connB as never),
+    );
+    try {
+      const rows: string[] = [];
+      for (let i = 1; i <= 3; i += 1) {
+        const r = await prismaService.openingBalanceEntry.create({
+          data: { companyId: COMPANY, accountCode: 'BANK', debit: new Prisma.Decimal(i * 10), status: 'STAGED', createdBy: ACTOR.id },
+        });
+        rows.push(r.id);
+      }
+      // Overlapping selections: A takes r1+r2, B takes r2+r3.
+      const [resA, resB] = (await Promise.all([
+        opening.assignTo(COMPANY, fy.id, ACTOR, { rowIds: [rows[0], rows[1]] }),
+        openingB.assignTo(COMPANY, fy.id, ACTOR, { rowIds: [rows[1], rows[2]] }),
+      ])) as [number, number];
+      expect(resA + resB).toBe(3); // three distinct rows moved in total
+      const audits = await prismaService.auditLog.findMany({
+        where: { entityType: 'opening_balance', action: 'ASSIGN', companyId: COMPANY },
+        orderBy: { createdAt: 'desc' },
+        take: 2,
+      });
+      const claimed = audits.flatMap((a) => (a.newValues as { rowIds: string[] }).rowIds);
+      // The two audits must be DISJOINT and cover exactly the moved rows —
+      // no row claimed by both requests.
+      expect(new Set(claimed).size).toBe(claimed.length);
+      expect(new Set(claimed)).toEqual(new Set(rows));
+    } finally {
+      await prismaService.openingBalanceEntry.deleteMany({ where: { companyId: COMPANY, fiscalYearId: fy.id } });
+      await prismaService.fiscalYear.deleteMany({ where: { id: fy.id } });
+      await connB.$disconnect();
+    }
   });
 
   itif('g7j-20 (R3-1 review): assignTo is SELECTIVE and PREVIEWABLE with row-level audit', async () => {

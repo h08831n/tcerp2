@@ -9,6 +9,11 @@ import { QueueService } from '../queue/queue.service';
 import { SmsMessage, SmsMessageSource, SmsMessageStatus } from '@prisma/client';
 import { SmsService } from './sms.service';
 
+// The sweep walks every stuck row of the SHARED integration company — other
+// suites' leftover QUEUED rows make individual sweeps slower than the 5s
+// default, though always bounded by the per-pass row limits.
+jest.setTimeout(90_000);
+
 /**
  * p9d-07 (BUG-12 + P1-4/P1-5 review): no SMS row may stay QUEUED forever.
  * The boot/periodic reconcile sweep re-enqueues crash-window rows with the
@@ -432,6 +437,52 @@ describeIntegration('p9d-07 sms stuck-QUEUED reconciliation', () => {
     // CAS: the sweep must NOT clobber the newer SENT state.
     const after = await prisma.smsMessage.findUniqueOrThrow({ where: { id: stuck.id } });
     expect(after.status).toBe('SENT');
+  });
+
+  it('R4-7/8 (final gate): the same manual idempotency key in TWO companies must NOT leak across companies', async () => {
+    // A user belonging to BOTH companies sends a manual SMS with the SAME
+    // explicit key in each. Company B must get its OWN row — never company
+    // A's record, text, recipient or status.
+    const key = `r4-leak-${Date.now()}`;
+    const other = await prisma.company.create({
+      data: { nameFa: `p9d07-other-${Date.now()}`, status: 'ACTIVE' },
+    });
+    let resA: Awaited<ReturnType<typeof sms.enqueueSend>> | null = null;
+    let resB: Awaited<ReturnType<typeof sms.enqueueSend>> | null = null;
+    try {
+      resA = await sms.enqueueSend(INTEGRATION_COMPANY_ID, {
+        to: '09120000005',
+        text: 'company A secret text',
+        source: SmsMessageSource.MANUAL,
+        idempotencyKey: key,
+      });
+      expect(resA.created).toBe(true);
+      resB = await sms.enqueueSend(other.id, {
+        to: '09120000006',
+        text: 'company B own text',
+        source: SmsMessageSource.MANUAL,
+        idempotencyKey: key,
+      });
+      // RED on 4f7d20d: the global-unique P2002 path returns company A's
+      // row (leak). GREEN: company B gets its own row.
+      expect(resB!.message.companyId).toBe(other.id);
+      expect(resB!.message.text).toBe('company B own text');
+      expect(resB!.message.to).toBe('09120000006');
+      expect(resB!.message.id).not.toBe(resA!.message.id);
+      messageIds.push(resA!.message.id, resB!.message.id);
+    } finally {
+      // cleanup: scoped to the two companies and THIS test's key only.
+      await prisma.queueJob.deleteMany({
+        where: {
+          OR: [{ companyId: INTEGRATION_COMPANY_ID }, { companyId: other.id }],
+          idempotencyKey: { in: [`sms-job:${resA!.message.id}`, `sms-job:${resB!.message.id}`] },
+        },
+      });
+      await prisma.smsMessage.deleteMany({
+        where: { OR: [{ companyId: INTEGRATION_COMPANY_ID }, { companyId: other.id }], idempotencyKey: key },
+      });
+      await prisma.company.delete({ where: { id: other.id } }).catch(() => undefined);
+    }
   });
 
   afterAll(async () => {
