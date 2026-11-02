@@ -347,8 +347,8 @@ describeIntegration('p9d notification/SMS center', () => {
     const done = await automation.executeRun(run.id);
     expect(done?.status).toBe('SUCCESS');
     void result;
-    const logged = await prisma.smsMessage.findUniqueOrThrow({
-      where: { idempotencyKey: `sms:p9d-auto-${rule.id}` },
+    const logged = await prisma.smsMessage.findFirstOrThrow({
+      where: { companyId: INTEGRATION_COMPANY_ID, idempotencyKey: `sms:p9d-auto-${rule.id}` },
     });
     expect(logged.source).toBe('AUTOMATION');
     expect(logged.status).toBe('QUEUED');

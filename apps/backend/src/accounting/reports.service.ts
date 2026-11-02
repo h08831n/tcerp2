@@ -389,17 +389,30 @@ export class ReportsService {
           : { d: abs, c: new Prisma.Decimal(0) };
     };
 
-    // BUG-03: grand totals are the sum over ROOT accounts' rollups — every
-    // posting is counted EXACTLY once regardless of the display level.
-    // (Summing the displayed rows double-counts at level=all, where a parent
-    // row and its child rows are both visible.)
-    const roots = accounts.filter((a) => !a.parentId);
+    // P0-1 (review of 80502ae): grand totals are the sum of each account's
+    // OWN direct balance placed on that account's OWN normal side, over ALL
+    // accounts. This keeps sibling gross amounts (two children 100 Dr /
+    // 100 Cr stay 100/100 — root NET roll-ups would offset them), counts
+    // every posting exactly once (own sums only), covers direct parent
+    // postings (BUG-04) and is display-level independent (BUG-03).
     let totalDebit = new Prisma.Decimal(0);
     let totalCredit = new Prisma.Decimal(0);
-    for (const root of roots) {
-      const placed = place(rollup(root.id, 'closing'), this.normalSide(root.type) === 'DEBIT');
-      totalDebit = totalDebit.plus(placed.d);
-      totalCredit = totalCredit.plus(placed.c);
+    let totalOpeningDebit = new Prisma.Decimal(0);
+    let totalOpeningCredit = new Prisma.Decimal(0);
+    let totalPeriodDebit = new Prisma.Decimal(0);
+    let totalPeriodCredit = new Prisma.Decimal(0);
+    for (const account of accounts) {
+      const own = leafBalances.get(account.id)!;
+      const normalDebit = this.normalSide(account.type) === 'DEBIT';
+      const closingPlaced = place(own.closing, normalDebit);
+      totalDebit = totalDebit.plus(closingPlaced.d);
+      totalCredit = totalCredit.plus(closingPlaced.c);
+      const openingPlaced = place(own.opening, normalDebit);
+      totalOpeningDebit = totalOpeningDebit.plus(openingPlaced.d);
+      totalOpeningCredit = totalOpeningCredit.plus(openingPlaced.c);
+      // Movement totals are RAW debit/credit sums — never netted.
+      totalPeriodDebit = totalPeriodDebit.plus(own.periodDebit);
+      totalPeriodCredit = totalPeriodCredit.plus(own.periodCredit);
     }
 
     const rows = accounts
@@ -434,11 +447,26 @@ export class ReportsService {
       to,
       level,
       rows,
+      // P1-7 (explicit display policy): accounts that are NOT leaves but
+      // carry DIRECT postings. At level=leaf their rows are not displayed
+      // (their amounts still count in the grand totals above); the caller
+      // must surface this list whenever non-empty.
+      directPostingsOnNonLeaf: accounts
+        .filter((a) => !leafIds.has(a.id))
+        .map((a) => ({ code: a.code, own: leafBalances.get(a.id)! }))
+        .filter((x) => !x.own.opening.isZero() || !x.own.periodDebit.isZero() || !x.own.periodCredit.isZero() || !x.own.closing.isZero())
+        .map((x) => ({
+          accountCode: x.code,
+          opening: x.own.opening,
+          periodDebit: x.own.periodDebit,
+          periodCredit: x.own.periodCredit,
+          closing: x.own.closing,
+        })),
       totals: {
-        openingDebit: roots.reduce((s, r) => s.plus(place(rollup(r.id, 'opening'), this.normalSide(r.type) === 'DEBIT').d), new Prisma.Decimal(0)),
-        openingCredit: roots.reduce((s, r) => s.plus(place(rollup(r.id, 'opening'), this.normalSide(r.type) === 'DEBIT').c), new Prisma.Decimal(0)),
-        debit: roots.reduce((s, r) => s.plus(rollup(r.id, 'periodDebit')), new Prisma.Decimal(0)),
-        credit: roots.reduce((s, r) => s.plus(rollup(r.id, 'periodCredit')), new Prisma.Decimal(0)),
+        openingDebit: totalOpeningDebit,
+        openingCredit: totalOpeningCredit,
+        debit: totalPeriodDebit,
+        credit: totalPeriodCredit,
         closingDebit: totalDebit,
         closingCredit: totalCredit,
       },

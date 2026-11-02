@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
-import { IsArray, IsDateString, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsOptional, IsString, IsUUID, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { Request } from 'express';
 import { Req } from '@nestjs/common';
@@ -51,12 +51,72 @@ class StageOpeningDto {
   @ValidateNested({ each: true })
   @Type(() => OpeningRowDto)
   rows!: OpeningRowDto[];
+
+  /** P0-2: bind the staged batch to an OPEN fiscal year of this company. */
+  @IsOptional()
+  @IsUUID()
+  fiscalYearId?: string;
 }
 
 class GenerateOpeningDto {
   @IsOptional()
   @IsDateString()
   entryDate?: string;
+
+  /** P0-2: generate for this fiscal year explicitly (else: entryDate's FY). */
+  @IsOptional()
+  @IsUUID()
+  fiscalYearId?: string;
+}
+
+/** R3-1: SELECTIVE + PREVIEWABLE assignment of unassigned STAGED rows. */
+class AssignOpeningDto {
+  @IsUUID()
+  fiscalYearId!: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  rowIds?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  preview?: boolean;
+}
+
+/**
+ * P1-6 + R-5 (review of 96f9af0): report query dates are validated at the
+ * controller boundary — an unparseable date reached Prisma as `Invalid Date`
+ * (500), a reversed window silently returned misleading reports, and JS
+ * `new Date` silently ROLLS calendar-invalid dates (2026-02-30 → March 2),
+ * shifting report windows by days. Strict calendar round-trip check.
+ */
+function parseReportDate(value: string | undefined, field: string): Date | undefined {
+  if (value === undefined || value === '') return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!match) throw new ValidationError('REPORT_DATE_INVALID', { field, value });
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new ValidationError('REPORT_DATE_INVALID', { field, value });
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new ValidationError('REPORT_DATE_INVALID', { field, value });
+  }
+  return date;
+}
+
+function assertWindow(from: Date | undefined, to: Date | undefined): void {
+  if (from && to && from.getTime() > to.getTime()) {
+    throw new ValidationError('REPORT_RANGE_REVERSED', { from, to });
+  }
 }
 
 @Controller('accounting/reports')
@@ -86,10 +146,13 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const fromDate = parseReportDate(from, 'from');
+    const toDate = parseReportDate(to, 'to');
+    assertWindow(fromDate, toDate);
     return this.reports.generalLedger(companyId, {
       accountCode,
-      from: from ? new Date(from) : undefined,
-      to: to ? new Date(to) : undefined,
+      from: fromDate,
+      to: toDate,
       journalCode: journalCode || undefined,
       partyId: partyId || undefined,
       analyticType: analyticType || undefined,
@@ -127,16 +190,20 @@ export class ReportsController {
     // levels — the API now exposes them. Conflict rule is explicit: `asOf`
     // means "everything up to that date" (from = null, to = asOf) and is
     // rejected when combined with an explicit `to`.
-    if (to && asOf) {
+    const fromDate = parseReportDate(from, 'from');
+    const toDate = parseReportDate(to, 'to');
+    const asOfDate = parseReportDate(asOf, 'asOf');
+    if (toDate && asOfDate) {
       throw new ValidationError('TRIAL_BALANCE_ASOF_TO_CONFLICT', { to, asOf });
     }
     if (level && !['leaf', 'summary', 'all'].includes(level)) {
       throw new ValidationError('TRIAL_BALANCE_LEVEL_INVALID', { level });
     }
+    assertWindow(fromDate, toDate ?? asOfDate);
     return this.reports.trialBalance(companyId, {
-      from: from ? new Date(from) : undefined,
-      to: to ? new Date(to) : undefined,
-      asOf: asOf ? new Date(asOf) : undefined,
+      from: fromDate,
+      to: toDate,
+      asOf: asOfDate,
       level: level as 'leaf' | 'summary' | 'all' | undefined,
     });
   }
@@ -154,10 +221,11 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const asOfDate = parseReportDate(asOf, 'asOf');
     return this.subsidiary.partyBalances(companyId, {
       role: role === 'SUPPLIER' ? 'SUPPLIER' : 'CUSTOMER',
       accountCode: accountCode || (role === 'SUPPLIER' ? 'PAYABLE' : 'RECEIVABLE'),
-      asOf: asOf ? new Date(asOf) : undefined,
+      asOf: asOfDate,
       search,
       page: page ? Number(page) : undefined,
       pageSize: pageSize ? Number(pageSize) : undefined,
@@ -175,10 +243,13 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const fromDate = parseReportDate(from, 'from');
+    const toDate = parseReportDate(to, 'to');
+    assertWindow(fromDate, toDate);
     return this.subsidiary.partyLedger(companyId, partyId, {
       accountCode: accountCode || 'RECEIVABLE',
-      from: from ? new Date(from) : undefined,
-      to: to ? new Date(to) : undefined,
+      from: fromDate,
+      to: toDate,
     });
   }
 
@@ -206,9 +277,12 @@ export class ReportsController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const fromDate = parseReportDate(from, 'from');
+    const toDate = parseReportDate(to, 'to');
+    assertWindow(fromDate, toDate);
     return this.profit.operationalProfit(companyId, {
-      from: from ? new Date(from) : undefined,
-      to: to ? new Date(to) : undefined,
+      from: fromDate,
+      to: toDate,
       customerId,
       // BUG-11: the service has always filtered by supplier — the controller
       // was dropping the parameter before it reached the service.
@@ -274,7 +348,7 @@ export class OpeningBalanceController {
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     this.opening.assertStagedBalanced(dto.rows);
-    return this.opening.stage(companyId, dto.rows, actor);
+    return this.opening.stage(companyId, dto.rows, actor, dto.fiscalYearId);
   }
 
   @Post('generate')
@@ -285,6 +359,26 @@ export class OpeningBalanceController {
     @Req() request: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.opening.generate(companyId, actor, dto.entryDate ? new Date(dto.entryDate) : undefined);
+    return this.opening.generate(
+      companyId,
+      actor,
+      parseReportDate(dto.entryDate, 'entryDate'),
+      dto.fiscalYearId,
+    );
+  }
+
+  @Post('assign')
+  @RequirePermissions('accounting.fiscal.manage')
+  async assign(
+    @Body() dto: AssignOpeningDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    const result = await this.opening.assignTo(companyId, dto.fiscalYearId, actor, {
+      rowIds: dto.rowIds,
+      preview: dto.preview,
+    });
+    return typeof result === 'number' ? { assigned: result } : result;
   }
 }

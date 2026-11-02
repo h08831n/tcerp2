@@ -107,6 +107,57 @@ export class JournalService {
       throw new ValidationError('Unknown account code(s)', { missing });
     }
 
+    // P1-3 (review of 80502ae): every analytic reference must belong to THIS
+    // company — a cross-company partyId/dimensionId must be rejected before
+    // any row is written (no inter-company relation, no disclosure). Batched
+    // lookups keep this O(1) queries per entity kind, not per line. Direct
+    // line partyIds and analytics dimensionIds report DISTINCT error codes.
+    const directPartyIds = new Set<string>();
+    const analyticPartyIds = new Set<string>();
+    const refVariantIds = new Set<string>();
+    const refUserIds = new Set<string>();
+    for (const line of input.lines) {
+      if (line.partyId) directPartyIds.add(line.partyId);
+      for (const a of line.analytics ?? []) {
+        if (a.dimensionType === 'CUSTOMER' || a.dimensionType === 'SUPPLIER') analyticPartyIds.add(a.dimensionId);
+        else if (a.dimensionType === 'PRODUCT_VARIANT') refVariantIds.add(a.dimensionId);
+        else if (a.dimensionType === 'SALESPERSON' || a.dimensionType === 'EMPLOYEE') refUserIds.add(a.dimensionId);
+        // PROJECT / COST_CENTER have no owning table yet — label-level only.
+      }
+    }
+    const assertAllFound = (found: Set<string>, ids: Set<string>, code: string) => {
+      const notFound = [...ids].filter((id) => !found.has(id));
+      if (notFound.length > 0) throw new ValidationError(code, { notFound });
+    };
+    if (directPartyIds.size > 0) {
+      const found = await tx.party.findMany({
+        where: { id: { in: [...directPartyIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((p) => p.id)), directPartyIds, 'JOURNAL_PARTY_NOT_IN_COMPANY');
+    }
+    if (analyticPartyIds.size > 0) {
+      const found = await tx.party.findMany({
+        where: { id: { in: [...analyticPartyIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((p) => p.id)), analyticPartyIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+    if (refVariantIds.size > 0) {
+      const found = await tx.productVariant.findMany({
+        where: { id: { in: [...refVariantIds] }, companyId: input.companyId },
+        select: { id: true },
+      });
+      assertAllFound(new Set(found.map((v) => v.id)), refVariantIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+    if (refUserIds.size > 0) {
+      const found = await tx.userCompany.findMany({
+        where: { companyId: input.companyId, userId: { in: [...refUserIds] } },
+        select: { userId: true },
+      });
+      assertAllFound(new Set(found.map((u) => u.userId)), refUserIds, 'JOURNAL_ANALYTIC_NOT_IN_COMPANY');
+    }
+
     const { number: entryNumber } = await this.sequences.allocate(
       input.companyId,
       'JOURNAL_ENTRY',
@@ -167,24 +218,49 @@ export class JournalService {
     companyId: string,
     date: Date,
   ): Promise<void> {
+    // R3-5: fiscal years/periods are CALENDAR dates (db DATE = midnight) —
+    // the comparison uses the entry's calendar DAY, so a timestamp at
+    // 12:00 on the LAST day of a year/period still belongs to it.
+    // R5-P1 TIMEZONE POLICY (documented): the calendar day is derived from
+    // the entry timestamp's UTC components. An entry at 2026-03-20T20:30Z
+    // (= 2026-03-21 00:00 in Asia/Tehran, +03:30) is attributed to March 20
+    // by this policy. Switching the anchor to Asia/Tehran would shift every
+    // fiscal boundary and requires an explicit owner decision — recorded as
+    // an open item in the merge-readiness report, NOT silently changed.
+    const calendarDay = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+    );
     // Optional-chain + guard: some callers (legacy unit tests) hand a stubbed
     // tx without fiscal delegates — treated as "no fiscal calendar".
     const year = (await tx.fiscalYear?.findFirst?.({
       where: {
         companyId,
-        startDate: { lte: date },
-        endDate: { gte: date },
+        startDate: { lte: calendarDay },
+        endDate: { gte: calendarDay },
       },
     })) ?? null;
-    if (!year) return; // no fiscal calendar → unguarded (documented)
+    if (!year) {
+      // R5-P1 policy: a company with NO fiscal calendar at all posts
+      // unguarded (legacy, documented). A company WITH a calendar must NOT
+      // post a document dated outside every year window silently — that is
+      // an explicit configuration/request error.
+      const calendarExists =
+        (await tx.fiscalYear?.count?.({ where: { companyId } })) ?? 0;
+      if (calendarExists > 0) {
+        throw new ValidationError('FISCAL_YEAR_NOT_FOUND_FOR_DATE', {
+          date: date.toISOString(),
+        });
+      }
+      return; // truly no calendar → legacy unguarded (documented)
+    }
     if (year.status === 'CLOSED') {
       throw new ValidationError('FISCAL_YEAR_CLOSED', { fiscalYearCode: year.code });
     }
     const period = (await tx.fiscalPeriod?.findFirst?.({
       where: {
         fiscalYearId: year.id,
-        startDate: { lte: date },
-        endDate: { gte: date },
+        startDate: { lte: calendarDay },
+        endDate: { gte: calendarDay },
       },
     })) ?? null;
     if (period) {

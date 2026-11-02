@@ -949,13 +949,21 @@ model SmsMessage {
   error            String?
   providerResponse Json?            @map("provider_response")
   queuedJobId      String?          @map("queued_job_id") @db.Uuid
-  idempotencyKey   String           @unique @map("idempotency_key")
+  // P1-5 (review of 80502ae): the intended send time is persisted so a
+  // reconciled crash-window row is re-enqueued with its ORIGINAL delay —
+  // a 24h-delayed SMS never fires early after a restart.
+  scheduledFor     DateTime?        @map("scheduled_for") @db.Timestamptz(6)
+  // R4-9: COMPANY-scoped uniqueness (was a global @unique — the P2002
+  // refetch could leak another company's message). Migration
+  // 20241102030000.
+  idempotencyKey   String           @map("idempotency_key")
   requestedById    String?          @map("requested_by_id") @db.Uuid
   createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   sentAt           DateTime?        @map("sent_at") @db.Timestamptz(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
+  @@unique([companyId, idempotencyKey])
   @@index([companyId, createdAt])
   @@index([companyId, status])
   @@map("sms_messages")
