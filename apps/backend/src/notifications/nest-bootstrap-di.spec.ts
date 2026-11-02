@@ -14,18 +14,17 @@ describe('R4 Nest bootstrap DI graph ( SmsService options param)', () => {
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeAll(() => {
-    // Minimal env so ConfigModule's zod validation passes without .env.
-    const required = ['DATABASE_URL', 'JWT_SECRET', 'REDIS_URL'];
-    for (const key of required) {
+    // Minimal env so ConfigModule's zod validation passes WITHOUT .env (CI
+    // provides only DATABASE_URL — cover every REQUIRED schema key here).
+    const required: Record<string, string> = {
+      DATABASE_URL: 'postgresql://placeholder:placeholder@localhost:5432/placeholder?schema=public',
+      JWT_SECRET: 'bootstrap-di-test-secret-0123456789',
+      JWT_REFRESH_SECRET: 'bootstrap-di-test-refresh-secret-0123456789',
+      REDIS_URL: 'redis://localhost:6379',
+    };
+    for (const [key, fallback] of Object.entries(required)) {
       savedEnv[key] = process.env[key];
-      if (!process.env[key]) {
-        process.env[key] =
-          key === 'DATABASE_URL'
-            ? 'postgresql://placeholder:placeholder@localhost:5432/placeholder?schema=public'
-            : key === 'JWT_SECRET'
-              ? 'bootstrap-di-test-secret-0123456789'
-              : 'redis://localhost:6379';
-      }
+      if (!process.env[key]) process.env[key] = fallback;
     }
   });
 
