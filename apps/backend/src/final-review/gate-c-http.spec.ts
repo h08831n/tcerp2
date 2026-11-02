@@ -6,6 +6,16 @@ import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 import * as bcrypt from 'bcryptjs';
 
+// CI has NO .env file: the zod-validated config requires these before any
+// Nest instantiation. DATABASE_URL comes from the integration runner.
+for (const [key, value] of Object.entries({
+  JWT_SECRET: 'gate-c-http-jwt-secret-0123456789',
+  JWT_REFRESH_SECRET: 'gate-c-http-jwt-refresh-secret-0123456789',
+  REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
+})) {
+  if (!process.env[key]) process.env[key] = value;
+}
+
 jest.setTimeout(300_000);
 const DB_URL = process.env.DATABASE_URL;
 if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
