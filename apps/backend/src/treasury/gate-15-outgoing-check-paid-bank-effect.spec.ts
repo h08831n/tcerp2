@@ -25,7 +25,7 @@ describe('15 outgoing-check-paid-bank-effect', () => {
     const sequences = { allocate: jest.fn().mockResolvedValue({ number: 'JE-1405-00001', value: 1 }) };
     const journal = new JournalService({} as never, sequences as never);
     const statement = new BankStatementService({} as never);
-    const audit = { record: jest.fn() };
+    const audit = { record: jest.fn(), recordTx: jest.fn() };
 
     const checkUpdates: Record<string, unknown>[] = [];
     const checkCreate = jest.fn(async (args: { data: object }) => {

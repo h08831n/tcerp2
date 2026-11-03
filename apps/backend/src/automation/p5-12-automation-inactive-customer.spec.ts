@@ -135,7 +135,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
     await prisma.automationRule.deleteMany({ where: { id: ruleId } });
     await prisma.salesDocument.deleteMany({ where: { id: documentId } });
     await prisma.party.deleteMany({ where: { id: partyId } });
-    await prisma.company.delete({ where: { id: companyId } }).catch(() => undefined);
+    await prisma.company.delete({ where: { id: companyId } }); // loud — leftover = spec bug
     await disconnectIntegrationPrisma();
   });
 });
