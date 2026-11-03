@@ -49,14 +49,31 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
   };
   const tokens: Record<string, string> = {};
   const userIds: Record<string, string> = {};
+  // R6-1: EVERY fixture row's id is tracked so cleanup deletes exactly this
+  // run's rows by id (never a prefix/pattern) and the afterAll can PROVE
+  // nothing survived.
   const createdUsers: string[] = [];
   const createdCompanies: string[] = [];
+  const roleIds: string[] = [];
+  const teamIds: string[] = [];
+  const uomCategoryIds: string[] = [];
+  const uomIds: string[] = [];
+  const categoryIds: string[] = [];
+  const templateIds: string[] = [];
+  const variantIds: string[] = [];
+  const partyIds: string[] = [];
+  const salesDocIds: string[] = [];
+  const bankAccountIds: string[] = [];
+  const sequenceIds: string[] = [];
+  const chartAccountIds: string[] = [];
+  const fiscalYearIds: string[] = [];
   let partyAllA = '';
   let partyOwnA = '';
   let partyTeamA = '';
   let partyB = '';
   let salesOwn = '';
   let salesOther = '';
+  let salesOutOfTeam = '';
 
   async function mkUser(name: keyof typeof usernames, companies: string[], permissionCodes: string[]): Promise<void> {
     const hash = bcrypt.hashSync(PASSWORD, 8);
@@ -69,11 +86,16 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
       await prisma.userCompany.create({ data: { userId: user.id, companyId } });
       for (const code of permissionCodes) {
         const permission = await prisma.permission.findUniqueOrThrow({ where: { code }, select: { id: true } });
-        const role = await prisma.role.create({ data: { code: `gc-${name}-${code.replace(/\./g, '-')}-${companyId.slice(0, 6)}`, nameFa: code, nameEn: code } });
-        const rp = await prisma.permission.findUniqueOrThrow({ where: { code }, select: { id: true } });
-        await prisma.rolePermission.create({ data: { roleId: role.id, permissionId: rp.id } });
+        const role = await prisma.role.create({
+          data: {
+            code: `gc-${name}-${code.replace(/\./g, '-')}-${companyId.slice(0, 6)}`,
+            nameFa: code,
+            nameEn: code,
+          },
+        });
+        roleIds.push(role.id); // R6-1: tracked — cleanup deletes THIS row by id
+        await prisma.rolePermission.create({ data: { roleId: role.id, permissionId: permission.id } });
         await prisma.userCompanyRole.create({ data: { userId: user.id, companyId, roleId: role.id } });
-        void permission;
       }
     }
   }
@@ -113,22 +135,25 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
       createdCompanies.push(company.id);
     }
     for (const companyId of [A, B]) {
-      await prisma.chartOfAccount.create({ data: { companyId, code: 'BANK', name: 'بانک', type: 'ASSET' } });
-      await prisma.chartOfAccount.create({ data: { companyId, code: 'SALES_REVENUE', name: 'درآمد', type: 'REVENUE' } });
-      await prisma.sequence.create({
+      const bank = await prisma.chartOfAccount.create({ data: { companyId, code: 'BANK', name: 'بانک', type: 'ASSET' } });
+      const rev = await prisma.chartOfAccount.create({ data: { companyId, code: 'SALES_REVENUE', name: 'درآمد', type: 'REVENUE' } });
+      chartAccountIds.push(bank.id, rev.id);
+      const seq = await prisma.sequence.create({
         data: { companyId, documentType: 'SALES_DOCUMENT', name: 'SD', prefix: 'SD', padding: 5, resetCycle: 'NEVER' },
       });
+      sequenceIds.push(seq.id);
     }
 
     const memberBoth = [A, B];
     await mkUser('all', memberBoth, [
       'parties.view', 'parties.create', 'parties.edit', 'parties.scope.all',
-      'sales.view', 'sales.create', 'products.view', 'products.variants.manage',
+      'sales.view', 'sales.create', 'sales.scope.all',
+      'products.view', 'products.edit', 'products.variants.manage',
       'treasury.view', 'treasury.edit', 'imports.export', 'accounting.report',
       'accounting.fiscal.manage',
     ]);
     await mkUser('own', [A], ['parties.view', 'parties.create', 'parties.edit', 'sales.view', 'sales.create']);
-    await mkUser('team', [A], ['parties.view', 'parties.create', 'parties.edit', 'parties.scope.team', 'sales.view', 'sales.create']);
+    await mkUser('team', [A], ['parties.view', 'parties.create', 'parties.edit', 'parties.scope.team', 'sales.view', 'sales.create', 'sales.scope.team']);
     await mkUser('noperm', [A], []);
     await mkUser('none', [], []);
 
@@ -153,33 +178,43 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
         data: { companyId: B, type: 'COMPANY', nameFa: `party-B ${B_MARKER}`, roles: { create: [{ role: 'CUSTOMER' }] } },
       })
     ).id;
+    partyIds.push(partyAllA, partyOwnA, partyTeamA, partyB);
 
     // Product surface for company A (uom category → uom → category → template
     // → variant) so variant/bank probes have real rows.
     const uomCat = await prisma.uomCategory.create({ data: { companyId: A, code: 'GCH', nameFa: 'گیت سی' } });
-    await prisma.uom.create({
+    uomCategoryIds.push(uomCat.id);
+    const uom = await prisma.uom.create({
       data: { companyId: A, symbol: 'kg', nameFa: 'کیلوگرم', categoryId: uomCat.id, conversionRatio: 1, isBaseUnit: true },
     });
+    uomIds.push(uom.id);
     const cat = await prisma.productCategory.create({ data: { companyId: A, code: 'GCH', nameFa: 'گیت سی' } });
-    await prisma.productTemplate.create({
+    categoryIds.push(cat.id);
+    const template = await prisma.productTemplate.create({
       data: {
         companyId: A, categoryId: cat.id, nameFa: `قالب ${A_MARKER}`,
         variants: { create: { companyId: A, sku: `gchv-${A_MARKER}`, nameFa: 'gc variant', combinationKey: `gch-${A_MARKER}` } },
       },
     });
+    templateIds.push(template.id);
+    const variant = await prisma.productVariant.findFirstOrThrow({
+      where: { companyId: A, templateId: template.id },
+      select: { id: true },
+    });
+    variantIds.push(variant.id);
 
     // A REAL team containing both `own` and `team` users — the TEAM scope
     // resolves through actual team membership, not company-wide visibility.
     const team = await prisma.team.create({
       data: { companyId: A, name: `gc-team-${A_MARKER}`, members: { create: [{ userId: userIds.own }, { userId: userIds.team }] } },
     });
-    void team;
+    teamIds.push(team.id); // R6-1: tracked — TEAM scope resolves REAL membership
 
     // Sales documents: one owned (salesperson) by `own`, one by `team`.
     const seqA = await prisma.sequence.create({
       data: { companyId: A, documentType: 'SD-EXTRA', name: 'SD', prefix: 'SDX', padding: 5, resetCycle: 'NEVER' },
     });
-    void seqA;
+    sequenceIds.push(seqA.id); // R6-1: tracked (was `void seqA` — leftover bug)
     const mkDoc = async (salespersonId: string, nameFa: string) => {
       const doc = await prisma.salesDocument.create({
         data: {
@@ -199,6 +234,8 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
     };
     salesOwn = await mkDoc(userIds.own, 'own-doc');
     salesOther = await mkDoc(userIds.team, 'team-doc');
+    salesOutOfTeam = await mkDoc(userIds.all, 'out-of-team-doc');
+    salesDocIds.push(salesOwn, salesOther, salesOutOfTeam);
 
     // Boot the REAL app on an ephemeral port.
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -217,28 +254,105 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
   });
 
   afterAll(async () => {
-    await app?.close().catch(() => undefined);
+    if (!app && !prisma) return; // unit mode — nothing was booted
+    const failures: string[] = [];
+    const step = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+      try {
+        await fn();
+      } catch (error) {
+        // R6-4: cleanup errors are NEVER swallowed — every failure is
+        // reported and fails the run.
+        failures.push(`${label}: ${String(error)}`);
+      }
+    };
+
+    // R6-2: dependency-ordered, by-ID cleanup of EXACTLY this run's rows.
     if (prisma) {
       for (const companyId of createdCompanies) {
-        await prisma.salesLine.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.salesDocument.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.bankAccount.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.party.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.productTemplate.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.productCategory.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.uomCategory.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.timelineEvent.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.auditLog.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.chartOfAccount.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.sequence.deleteMany({ where: { companyId } }).catch(() => undefined);
-        await prisma.userPermissionOverride.deleteMany({ where: { userId: { in: createdUsers } } }).catch(() => undefined);
-        await prisma.userCompanyRole.deleteMany({ where: { userId: { in: createdUsers } } }).catch(() => undefined);
-        await prisma.userCompany.deleteMany({ where: { userId: { in: createdUsers } } }).catch(() => undefined);
-        await prisma.role.deleteMany({ where: { code: { startsWith: 'gc-' } } }).catch(() => undefined);
-        await prisma.user.deleteMany({ where: { id: { in: createdUsers } } }).catch(() => undefined);
-        await prisma.company.delete({ where: { id: companyId } }).catch(() => undefined);
+        await step(`salesLines(${companyId})`, () =>
+          prisma.salesLine.deleteMany({ where: { companyId } }));
+        await step(`salesDocuments(${companyId})`, () =>
+          prisma.salesDocument.deleteMany({ where: { companyId, id: { in: salesDocIds } } }));
+        await step(`bankAccounts(${companyId})`, () =>
+          prisma.bankAccount.deleteMany({ where: { companyId, id: { in: bankAccountIds } } }));
+        await step(`parties(${companyId})`, () =>
+          prisma.party.deleteMany({ where: { companyId, id: { in: partyIds } } }));
+        await step(`variants(${companyId})`, () =>
+          prisma.productVariant.deleteMany({ where: { companyId, id: { in: variantIds } } }));
+        await step(`templates(${companyId})`, () =>
+          prisma.productTemplate.deleteMany({ where: { companyId, id: { in: templateIds } } }));
+        await step(`categories(${companyId})`, () =>
+          prisma.productCategory.deleteMany({ where: { companyId, id: { in: categoryIds } } }));
+        await step(`uoms(${companyId})`, () =>
+          prisma.uom.deleteMany({ where: { companyId, id: { in: uomIds } } }));
+        await step(`uomCategories(${companyId})`, () =>
+          prisma.uomCategory.deleteMany({ where: { companyId, id: { in: uomCategoryIds } } }));
+        await step(`timeline(${companyId})`, () =>
+          prisma.timelineEvent.deleteMany({ where: { companyId } }));
+        await step(`audit(${companyId})`, () =>
+          prisma.auditLog.deleteMany({ where: { companyId } }));
+        await step(`chartAccounts(${companyId})`, () =>
+          prisma.chartOfAccount.deleteMany({ where: { companyId, id: { in: chartAccountIds } } }));
+        await step(`sequences(${companyId})`, () =>
+          prisma.sequence.deleteMany({ where: { companyId, id: { in: sequenceIds } } }));
+        await step(`fiscalYears(${companyId})`, () =>
+          prisma.fiscalYear.deleteMany({ where: { companyId, id: { in: fiscalYearIds } } }));
+        // R6-3: roles deleted STRICTLY by tracked id — never a prefix scan.
+        await step(`userPermissionOverrides`, () =>
+          prisma.userPermissionOverride.deleteMany({ where: { userId: { in: createdUsers } } }));
+        await step(`userCompanyRoles`, () =>
+          prisma.userCompanyRole.deleteMany({ where: { userId: { in: createdUsers } } }));
+        await step(`rolePermissions`, () =>
+          prisma.rolePermission.deleteMany({ where: { roleId: { in: roleIds } } }));
+        await step(`roles`, () =>
+          prisma.role.deleteMany({ where: { id: { in: roleIds } } }));
+        await step(`teamMembers+teams`, async () => {
+          const members = await prisma.teamMember.deleteMany({ where: { teamId: { in: teamIds } } });
+          const teams = await prisma.team.deleteMany({ where: { id: { in: teamIds } } });
+          return { members: members.count, teams: teams.count };
+        });
+        await step(`userCompanies`, () =>
+          prisma.userCompany.deleteMany({ where: { userId: { in: createdUsers } } }));
+        await step(`users`, () =>
+          prisma.user.deleteMany({ where: { id: { in: createdUsers } } }));
+        await step(`company(${companyId})`, () =>
+          prisma.company.delete({ where: { id: companyId } }));
       }
-      await prisma.$disconnect();
+
+      // R6-5: PROVE the cleanup — every tracked id space must be empty.
+      const leftovers: string[] = [];
+      const check = async (label: string, count: number): Promise<void> => {
+        if (count !== 0) leftovers.push(`${label}=${count}`);
+      };
+      for (const companyId of createdCompanies) {
+        await check(`companies:${companyId}`, await prisma.company.count({ where: { id: companyId } }));
+        await check(`parties:${companyId}`, await prisma.party.count({ where: { companyId, id: { in: partyIds } } }));
+        await check(`salesDocs:${companyId}`, await prisma.salesDocument.count({ where: { companyId, id: { in: salesDocIds } } }));
+        await check(`bankAccounts:${companyId}`, await prisma.bankAccount.count({ where: { companyId, id: { in: bankAccountIds } } }));
+        await check(`templates:${companyId}`, await prisma.productTemplate.count({ where: { companyId, id: { in: templateIds } } }));
+        await check(`variants:${companyId}`, await prisma.productVariant.count({ where: { companyId, id: { in: variantIds } } }));
+        await check(`uoms:${companyId}`, await prisma.uom.count({ where: { companyId, id: { in: uomIds } } }));
+        await check(`uomCategories:${companyId}`, await prisma.uomCategory.count({ where: { companyId, id: { in: uomCategoryIds } } }));
+        await check(`chartAccounts:${companyId}`, await prisma.chartOfAccount.count({ where: { companyId, id: { in: chartAccountIds } } }));
+        await check(`sequences:${companyId}`, await prisma.sequence.count({ where: { companyId, id: { in: sequenceIds } } }));
+        await check(`fiscalYears:${companyId}`, await prisma.fiscalYear.count({ where: { companyId, id: { in: fiscalYearIds } } }));
+        await check(`teams:${companyId}`, await prisma.team.count({ where: { id: { in: teamIds } } }));
+      }
+      await check('users', await prisma.user.count({ where: { id: { in: createdUsers } } }));
+      await check('roles', await prisma.role.count({ where: { id: { in: roleIds } } }));
+      if (leftovers.length > 0) {
+        failures.push(`LEFTOVER ROWS after cleanup: ${leftovers.join(', ')}`);
+      }
+    }
+
+    await app?.close().catch((error: unknown) => {
+      failures.push(`app.close: ${String(error)}`);
+    });
+    await prisma?.$disconnect().catch((error: unknown) => {
+      failures.push(`prisma.disconnect: ${String(error)}`);
+    });
+    if (failures.length > 0) {
+      throw new Error(`GATE-C CLEANUP FAILURES (${failures.length}):\n- ${failures.join('\n- ')}`);
     }
   });
 
@@ -250,10 +364,16 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
   });
 
   itif('non-member user → 403 (no company context) even with a forged x-company-id', async () => {
-    const direct = await req('none', A, 'GET', '/api/parties');
-    expect([403, 404]).toContain(direct.status);
+    // Documented guard ORDER: JwtAuthGuard → PermissionsGuard (lenient
+    // company resolution: a non-member resolves NO company → no permission
+    // set) → 'Missing required permissions' 403. The controller's
+    // requireCompanyId membership assert is a second, defense-in-depth layer.
+    const forged = await req('none', A, 'GET', '/api/parties');
+    expect(forged.status).toBe(403);
+    expect(((await forged.json()) as { message?: string }).message).toBe('Missing required permissions');
     const noHeader = await req('none', null, 'GET', '/api/parties');
     expect(noHeader.status).toBe(403);
+    expect(((await noHeader.json()) as { message?: string }).message).toBe('Missing required permissions');
   });
 
   itif('member WITHOUT the permission → 403 (permission guard, server-side)', async () => {
@@ -293,14 +413,26 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
     expect(allIds).not.toContain(partyB);
   });
 
-  itif('Sales record scope mirrors CRM scope permissions', async () => {
+  itif('Sales record scope mirrors CRM scope permissions (OWN/TEAM/ALL direct access)', async () => {
     const ownList = (await (await req('own', A, 'GET', '/api/sales?limit=100')).json()) as { items?: Array<{ id: string }> };
     const ownIds = (ownList.items ?? []).map((d) => d.id);
     expect(ownIds).toContain(salesOwn);
+    // OWN: another user's (same-team) document → 403 assertScope (doc FOUND
+    // company-scoped, then scope-rejected — assertSalesInScope throws
+    // ForbiddenError, exact status asserted).
     const cross = await req('own', A, 'GET', `/api/sales/${salesOther}`);
-    // `own` user reading the TEAM user's document: server decides — OWN scope
-    // must NOT return the other user's document.
-    expect([404, 403]).toContain(cross.status);
+    expect(cross.status).toBe(403);
+    // OWN: out-of-team document (ALL user's) → 403 as well.
+    const outOfTeam = await req('own', A, 'GET', `/api/sales/${salesOutOfTeam}`);
+    expect(outOfTeam.status).toBe(403);
+    // TEAM: the team-mate's document → 200; the OUT-of-team document → 403.
+    const teamMateDoc = await req('team', A, 'GET', `/api/sales/${salesOwn}`);
+    expect(teamMateDoc.status).toBe(200);
+    const teamBlocked = await req('team', A, 'GET', `/api/sales/${salesOutOfTeam}`);
+    expect(teamBlocked.status).toBe(403);
+    // ALL: every company-A document → 200 (never company B's).
+    const allDoc = await req('all', A, 'GET', `/api/sales/${salesOutOfTeam}`);
+    expect(allDoc.status).toBe(200);
   });
 
   itif('variant + bank-account UPDATE cross-company → 404', async () => {
@@ -310,18 +442,26 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
     const variant = await prisma.productVariant.create({
       data: { companyId: A, templateId, sku: `gcv-${Date.now()}`, nameFa: 'gc variant', combinationKey: `gck-${Date.now()}`, defaultUomId: uomId },
     });
+    variantIds.push(variant.id); // R6-1: tracked — template FK depends on it
     const crossVariant = await req('all', B, 'PATCH', `/api/products/templates/${templateId}/variants/${variant.id}`, { nameFa: 'hacked' });
-    expect([404, 403]).toContain(crossVariant.status);
+    expect(crossVariant.status).toBe(404); // company-scoped lookup — exact
+    // R6-P2: re-read from the DB and PROVE the unauthorized PATCH changed NOTHING.
+    const variantAfter = await prisma.productVariant.findUniqueOrThrow({ where: { id: variant.id } });
+    expect(variantAfter.nameFa).toBe('gc variant');
 
     const account = await prisma.bankAccount.create({
       data: { companyId: A, name: `gc-${A_MARKER}`, bankName: 'Bank A' },
     });
+    bankAccountIds.push(account.id);
     const cross = await req('all', B, 'PATCH', `/api/treasury/bank-accounts/${account.id}`, { name: 'hacked' });
-    expect([404, 403]).toContain(cross.status);
+    expect(cross.status).toBe(404); // company-scoped lookup — exact
+    // R6-P2: DB re-read — the cross-company PATCH must not have renamed.
+    const accountAfterCross = await prisma.bankAccount.findUniqueOrThrow({ where: { id: account.id } });
+    expect(accountAfterCross.name).toBe(`gc-${A_MARKER}`);
     const ownUpdate = await req('all', A, 'PATCH', `/api/treasury/bank-accounts/${account.id}`, { name: 'renamed-ok' });
-    expect([200, 201]).toContain(ownUpdate.status);
-    await prisma.productVariant.delete({ where: { id: variant.id } }).catch(() => undefined);
-    await prisma.bankAccount.delete({ where: { id: account.id } }).catch(() => undefined);
+    expect(ownUpdate.status).toBe(200);
+    const accountAfterOwn = await prisma.bankAccount.findUniqueOrThrow({ where: { id: account.id } });
+    expect(accountAfterOwn.name).toBe('renamed-ok');
   });
 
   itif('cross-company reference: EXACT error + the controlled SUCCESS path', async () => {
@@ -363,7 +503,9 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
     const fyB = await prisma.fiscalYear.create({
       data: { companyId: B, code: 'GCB', nameFa: 'سال B', startDate: new Date('2026-01-01'), endDate: new Date('2026-12-31') },
     });
-    await prisma.chartOfAccount.create({ data: { companyId: A, code: 'BANK2', name: 'بانک ۲', type: 'ASSET' } });
+    fiscalYearIds.push(fyB.id);
+    const bank2 = await prisma.chartOfAccount.create({ data: { companyId: A, code: 'BANK2', name: 'بانک ۲', type: 'ASSET' } });
+    chartAccountIds.push(bank2.id); // R6-1: tracked
     const res = await req('all', A, 'POST', '/api/accounting/opening-balance/stage', {
       rows: [
         { accountCode: 'BANK2', debit: 1 },
