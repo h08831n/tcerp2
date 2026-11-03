@@ -355,9 +355,11 @@ describeIntegration('gate-c auth & session security (real guards, real socket)',
     expect(after.status).toBe(403);
   });
 
-  itif('DISABLED user: login + refresh rejected — and the live-token finding is recorded', async () => {
+  itif('DISABLED user: login + refresh rejected AND the live token loses access from the NEXT request', async () => {
     const userId = await mkUserSync('disable', [A], ['parties.view']);
     const tok = await login(await usernameOf('disable'));
+    const before = await bearer(tok.accessToken, A, '/api/parties');
+    expect(before.status).toBe(200); // active user works
 
     // Deactivate.
     await prisma.user.update({ where: { id: userId }, data: { status: 'DISABLED' } });
@@ -365,17 +367,11 @@ describeIntegration('gate-c auth & session security (real guards, real socket)',
     const loginRes = await login(await usernameOf('disable'));
     expect(loginRes.status).toBe(403); // login blocked
 
-    // Live access token: the JwtAuthGuard verifies the SIGNATURE only.
-    // Finding R6-S1: the disabled user keeps access until token expiry
-    // (≤15m TTL). Recorded — production behavior intentionally NOT changed
-    // without owner approval.
+    // R6-S1 (owner-approved policy): a DISABLED user must lose access from
+    // the FIRST subsequent request — even while the old access token is
+    // still signature-valid. 401/403 both satisfy "rejected"; 200 = BUG.
     const live = await bearer(tok.accessToken, A, '/api/parties');
-    expect([200, 403]).toContain(live.status);
-    if (live.status === 200) {
-      // CONFIRMED risk (mitigated by the 15m TTL): document precisely.
-      // eslint-disable-next-line no-console
-      console.warn('R6-S1 CONFIRMED: DISABLED user retained access with a live token');
-    }
+    expect([401, 403]).toContain(live.status);
   });
 
   itif('brute-force lockout: 5 consecutive failures lock the account; correct password also rejected while locked', async () => {

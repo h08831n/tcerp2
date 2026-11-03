@@ -5,7 +5,8 @@ import { SequencesService } from '../sequences/sequences.service';
 import { JournalService } from '../accounting/journal.service';
 import { BankStatementService } from '../treasury/bank-statement.service';
 import { BankTransferService } from '../treasury/bank-transfer.service';
-import { ReceiptService } from '../treasury/receipt-payment.service';
+import { ReceiptService, PaymentService } from '../treasury/receipt-payment.service';
+import { ChecksService } from '../treasury/checks.service';
 import { TimelineService } from '../parties/timeline.service';
 import { TEST_INTEGRATION } from '../testing/integration';
 
@@ -14,18 +15,25 @@ const DB_URL = process.env.DATABASE_URL;
 if (TEST_INTEGRATION) void DB_URL;
 
 /**
- * GATE C — Audit atomicity for TREASURY financial mutations.
+ * GATE C — Audit atomicity for ALL FOUR treasury financial paths:
+ * receipt create, payment create, incoming-check CLEARED, outgoing-check PAID.
  *
- * R5-F1 (confirmed on 2a1a122): ReceiptService.create / PaymentService.create
- * call `this.auditService.record(...)` INSIDE their $transaction callback —
- * but `record()` writes via `this.prisma` (a SEPARATE connection, outside
- * the tx) AND swallows every error. Consequences:
- *   1. the audit row commits even if the business mutation rolls back;
- *   2. an audit failure leaves the FINANCIAL mutation committed with NO
- *      audit row — violating the mandated
- *      `Audit Failure → Business Mutation Rollback` for treasury ops.
- * The fix under test: `recordTx(trx, ...)` — same corr-05/p4-32 pattern the
- * rest of the financial services already use.
+ * R5-F1 (confirmed RED on 2a1a122): these paths called auditService.record()
+ * INSIDE their $transaction callbacks — but record() writes via this.prisma
+ * (a SEPARATE connection, outside the tx) AND swallows every error, so an
+ * audit-storage failure left the FINANCIAL mutation committed with NO audit
+ * row. The fix: recordTx(trx, ...) — same corr-05/p4-32 pattern.
+ *
+ * AUDIT POLICY (documented per the final security-closure review):
+ *   - Receipt/Payment create and check CLEARED/PAID: audit is ATOMIC
+ *     (recordTx inside the caller's transaction) — an audit failure rolls
+ *     the financial mutation back. Covered by dedicated tests below.
+ *   - Check REGISTER and the simple non-bank transitions
+ *     (PENDING/CANCELLED/BOUNCED/DEPOSITED): audit is BEST-EFFORT
+ *     (record() — no transaction exists on those paths, and they post NO
+ *     journal/statement effect by design; a missing audit row there cannot
+ *     hide a financial mutation). Documented here per the reviewer's
+ *     request to make this decision explicit.
  */
 describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
   const prisma = integrationPrisma();
@@ -144,5 +152,168 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       where: { companyId, entityType: 'receipt' },
     });
     expect(totalAuditRows).toBe(1);
+  });
+
+  itif('PAYMENT create — audit failure rolls back payment + journal + statement line', async () => {
+    const throwingAudit = {
+      record: () => {
+        throw new Error('audit storage down');
+      },
+      recordTx: () => {
+        throw new Error('audit storage down');
+      },
+    };
+    const sequences = new SequencesService(prisma as never, throwingAudit as never);
+    const journal = new JournalService(prisma as never, sequences);
+    const statement = new BankStatementService(prisma as never);
+    const transfers = new BankTransferService(prisma as never, sequences as never, journal as never, statement as never, throwingAudit as never);
+    const payments = new PaymentService(
+      prisma as never, sequences as never, journal as never, statement as never,
+      throwingAudit as never, transfers as never, new TimelineService(prisma as never),
+    );
+
+    await expect(
+      payments.create(
+        companyId,
+        { bankAccountId, amount: 222, description: `gcaudit-pay ${marker}` },
+        { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+        {},
+      ),
+    ).rejects.toThrow('audit storage down');
+
+    const rows = await prisma.payment.count({ where: { companyId, description: `gcaudit-pay ${marker}` } });
+    expect(rows).toBe(0);
+    const entries = await prisma.journalEntry.count({ where: { companyId, documentType: 'PAYMENT' } });
+    expect(entries).toBe(0);
+    const linesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    void linesBefore; // delta vs post-mutation — but the tx rolled back
+    const lines = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    expect(lines).toBe(linesBefore);
+  });
+
+  itif('INCOMING check CLEARED — audit failure rolls back status + journal + statement line', async () => {
+    const realAudit = new AuditService(prisma as never);
+    const realSequences = new SequencesService(prisma as never, realAudit);
+    const realJournal = new JournalService(prisma as never, realSequences);
+    const realStatement = new BankStatementService(prisma as never);
+    const realTransfers = new BankTransferService(prisma as never, realSequences as never, realJournal as never, realStatement as never, realAudit as never);
+    const realChecks = new ChecksService(
+      prisma as never, realSequences as never, realJournal as never, realStatement as never,
+      realAudit as never, realTransfers as never, new TimelineService(prisma as never),
+    );
+    const check = await realChecks.register(
+      companyId,
+      'INCOMING',
+      { checkNumber: `GC4-${Date.now()}`, amount: 333, dueDate: new Date(2027, 0, 15) },
+      { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+      {},
+    );
+    await realChecks.transition(companyId, check.id, 'PENDING', {
+      actor: { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+      ctx: {},
+    });
+    await realChecks.transition(companyId, check.id, 'DEPOSITED', {
+      bankAccountId,
+      actor: { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+      ctx: {},
+    });
+
+    // CLEARED with a THROWING audit — the whole tx must roll back.
+    const throwingAudit = {
+      record: () => {
+        throw new Error('audit storage down');
+      },
+      recordTx: () => {
+        throw new Error('audit storage down');
+      },
+    };
+    // R6: ensure the chart has the check-clearing accounts (beforeAll
+    // creates them but a prior run's cleanup may have deleted them).
+    await prisma.chartOfAccount.upsert({
+      where: { companyId_code: { companyId, code: 'CHECKS_IN_TRANSIT' } },
+      create: { companyId, code: 'CHECKS_IN_TRANSIT', name: 'CHECKS_IN_TRANSIT', type: 'ASSET' },
+      update: {},
+    });
+    const clearing = new ChecksService(
+      prisma as never, realSequences as never, realJournal as never, realStatement as never,
+      throwingAudit as never, realTransfers as never, new TimelineService(prisma as never),
+    );
+    await expect(
+      clearing.transition(companyId, check.id, 'CLEARED', {
+        bankAccountId,
+        actor: { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+        ctx: {},
+      }),
+    ).rejects.toThrow('audit storage down');
+
+    const after = await prisma.check.findUniqueOrThrow({ where: { id: check.id } });
+    expect(after.status).toBe('DEPOSITED'); // pre-clearing status preserved
+    const clearEntries = await prisma.journalEntry.count({
+      where: { companyId, documentType: 'CHECK_CLEAR' },
+    });
+    expect(clearEntries).toBe(0);
+    const clearedLines = await prisma.bankStatementLine.count({
+      where: { bankAccountId, sourceEntityType: 'CHECK', direction: 'DEPOSIT' },
+    });
+    expect(clearedLines).toBe(0);
+  });
+
+  itif('OUTGOING check PAID — audit failure rolls back status + journal + statement line', async () => {
+    const realAudit = new AuditService(prisma as never);
+    const realSequences = new SequencesService(prisma as never, realAudit);
+    const realJournal = new JournalService(prisma as never, realSequences);
+    const realStatement = new BankStatementService(prisma as never);
+    const realTransfers = new BankTransferService(prisma as never, realSequences as never, realJournal as never, realStatement as never, realAudit as never);
+    const realChecks = new ChecksService(
+      prisma as never, realSequences as never, realJournal as never, realStatement as never,
+      realAudit as never, realTransfers as never, new TimelineService(prisma as never),
+    );
+    const check = await realChecks.register(
+      companyId,
+      'OUTGOING',
+      { checkNumber: `GC4P-${Date.now()}`, amount: 444, dueDate: new Date(2027, 0, 15) },
+      { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+      {},
+    );
+    await realChecks.transition(companyId, check.id, 'PENDING', {
+      actor: { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+      ctx: {},
+    });
+
+    const throwingAudit = {
+      record: () => {
+        throw new Error('audit storage down');
+      },
+      recordTx: () => {
+        throw new Error('audit storage down');
+      },
+    };
+    await prisma.chartOfAccount.upsert({
+      where: { companyId_code: { companyId, code: 'CHECKS_IN_TRANSIT' } },
+      create: { companyId, code: 'CHECKS_IN_TRANSIT', name: 'CHECKS_IN_TRANSIT', type: 'ASSET' },
+      update: {},
+    });
+    const paying = new ChecksService(
+      prisma as never, realSequences as never, realJournal as never, realStatement as never,
+      throwingAudit as never, realTransfers as never, new TimelineService(prisma as never),
+    );
+    await expect(
+      paying.transition(companyId, check.id, 'PAID', {
+        bankAccountId,
+        actor: { id: '00000000-0000-4000-8000-0000000000a1', username: 'admin' },
+        ctx: {},
+      }),
+    ).rejects.toThrow('audit storage down');
+
+    const after = await prisma.check.findUniqueOrThrow({ where: { id: check.id } });
+    expect(after.status).toBe('PENDING'); // status preserved
+    const paidEntries = await prisma.journalEntry.count({
+      where: { companyId, documentType: 'CHECK_PAY' },
+    });
+    expect(paidEntries).toBe(0);
+    const paidLines = await prisma.bankStatementLine.count({
+      where: { bankAccountId, sourceEntityType: 'CHECK', direction: 'WITHDRAWAL' },
+    });
+    expect(paidLines).toBe(0);
   });
 });

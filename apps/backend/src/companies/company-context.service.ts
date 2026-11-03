@@ -81,17 +81,25 @@ export class CompanyContextService {
   ): Promise<string | null> {
     if (!user) return null;
 
+    // R6-S1 (owner-approved policy): a DISABLED/LOCKED user resolves NO
+    // company → the PermissionsGuard then finds no permissions → 403 from
+    // the FIRST subsequent request, even while a previously-issued access
+    // token is still signature-valid. The user row is re-read here anyway
+    // (default-company resolution) — the status check rides on that EXISTING
+    // query, no added round-trip.
+    const row = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      select: { defaultCompanyId: true, status: true },
+    });
+    if (!row || row.status !== 'ACTIVE') return null;
+
     const headerValue = headerString(headers, 'x-company-id');
     if (headerValue) {
       const member = await this.isMember(user.id, headerValue);
       if (member) return headerValue;
     }
 
-    const row = await this.prisma.user.findUnique({
-      where: { id: user.id },
-      select: { defaultCompanyId: true },
-    });
-    if (row?.defaultCompanyId && (await this.isMember(user.id, row.defaultCompanyId))) {
+    if (row.defaultCompanyId && (await this.isMember(user.id, row.defaultCompanyId))) {
       return row.defaultCompanyId;
     }
     return null;
