@@ -1,7 +1,6 @@
 import {
   describeIntegration,
   integrationPrisma,
-  INTEGRATION_COMPANY_ID,
   disconnectIntegrationPrisma,
 } from '../testing/integration';
 import {
@@ -15,11 +14,17 @@ import {
 import { shiftDayKey, todayKey } from '../pricing/day';
 
 /**
- * p5-12 automation-inactive-customer: a seeded customer whose last sale is
- * older than the rule's N days is matched by the daily scan → a run row is
- * created (idempotencyKey `daily:{ruleId}:{date}:{partyId}`) and a
+ * p5-12 automation-inactive-customer: a customer whose last sale is older
+ * than the rule's N days is matched by the daily scan → a run row is created
+ * (idempotencyKey `daily:{ruleId}:{date}:{partyId}`) and a
  * CREATE_NOTIFICATION reminder lands for the record owner; re-running the
  * scan is fully idempotent (no duplicate run/notification).
+ *
+ * R6-P1 flake fix: the scan used to run over the SHARED integration company
+ * — as accumulation grew across months of suites, dailyScan crawled every
+ * party and exceeded the 60s budget (green in isolation, red in full-suite
+ * runs). The fixture now runs in a HERMETIC company so the scan cost is
+ * bounded by THIS spec's own data; cleanup deletes the company.
  */
 jest.setTimeout(60000);
 
@@ -27,6 +32,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
   const prisma = integrationPrisma();
   const marker = `p5-12-${Date.now()}`;
   let actorId = '';
+  let companyId = '';
   let partyId = '';
   let ruleId = '';
   let documentId = '';
@@ -34,12 +40,18 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
 
   beforeAll(async () => {
     actorId = await adminUserId(prisma);
-    const party = await createParty(prisma, ['CUSTOMER'], marker);
+    // R6-P1: HERMETIC company — the daily scan must never crawl the shared
+    // integration company's accumulated data.
+    const company = await prisma.company.create({
+      data: { nameFa: `p5-12-${marker}`, status: 'ACTIVE' },
+    });
+    companyId = company.id;
+    const party = await createParty(prisma, ['CUSTOMER'], marker, companyId);
     partyId = party.id;
     await prisma.party.update({ where: { id: partyId }, data: { ownerUserId: actorId } });
 
     // One old sale (90 days ago) → inactive for a 30-day rule.
-    const document = await createSalesDocumentRow(prisma, INTEGRATION_COMPANY_ID, {
+    const document = await createSalesDocumentRow(prisma, companyId, {
       marker,
       customerPartyId: partyId,
       salespersonUserId: actorId,
@@ -50,7 +62,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
 
     const rule = await prisma.automationRule.create({
       data: {
-        companyId: INTEGRATION_COMPANY_ID,
+        companyId,
         code: `P5-12-${marker}`,
         nameFa: 'یادآوری مشتری راکد',
         triggerType: 'CUSTOMER_INACTIVE_DAYS',
@@ -72,7 +84,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
 
   it('the daily scan creates ONE run + ONE notification for the inactive customer', async () => {
     const automation = automationService(prisma, publishingService(prisma, adapters));
-    const summaries = await automation.dailyScan({ companyId: INTEGRATION_COMPANY_ID, date: todayKey() });
+    const summaries = await automation.dailyScan({ companyId, date: todayKey() });
     const summary = summaries.find((s) => s.ruleId === ruleId);
     expect(summary).toBeDefined();
     expect(summary!.candidates).toBeGreaterThanOrEqual(1);
@@ -88,7 +100,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
     const notification = await prisma.notification.findFirstOrThrow({
       where: { userId: actorId, relatedEntityId: run.id },
     });
-    expect(notification.companyId).toBe(INTEGRATION_COMPANY_ID);
+    expect(notification.companyId).toBe(companyId);
     expect(notification.title).toContain('طرف قرارداد'); // {partyName} interpolated
 
     runsAfterFirstScan = await prisma.automationRun.count({ where: { ruleId } });
@@ -96,7 +108,7 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
 
   it('re-running the scan is idempotent (key prevents duplicate runs/SMS/notifications)', async () => {
     const automation = automationService(prisma, publishingService(prisma, adapters));
-    const summaries = await automation.dailyScan({ companyId: INTEGRATION_COMPANY_ID, date: todayKey() });
+    const summaries = await automation.dailyScan({ companyId, date: todayKey() });
     const summary = summaries.find((s) => s.ruleId === ruleId);
     expect(summary!.executed).toBe(0); // nothing new executed
 
@@ -117,12 +129,13 @@ describeIntegration('p5-12 automation-inactive-customer', () => {
   });
 
   afterAll(async () => {
-    await prisma.notification.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, relatedEntityType: { in: ['automation_run', 'automation_activity'] } } });
-    await prisma.queueJob.deleteMany({ where: { companyId: INTEGRATION_COMPANY_ID, jobType: { in: ['automation.run', 'sms.send'] } } });
+    await prisma.notification.deleteMany({ where: { companyId, relatedEntityType: { in: ['automation_run', 'automation_activity'] } } });
+    await prisma.queueJob.deleteMany({ where: { companyId, jobType: { in: ['automation.run', 'sms.send'] } } });
     await prisma.automationRun.deleteMany({ where: { ruleId } });
     await prisma.automationRule.deleteMany({ where: { id: ruleId } });
     await prisma.salesDocument.deleteMany({ where: { id: documentId } });
     await prisma.party.deleteMany({ where: { id: partyId } });
+    await prisma.company.delete({ where: { id: companyId } }).catch(() => undefined);
     await disconnectIntegrationPrisma();
   });
 });
