@@ -95,17 +95,21 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
     };
     const receipts = await prisma.receipt.findMany({ where: { bankAccountId } });
     const payments = await prisma.payment.findMany({ where: { bankAccountId } });
-    const entryIds = [...receipts, ...payments].map((r) => r.journalEntryId).filter((v): v is string => Boolean(v));
+    const checks = await prisma.check.findMany({ where: { companyId: A } });
+    const entryIds = [...receipts, ...payments, ...checks].map((r) => r.journalEntryId).filter((v): v is string => Boolean(v));
+    const sourceIds = [...receipts.map((r) => r.id), ...payments.map((p) => p.id), ...checks.map((c) => c.id)];
     await step('statementLines', () =>
-      prisma.bankStatementLine.deleteMany({ where: { sourceEntityId: { in: [...receipts.map((r) => r.id), ...payments.map((p) => p.id)] } } }));
+      prisma.bankStatementLine.deleteMany({ where: { sourceEntityId: { in: sourceIds } } }));
     await step('journalEntries', () =>
       prisma.journalEntry.deleteMany({ where: { id: { in: entryIds } } }));
+    await step('checks', () =>
+      prisma.check.deleteMany({ where: { id: { in: checks.map((c) => c.id) } } }));
     await step('receipts', () =>
       prisma.receipt.deleteMany({ where: { id: { in: receipts.map((r) => r.id) } } }));
     await step('payments', () =>
       prisma.payment.deleteMany({ where: { id: { in: payments.map((p) => p.id) } } }));
     await step('auditLog', () =>
-      prisma.auditLog.deleteMany({ where: { companyId: A, entityType: { in: ['receipt', 'payment'] } } }));
+      prisma.auditLog.deleteMany({ where: { companyId: A, entityType: { in: ['receipt', 'payment', 'check'] } } }));
     await step('timeline', () =>
       prisma.timelineEvent.deleteMany({ where: { companyId: A } }));
     await step('bankAccounts', () =>
