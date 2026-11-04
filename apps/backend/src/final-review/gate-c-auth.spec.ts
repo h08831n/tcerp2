@@ -152,26 +152,25 @@ describeIntegration('gate-c auth & session security (real guards, real socket)',
     nestApp.use(require('cookie-parser')());
     await nestApp.init();
 
-    // The seeded admin password in tcerp_test is unknown to this spec —
-    // reset it to the known test password (test DB only, documented).
-    const admin = await prisma.user.findUniqueOrThrow({ where: { username: 'admin' }, select: { id: true } });
-    await prisma.user.update({
-      where: { id: admin.id },
-      data: { passwordHash: bcrypt.hashSync(PASSWORD, 8), mustChangePassword: false, status: 'ACTIVE' },
+    // R6-4: a DEDICATED admin user for this spec — the SHARED seeded admin
+    // account is never touched. The 'admin' role (ALL permissions) is
+    // assigned in company A via UserCompanyRole.
+    const adminRoleId = (await prisma.role.findUniqueOrThrow({ where: { code: 'admin' }, select: { id: true } })).id;
+    const adminUsername = `gca-gcadmin-${Date.now()}`;
+    const adminUser = await prisma.user.create({
+      data: {
+        username: adminUsername,
+        passwordHash: bcrypt.hashSync(PASSWORD, 8),
+        status: 'ACTIVE',
+        mustChangePassword: false,
+      },
     });
-    await prisma.userCompany.upsert({
-      where: { userId_companyId: { userId: admin.id, companyId: A } },
-      create: { userId: admin.id, companyId: A },
-      update: {},
+    createdUsers.push(adminUser.id);
+    await prisma.userCompany.create({ data: { userId: adminUser.id, companyId: A } });
+    await prisma.userCompanyRole.create({
+      data: { userId: adminUser.id, companyId: A, roleId: adminRoleId, assignedBy: null },
     });
-    // The seeded 'admin' role carries ALL permissions — assign it in A so
-    // users.reset_password passes the permission guard.
-    const adminRole = await prisma.role.findUniqueOrThrow({ where: { code: 'admin' }, select: { id: true } });
-    await prisma.userCompanyRole.upsert({
-      where: { userId_companyId_roleId: { userId: admin.id, companyId: A, roleId: adminRole.id } },
-      create: { userId: admin.id, companyId: A, roleId: adminRole.id, assignedBy: null },
-      update: {},
-    });
+    usernameMap.set('gcadmin', adminUsername);
     const server = nestApp.getHttpServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -315,7 +314,7 @@ describeIntegration('gate-c auth & session security (real guards, real socket)',
     await prisma.refreshToken.findFirstOrThrow({ where: { userId, revokedAt: null } });
 
     // Admin resets the user's password (users.reset_password).
-    const admin = await login('admin');
+    const admin = await login(await usernameOf('gcadmin'));
     const res = await fetch(`${baseUrl}/api/users/${userId}/password`, {
       method: 'POST',
       headers: {
@@ -372,6 +371,23 @@ describeIntegration('gate-c auth & session security (real guards, real socket)',
     // still signature-valid. 401/403 both satisfy "rejected"; 200 = BUG.
     const live = await bearer(tok.accessToken, A, '/api/parties');
     expect([401, 403]).toContain(live.status);
+  });
+
+  itif('R6-S1: DISABLED user /api/auth/me (JwtAuthGuard-only route, no PermissionsGuard) → rejected', async () => {
+    const userId = await mkUserSync('me-disabled', [A], []);
+    const tok = await login(await usernameOf('me-disabled'));
+    // ACTIVE user → /api/auth/me works.
+    const before = await bearer(tok.accessToken, null, '/api/auth/me');
+    expect(before.status).toBe(200);
+
+    // Deactivate.
+    await prisma.user.update({ where: { id: userId }, data: { status: 'DISABLED' } });
+
+    // RED on acdd2ef: JwtAuthGuard verifies the signature only and
+    // /api/auth/me has no @RequirePermissions → PermissionsGuard
+    // short-circuits → 200 for a DISABLED user (security gap).
+    const me = await bearer(tok.accessToken, null, '/api/auth/me');
+    expect([401, 403]).toContain(me.status);
   });
 
   itif('brute-force lockout: 5 consecutive failures lock the account; correct password also rejected while locked', async () => {

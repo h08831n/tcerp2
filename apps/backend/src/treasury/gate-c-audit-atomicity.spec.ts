@@ -85,20 +85,56 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
   });
 
   afterAll(async () => {
+    const failures: string[] = [];
+    const step = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+      try {
+        await fn();
+      } catch (error) {
+        failures.push(`${label}: ${String(error)}`);
+      }
+    };
     const receipts = await prisma.receipt.findMany({ where: { bankAccountId } });
     const payments = await prisma.payment.findMany({ where: { bankAccountId } });
     const entryIds = [...receipts, ...payments].map((r) => r.journalEntryId).filter((v): v is string => Boolean(v));
-    await prisma.bankStatementLine.deleteMany({ where: { sourceEntityId: { in: [...receipts.map((r) => r.id), ...payments.map((p) => p.id)] } } });
-    await prisma.journalEntry.deleteMany({ where: { id: { in: entryIds } } });
-    await prisma.receipt.deleteMany({ where: { id: { in: receipts.map((r) => r.id) } } });
-    await prisma.payment.deleteMany({ where: { id: { in: payments.map((p) => p.id) } } });
-    await prisma.auditLog.deleteMany({ where: { companyId: A, entityType: { in: ['receipt', 'payment'] } } });
-    await prisma.timelineEvent.deleteMany({ where: { companyId: A } }).catch(() => undefined);
-    await prisma.bankAccount.deleteMany({ where: { id: bankAccountId } }).catch(() => undefined);
-    await prisma.chartOfAccount.deleteMany({ where: { companyId: A } }).catch(() => undefined);
-    await prisma.sequence.deleteMany({ where: { companyId: A } }).catch(() => undefined);
-    await prisma.company.deleteMany({ where: { id: { in: createdCompanyIds } } }).catch(() => undefined);
-    await disconnectIntegrationPrisma();
+    await step('statementLines', () =>
+      prisma.bankStatementLine.deleteMany({ where: { sourceEntityId: { in: [...receipts.map((r) => r.id), ...payments.map((p) => p.id)] } } }));
+    await step('journalEntries', () =>
+      prisma.journalEntry.deleteMany({ where: { id: { in: entryIds } } }));
+    await step('receipts', () =>
+      prisma.receipt.deleteMany({ where: { id: { in: receipts.map((r) => r.id) } } }));
+    await step('payments', () =>
+      prisma.payment.deleteMany({ where: { id: { in: payments.map((p) => p.id) } } }));
+    await step('auditLog', () =>
+      prisma.auditLog.deleteMany({ where: { companyId: A, entityType: { in: ['receipt', 'payment'] } } }));
+    await step('timeline', () =>
+      prisma.timelineEvent.deleteMany({ where: { companyId: A } }));
+    await step('bankAccounts', () =>
+      prisma.bankAccount.deleteMany({ where: { id: bankAccountId } }));
+    await step('chartAccounts', () =>
+      prisma.chartOfAccount.deleteMany({ where: { companyId: A } }));
+    await step('sequences', () =>
+      prisma.sequence.deleteMany({ where: { companyId: A } }));
+    await step('companies', () =>
+      prisma.company.deleteMany({ where: { id: { in: createdCompanyIds } } }));
+    // Verify zero leftovers for this spec's fixture space.
+    await step('verify', async () => {
+      const leftovers: string[] = [];
+      const checksLeft = await prisma.check.count({ where: { companyId: A } });
+      const receiptsLeft = await prisma.receipt.count({ where: { companyId: A } });
+      const paymentsLeft = await prisma.payment.count({ where: { companyId: A } });
+      const companiesLeft = await prisma.company.count({ where: { id: { in: createdCompanyIds } } });
+      const bankAccountsLeft = await prisma.bankAccount.count({ where: { id: bankAccountId } });
+      if (checksLeft !== 0) leftovers.push(`checks=${checksLeft}`);
+      if (receiptsLeft !== 0) leftovers.push(`receipts=${receiptsLeft}`);
+      if (paymentsLeft !== 0) leftovers.push(`payments=${paymentsLeft}`);
+      if (companiesLeft !== 0) leftovers.push(`companies=${companiesLeft}`);
+      if (bankAccountsLeft !== 0) leftovers.push(`bankAccounts=${bankAccountsLeft}`);
+      if (leftovers.length > 0) failures.push(`LEFTOVER ROWS: ${leftovers.join(', ')}`);
+    });
+    await disconnectIntegrationPrisma().catch((e: unknown) => failures.push(`disconnect: ${String(e)}`));
+    if (failures.length > 0) {
+      throw new Error(`GATE-C-AUDIT CLEANUP FAILURES:\n- ${failures.join('\n- ')}`);
+    }
   });
 
   const itif = TEST_INTEGRATION ? it : it.skip;
@@ -129,6 +165,7 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       },
     };
     const receipts = makeReceiptService(brokenAudit as unknown as AuditService);
+    const receiptLinesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
 
     // The mandated behavior: the create THROWS and NOTHING survives.
     await expect(
@@ -144,8 +181,9 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       where: { description: `gcaudit-broken ${marker}` },
     });
     expect(persisted).toBeNull();
-    // No NEW audit row may appear (the company's pre-existing rows are from
-    // the success-path test).
+    // DB re-read: statement line count UNCHANGED (no partial write survived).
+    const receiptLinesAfter = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    expect(receiptLinesAfter).toBe(receiptLinesBefore);
     // Only the SUCCESS-path audit row exists for this company — the failed
     // attempt contributed NEITHER a receipt NOR an audit row.
     const totalAuditRows = await prisma.auditLog.count({
@@ -172,6 +210,7 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       throwingAudit as never, transfers as never, new TimelineService(prisma as never),
     );
 
+    const linesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
     await expect(
       payments.create(
         companyId,
@@ -185,10 +224,8 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
     expect(rows).toBe(0);
     const entries = await prisma.journalEntry.count({ where: { companyId, documentType: 'PAYMENT' } });
     expect(entries).toBe(0);
-    const linesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
-    void linesBefore; // delta vs post-mutation — but the tx rolled back
-    const lines = await prisma.bankStatementLine.count({ where: { bankAccountId } });
-    expect(lines).toBe(linesBefore);
+    const linesAfter = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    expect(linesAfter).toBe(linesBefore);
   });
 
   itif('INCOMING check CLEARED — audit failure rolls back status + journal + statement line', async () => {
@@ -238,6 +275,10 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       prisma as never, realSequences as never, realJournal as never, realStatement as never,
       throwingAudit as never, realTransfers as never, new TimelineService(prisma as never),
     );
+    const clearEntriesBefore = await prisma.journalEntry.count({
+      where: { companyId, documentType: 'CHECK_CLEAR' },
+    });
+    const clearLinesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
     await expect(
       clearing.transition(companyId, check.id, 'CLEARED', {
         bankAccountId,
@@ -248,14 +289,12 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
 
     const after = await prisma.check.findUniqueOrThrow({ where: { id: check.id } });
     expect(after.status).toBe('DEPOSITED'); // pre-clearing status preserved
-    const clearEntries = await prisma.journalEntry.count({
+    const clearEntriesAfter = await prisma.journalEntry.count({
       where: { companyId, documentType: 'CHECK_CLEAR' },
     });
-    expect(clearEntries).toBe(0);
-    const clearedLines = await prisma.bankStatementLine.count({
-      where: { bankAccountId, sourceEntityType: 'CHECK', direction: 'DEPOSIT' },
-    });
-    expect(clearedLines).toBe(0);
+    expect(clearEntriesAfter).toBe(clearEntriesBefore); // NO new journal entry
+    const clearLinesAfter = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    expect(clearLinesAfter).toBe(clearLinesBefore); // NO new statement line
   });
 
   itif('OUTGOING check PAID — audit failure rolls back status + journal + statement line', async () => {
@@ -297,6 +336,10 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
       prisma as never, realSequences as never, realJournal as never, realStatement as never,
       throwingAudit as never, realTransfers as never, new TimelineService(prisma as never),
     );
+    const paidEntriesBefore = await prisma.journalEntry.count({
+      where: { companyId, documentType: 'CHECK_PAY' },
+    });
+    const paidLinesBefore = await prisma.bankStatementLine.count({ where: { bankAccountId } });
     await expect(
       paying.transition(companyId, check.id, 'PAID', {
         bankAccountId,
@@ -307,13 +350,11 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
 
     const after = await prisma.check.findUniqueOrThrow({ where: { id: check.id } });
     expect(after.status).toBe('PENDING'); // status preserved
-    const paidEntries = await prisma.journalEntry.count({
+    const paidEntriesAfter = await prisma.journalEntry.count({
       where: { companyId, documentType: 'CHECK_PAY' },
     });
-    expect(paidEntries).toBe(0);
-    const paidLines = await prisma.bankStatementLine.count({
-      where: { bankAccountId, sourceEntityType: 'CHECK', direction: 'WITHDRAWAL' },
-    });
-    expect(paidLines).toBe(0);
+    expect(paidEntriesAfter).toBe(paidEntriesBefore); // NO new journal entry
+    const paidLinesAfter = await prisma.bankStatementLine.count({ where: { bankAccountId } });
+    expect(paidLinesAfter).toBe(paidLinesBefore); // NO new statement line
   });
 });

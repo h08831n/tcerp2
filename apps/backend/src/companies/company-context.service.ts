@@ -81,17 +81,14 @@ export class CompanyContextService {
   ): Promise<string | null> {
     if (!user) return null;
 
-    // R6-S1 (owner-approved policy): a DISABLED/LOCKED user resolves NO
-    // company → the PermissionsGuard then finds no permissions → 403 from
-    // the FIRST subsequent request, even while a previously-issued access
-    // token is still signature-valid. The user row is re-read here anyway
-    // (default-company resolution) — the status check rides on that EXISTING
-    // query, no added round-trip.
+    // R6-S1 note: user status is enforced centrally in JwtAuthGuard (one
+    // query per request covering ALL non-public routes). This method does
+    // NOT duplicate the check — it only resolves the company.
     const row = await this.prisma.user.findUnique({
       where: { id: user.id },
-      select: { defaultCompanyId: true, status: true },
+      select: { defaultCompanyId: true },
     });
-    if (!row || row.status !== 'ACTIVE') return null;
+    if (!row) return null;
 
     const headerValue = headerString(headers, 'x-company-id');
     if (headerValue) {

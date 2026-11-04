@@ -16,7 +16,7 @@ describe('02 user-company-access-isolation', () => {
   function makeService(
     membership: unknown | null,
     memberships: unknown[] = [],
-    userRow: { defaultCompanyId: string | null; status?: string } | null = null,
+    userRow: { defaultCompanyId: string | null } | null = null,
   ) {
     const prisma = {
       userCompany: {
@@ -62,7 +62,7 @@ describe('02 user-company-access-isolation', () => {
         { companyId: 'company-A', company: { nameFa: 'A' } },
         { companyId: 'company-B', company: { nameFa: 'B' } },
       ],
-      { defaultCompanyId: 'company-B', status: 'ACTIVE' },
+      { defaultCompanyId: 'company-B' },
     );
     const companyId = await service.requireCompanyId(user, {});
     expect(companyId).toBe('company-B');
@@ -118,7 +118,7 @@ describe('02 user-company-access-isolation', () => {
     const fallback = makeService(
       { userId: 'user-1', companyId: 'company-B' },
       [],
-      { defaultCompanyId: 'company-B', status: 'ACTIVE' },
+      { defaultCompanyId: 'company-B' },
     );
     expect(
       await fallback.service.resolveLenientCompanyId(user, { 'x-company-id': 'company-Z' }),
