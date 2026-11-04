@@ -113,7 +113,7 @@ Merge PR #3 (Gate C): commit `1600741` روی main.
 حساب `RETAINED_EARNINGS` (کد: `RETAINED_EARNINGS`، نوع: EQUITY) اضافه شود. Closing entries:
 - Dr حساب‌های درآمد (با ماندهٔ بستانکار)
 - Cr حساب‌های هزینه (با ماندهٔ بدهکار)
-- خالص → Dr/Cr RETAINED_EQUITY
+- خالص → Dr/Cr RETAINED_EARNINGS
 
 افتتاحیهٔ سال بعد: فقط حساب‌های دائمی (ASSET/LIABILITY/EQUITY) — حساب‌های موقت صفر شده‌اند.
 

@@ -1,47 +1,62 @@
-# TCERP2 — مستند طراحی پورتال مشتری (Gate D-2)
+# TCERP2 — مستند طراحی پورتال مشتری (Gate D-2) — v2 revised
 
 > این سند برای تأیید مالک ارائه می‌شود — هیچ کدی پیاده‌سازی نمی‌شود تا تأیید دریافت شود.
+> v2: اصلاح Session state machine، HMAC OTP، تطبیق با PortalAccount/PartyPhone/FileBlob موجود، API contract بازنگری‌شده، Migration بازنگری‌شده.
 
 ---
 
-## ۱. هویت مشتری و ارتباط با Party و Company
+## ۱. هویت مشتری و ارتباط با PortalAccount
 
-پورتال بر اساس `Party` (طرف‌حساب با نقش CUSTOMER) عمل می‌کند. یک موبایل تأییدشده ممکن است به چند `Party` در چند `Company` مرتبط باشد:
+پورتال بر اساس **PortalAccount** (مدل موجود در schema — company_id + party_id + verified_mobile + status) عمل می‌کند. PortalAccount Status enum: `PENDING | ACTIVE | SUSPENDED`.
+
+- PENDING: ثبت‌شده ولی موبایل تأیید نشده → نمی‌تواند session بسازد
+- ACTIVE: موبایل تأیید شده → مجاز به login
+- SUSPENDED: توسط admin مسدود → login رد می‌شود
+
+**جریان تأیید:** PortalAccount به‌صورت PENDING توسط admin ساخته می‌شود (users.reset_password pattern) → OTP verify → status → ACTIVE.
+
+**چند-شرکتی:** یک موبایل می‌تواند در چند PortalAccount (هر کدام با companyId متفاوت) باشد — constraint `@@unique([companyId, verifiedMobile])` تضمین می‌کند در هر شرکت فقط یک PortalAccount برای هر موبایل وجود دارد.
+
+**isPrimary در PartyPhone ≠ verified:** PortalAccount.verifiedMobile مستقل است و توسط admin تنظیم می‌شود — نه از PartyPhone.isPrimary.
+
+---
+
+## ۲. State Machine دقیق
 
 ```
-Party (companyId=X, mobile=0912..., role=CUSTOMER)
-Party (companyId=Y, mobile=0912..., role=CUSTOMER)
+REQUEST_OTP → VERIFY_OTP → [single account] → ACTIVE_SESSION
+                            → [multiple accounts] → PENDING_SELECTION → (select) → ACTIVE_SESSION
 ```
 
-پس از تأیید OTP، اگر بیش از یک (companyId, partyId) یافت شود، کاربر انتخاب می‌کند.
-Session به یک جفت (companyId, partyId) مقید می‌شود — تغییر شرکت = login مجدد با همان OTP.
+| State | توضیح |
+|---|---|
+| REQUEST_OTP | کاربر شماره موبایل می‌دهد؛ کد ارسال می‌شود |
+| VERIFY_OTP | کاربر کد را ارسال می‌کند؛ درستی بررسی می‌شود |
+| PENDING_SELECTION | بیش از یک PortalAccount فعال با این موبایل — کاربر باید انتخاب کند |
+| ACTIVE_SESSION | session نهایی به (companyId, partyId) مقید شده |
+
+- اگر فقط یک PortalAccount ACTIVE با این موبایل باشد → پرش مستقیم به ACTIVE_SESSION
+- اگر هیچ PortalAccount ACTIVE وجود نداشته باشد (PENDING/SUSPENDED/نبودن) → پیام یکنواخت «کد ارسال شد» (بدون افشا) — ولی session ساخته نمی‌شود
 
 ---
 
-## ۲. شماره موبایل تأییدشده
-
-- منبع: `PartyPhone` با `kind=MOBILE` و `isPrimary=true` — شماره نرمال‌شده (normalizeIranMobile)
-- شرط: پارتی باید CUSTOMER باشد و `archivedAt IS NULL` و شرکت `ACTIVE`
-- موبایل‌های تکراری بین پارتی‌ها: مجاز (هر پارتی مستقل است) — portal lookup هر دو را می‌یابد
-- **جلوگیری از اتصال خودکار شمارهٔ مبهم:** اگر یک موبایل به چند پارتی متصل باشد، portal lookup تنها {matched, linked} را برمی‌گرداند و سشن بدون انتخاب صریح کاربر ساخته نمی‌شود
-
----
-
-## ۳. OTP
+## ۳. OTP امن
 
 | پارامتر | مقدار | توضیح |
 |---|---|---|
 | طول کد | ۶ رقم | `crypto.randomInt(100000, 999999)` |
-| TTL | ۲ دقیقه | پس از انقضا رد می‌شود |
-| حداکثر تلاش | ۳ | بعد از ۳ تلاش ناموفق، کد باطل و باید درخواست جدید |
-| Rate limit | ۱ درخواست در دقیقه | به‌ازای هر شماره موبایل |
-| ذخیره‌سازی | hash (sha256) در جدول `portal_otp_codes` | کد خام هرگز ذخیره نمی‌شود |
-| Replay | کد مصرف‌شده بلافاصله حذف می‌شود | استفادهٔ مجدد → رد |
-| حملات暴力 | Rate limit + max attempts | بریوت‌فورس ۶ رقم = ۱M حالت — با rate limit و ۳ تلاش عملاً غیرممکن |
+| TTL | ۲ دقیقه | |
+| حداکثر تلاش | ۳ | اتمیک: `updateMany({ where: { attempts: { lt: 3 } } })` — اگر count=0، کد باطل شده |
+| HMAC | `HMAC-SHA256(serverSecret, challengeId + code)` | به‌جای sha256 ساده — secret سرور از config |
+| Challenge ID | UUID تصادفی | در response ارسال می‌شود؛ verify-otp نیاز به challengeId دارد |
+| مصرف اتمیک | `updateMany({ where: { consumed: false, attempts: { lt: 3 } }, data: { consumed: true } })` | اگر count=0 → قبلاً مصرف شده یا باطل |
+| Rate limit | ۱ درخواست OTP در دقیقه به‌ازای هر موبایل + ۱۰ در ساعت به‌ازای هر IP | |
+| Replay | کد مصرف‌شده → consumed=true → رد | |
+| Resend | کد قبلی باطل (consumed=true) + کد جدید با challengeId جدید | |
+| ذخیره‌سازی | HMAC hash در DB؛ **کد خام هرگز** | |
 
-### جریان
-1. `POST /api/portal/request-otp` body: `{mobile, companyId?}` — نرمال‌سازی → lookup پارتی‌های CUSTOMER با این موبایل → اگر هیچ: **پیام یکسان** «کد ارسال شد» (بدون افشا) → تولید کد → ذخیرهٔ hash → ارسال SMS
-2. `POST /api/portal/verify-otp` body: `{mobile, code}` — بررسی hash + TTL + تلاش → اگر موفق: ساخت session → Set-Cookie → بازگرداندن {companyId, partyId, companyName} (بدون دادهٔ مالی)
+### جلوگیری از Enumeration
+پیام خطای **یکنواخت** برای: موبایل ناموجود، کد اشتباه، کد منقضی، تلاش بیش از حد. response: `{error: 'INVALID_OTP'}` — بدون تفکیک علت.
 
 ---
 
@@ -50,127 +65,118 @@ Session به یک جفت (companyId, partyId) مقید می‌شود — تغی�
 | پارامتر | مقدار |
 |---|---|
 | Token | ۴۸ بایت تصادفی (hex) |
-| ذخیره‌سازی | `portal_sessions` جدول — `tokenHash` (sha256)، `companyId`، `partyId`، `expiresAt` |
+| ذخیره‌سازی | hash (HMAC-SHA256 با serverSecret) در `portal_sessions.tokenHash` |
 | Cookie | `portal_session` HttpOnly + SameSite=Lax + path=/api/portal + TTL ۲۴ ساعت |
-| Logout | `POST /api/portal/logout` → حذف session row + clearCookie |
-| Revocation | حذف session → درخواست‌های بعدی 401 |
+| Secure | در production (`NODE_ENV=production` → `secure: true`) |
+| Logout | حذف session row + clearCookie |
+| CSRF | SameSite=Lax + JSON-only API + Content-Type check — فرم HTML cross-site نمی‌تواند JSON با Content-Type درست بفرستد |
+
+**Token خام هرگز در response JSON برنمی‌گردد** — فقط از طریق Set-Cookie header.
 
 ---
 
-## ۵. جلوگیری از Enumeration شماره موبایل
+## ۵. CSRF برای مسیرهای Cookie-based
 
-- درخواست OTP و verify-OTP: پیام خطای **یکنواخت** برای «شماره یافت نشد»، «کد اشتباه»، «کد منقضی»
-- `portalLookup` تنها {matched, linked} برمی‌گرداند — بدون نام، بدهی، شناسه
-- اگر یک موبایل در هیچ شرکتی نباشد: همان پیام «کد ارسال شد» (بدون ساخت کد واقعی — یا با ساخت کد بی‌اثر)
+- SameSite=Lax: مرورگر cookie را فقط در درخواست‌های same-site و top-level GET navigation می‌فرستد
+- JSON-only API: `Content-Type: application/json` از فرم HTML cross-site قابل ارسال نیست
+- Refresh/login از مسیر cookie-scoped (/api/auth و /api/portal) — خطر CSRF محدود به همان مسیرها
+- **تصمیم:** CSRF token اضافی لازم نیست (SameSite=Lax کافی برای JSON API)؛ اگر در آینده فرم HTML اضافه شود، reconsider شود
 
 ---
 
-## ۶. Company + Party Scope در هر Query
+## ۶. Company + Party Scope
 
-هر query سرویس پورتال صراحتاً `companyId` و `partyId` را از session می‌گیرد:
+هر query از session می‌خواند (نه از ورودی کاربر):
 
 ```typescript
-const orders = await prisma.salesDocument.findMany({
-  where: { companyId: session.companyId, customerPartyId: session.partyId },
+const session = await prisma.portalSession.findUnique({
+  where: { tokenHash: hash },
+  include: { portalAccount: { include: { party: true, company: true } } },
 });
+if (!session || session.expiresAt < new Date()) throw new UnauthorizedError('Session expired');
+// session.portalAccount.companyId و session.portalAccount.partyId از DB می‌آیند
 ```
 
-IDOR غیرممکن است چون session به یک (companyId, partyId) مقید است و query از session می‌خواند نه از ورودی کاربر.
-
 ---
 
-## ۷. سفارش‌ها، بارگیری‌ها و مانده بدهی قابل نمایش
+## ۷. داده‌های قابل نمایش
 
-| داده | منبع | فیلتر |
-|---|---|---|
-| سفارش‌های فروش | `salesDocument` + `salesLine` | `companyId + customerPartyId` |
-| بارگیری‌های مرتبط | `loading` (via loadingLine → allocation → salesLine → salesDocument) | همان scope |
-| ماندهٔ بدهی | `partyOperationalBalance` | `companyId + partyId` |
-| فایل‌های سفارش | `file` + `fileEntity` | `entityType='sales_document'` + documentId |
-| وضعیت فاکتور مؤدیان | `salesTaxInvoice` | documentId |
-
----
-
-## ۸. حذف اطلاعات محرمانه
-
-| داده | وضعیت در پورتال |
+| داده | منبع (روابط Prisma واقعی) |
 |---|---|
-| نام راننده / شماره تماس | مخفی (`driverInfoRestricted` gate موجود) |
-| نام تأمین‌کننده | مخفی (allocations فقط برای داخلی) |
-| قیمت خرید / حاشیه سود | مخفی |
-| اسناد حسابداری داخلی | مخفی |
-| شناسهٔ پارتی‌های دیگر | مخفی |
+| سفارش‌های فروش | `salesDocument.findMany({ where: { companyId: pa.companyId, customerPartyId: pa.partyId } })` |
+| بارگیری‌های مرتبط | `loading.findMany({ where: { companyId: pa.companyId, customerPartyId: pa.partyId } })` |
+| ماندهٔ بدهی | `partyOperationalBalance.findUnique({ where: { companyId_partyId: { companyId: pa.companyId, partyId: pa.partyId } } })` |
+| فایل‌های متصل | `fileAttachment.findMany({ where: { companyId: pa.companyId, entityType: 'sales_document', entityId: { in: salesDocIds } } })` + `fileBlob.findMany` |
+
+**مخفی:** راننده (driverInfoRestricted gate موجود)، تأمین‌کننده، قیمت خرید، حاشیه سود، اسناد حسابداری، شناسهٔ پارتی‌های دیگر
 
 ---
 
-## ۹. مدل داده (Migration افزایشی)
+## ۸. مدل داده (Migration افزایشی — بازنگری‌شده)
+
+تغییرات فقط **جدول‌های جدید** هستند. `PortalAccount` موجود استفاده می‌شود.
 
 ```sql
--- Migration: 20241104000000_portal_auth
+-- Migration: 20241105000000_portal_auth
 CREATE TABLE portal_otp_codes (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  mobile      VARCHAR(20) NOT NULL,
-  code_hash   CHAR(64) NOT NULL,  -- sha256 hex
-  attempts    INT DEFAULT 0,
-  expires_at  TIMESTAMPTZ(6) NOT NULL,
-  created_at  TIMESTAMPTZ(6) DEFAULT now()
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mobile        VARCHAR(20) NOT NULL,       -- نرمال‌شده
+  challenge_id  UUID NOT NULL UNIQUE,       -- هر challenge یک کد
+  code_hmac     CHAR(64) NOT NULL,          -- HMAC-SHA256(secret, challengeId + code)
+  attempts      INT DEFAULT 0,
+  consumed      BOOLEAN DEFAULT FALSE,
+  expires_at    TIMESTAMPTZ(6) NOT NULL,
+  created_at    TIMESTAMPTZ(6) DEFAULT now()
 );
 CREATE INDEX idx_portal_otp_mobile ON portal_otp_codes(mobile, expires_at);
 
 CREATE TABLE portal_sessions (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  token_hash  CHAR(64) NOT NULL UNIQUE,
-  company_id  UUID NOT NULL REFERENCES companies(id),
-  party_id    UUID NOT NULL REFERENCES parties(id),
-  created_at  TIMESTAMPTZ(6) DEFAULT now(),
-  expires_at  TIMESTAMPTZ(6) NOT NULL
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token_hash   CHAR(64) NOT NULL UNIQUE,   -- HMAC-SHA256(secret, token)
+  portal_account_id UUID NOT NULL REFERENCES portal_accounts(id),
+  created_at   TIMESTAMPTZ(6) DEFAULT now(),
+  expires_at   TIMESTAMPTZ(6) NOT NULL
 );
-CREATE INDEX idx_portal_sessions_party ON portal_sessions(party_id, expires_at);
+CREATE INDEX idx_portal_sessions_account ON portal_sessions(portal_account_id, expires_at);
 ```
-
-هر دو جدول جدید — بدون تغییر جدول‌های موجود. تست Rollback: `prisma migrate deploy` روی DB خالی و DB موجود.
 
 ---
 
-## ۱۰. API Contract
+## ۹. API Contract (بازنگری‌شده)
 
 | Method | Path | Auth | Body/Query | Response |
 |---|---|---|---|---|
-| POST | /api/portal/request-otp | @Public | {mobile, companyId?} | {sent: true} |
-| POST | /api/portal/verify-otp | @Public | {mobile, code} | {token, companies: [{companyId, partyId, nameFa}]} |
-| POST | /api/portal/select-company | @Public (session) | {companyId} | {companyId, partyId} |
-| GET | /api/portal/me | portal session | — | {partyId, companyId, companyName} |
-| GET | /api/portal/orders | portal session | ?status=&limit= | {items} |
-| GET | /api/portal/loadings | portal session | ?salesDocumentId= | {items} |
-| GET | /api/portal/debt | portal session | — | {balance, currency} |
-| POST | /api/portal/logout | portal session | — | {success: true} |
+| POST | /api/portal/request-otp | @Public | {mobile} | {challengeId, sent: true} |
+| POST | /api/portal/verify-otp | @Public | {mobile, challengeId, code} | single: Set-Cookie + {portalAccountId} — multi: {pendingSelection: [{portalAccountId, companyName}]} |
+| POST | /api/portal/select-company | @Public + PENDING_SELECTION cookie | {portalAccountId} | Set-Cookie (ACTIVE_SESSION) + {companyId, partyId} |
+| GET | /api/portal/me | ACTIVE_SESSION | — | {partyId, companyId, companyName} |
+| GET | /api/portal/orders | ACTIVE_SESSION | ?status=&limit= | {items} |
+| GET | /api/portal/loadings | ACTIVE_SESSION | ?salesDocumentId= | {items} |
+| GET | /api/portal/debt | ACTIVE_SESSION | — | {balance, currency} |
+| POST | /api/portal/logout | ACTIVE_SESSION | — | {success: true} |
 
 ---
 
-## ۱۱. تست HTTP واقعی و IDOR
+## ۱۰. تست HTTP واقعی و IDOR (acceptance criteria)
 
-- **دو شرکت مستقل:** مشتری A و مشتری B — session شرکت A نمی‌تواند دادهٔ شرکت B را ببیند
+- **دو شرکت مستقل:** session شرکت A نمی‌تواند دادهٔ شرکت B را ببیند (x-company-id forgery هم)
 - **دو مشتری در یک شرکت:** session مشتری ۱ نمی‌تواند سفارش مشتری ۲ را ببیند
-- **OTP enumeration:** درخواست OTP برای موبایل ناموجود → همان پیام «کد ارسال شد»
-- **OTP replay:** استفادهٔ مجدد کد مصرف‌شده → رد
+- **OTP enumeration:** درخواست OTP برای موبایل ناموجود → همان پیام
+- **OTP replay:** کد مصرف‌شده → رد
 - **OTP brute force:** ۴ تلاش ناموفق → کد باطل
 - **Session revocation:** logout → درخواست‌های بعدی 401
 - **Driver info:** پاسخ پورتال شامل نام/شمارهٔ راننده نیست
+- **DISABLED PortalAccount (SUSPENDED):** login رد می‌شود
+- **Concurrent verify:** دو درخواست verify هم‌زمان با یک challengeId → فقط یکی موفق
 
 ---
 
-## ۱۲. UI واکنش‌گرا
+## ۱۱. Migration Rollback
 
-صفحهٔ `/portal` — Next.js mobile-first:
-- صفحهٔ ورود: فیلد موبایل → دکمهٔ دریافت کد → فیلد کد → دکمهٔ ورود
-- اگر چند شرکت: dropdown انتخاب شرکت
-- فهرست سفارش‌ها: کارت با وضعیت، تاریخ، مبلغ کل
-- جزئیات سفارش: ردیف‌ها + بارگیری‌های مرتبط + فایل‌ها
-- بدهی: ماندهٔ عملیاتی
-- RTL + فارسی + responsive (breakpoints مشترک با اپ اصلی)
+| سناریو | اقدام |
+|---|---|
+| DB خالی | `migrate deploy` → apply؛ rollback = `DROP TABLE portal_otp_codes, portal_sessions` |
+| DB دارای داده (قبل از ورود اطلاعات عملیاتی) | `migrate deploy` → apply؛ rollback = `DROP TABLE` (فقط جداول جدید — دادهٔ عملیاتی حفظ) |
+| DB دارای دادهٔ عملیاتی (پس از portal go-live) | rollback = `DROP TABLE` → sessionها و OTPهای فعال حذف می‌شوند ولی دادهٔ عملیاتی (parties/sales/documents) حفظ می‌شود. کاربران باید دوباره OTP بگیرند. |
 
----
-
-## ۱۳. Migration Rollback
-
-Migration افزایشی (۲ جدول جدید). تست: `prisma migrate deploy` روی DB خالی → apply؛ روی DB موجود → apply بدون خطا؛ rollback = `DROP TABLE portal_otp_codes, portal_sessions` — دادهٔ موجود حفظ می‌شود.
+**DROP TABLE هرگز به‌عنوان Rollback ایمن بعد از ورود اطلاعات واقعی معرفی نمی‌شود** — فقط فقدان دادهٔ عملیاتی آن را مجاز می‌کند.
