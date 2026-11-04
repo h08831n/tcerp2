@@ -217,7 +217,7 @@ export class ChecksService {
         data: { status: 'CLEARED', bankAccountId: bankAccount.id, journalEntryId: entry.id },
       });
       if (opts.actor) {
-        await this.auditService.record({
+        await this.auditService.recordTx(trx, {
           entityType: 'check',
           entityId: check.id,
           action: AuditAction.UPDATE,
@@ -285,7 +285,7 @@ export class ChecksService {
         data: { status: 'PAID', bankAccountId: bankAccount.id, journalEntryId: entry.id },
       });
       if (opts.actor) {
-        await this.auditService.record({
+        await this.auditService.recordTx(trx, {
           entityType: 'check',
           entityId: check.id,
           action: AuditAction.UPDATE,

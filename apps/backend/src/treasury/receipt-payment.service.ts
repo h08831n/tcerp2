@@ -96,7 +96,7 @@ export class ReceiptService {
         data: { journalEntryId: entry.id },
       });
 
-      await this.auditService.record({
+      await this.auditService.recordTx(trx, {
         entityType: 'receipt',
         entityId: receipt.id,
         action: AuditAction.CREATE,
@@ -200,7 +200,7 @@ export class PaymentService {
         data: { journalEntryId: entry.id },
       });
 
-      await this.auditService.record({
+      await this.auditService.recordTx(trx, {
         entityType: 'payment',
         entityId: payment.id,
         action: AuditAction.CREATE,

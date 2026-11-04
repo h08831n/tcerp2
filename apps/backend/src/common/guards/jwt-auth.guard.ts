@@ -7,6 +7,7 @@ import { Inject } from '@nestjs/common';
 import { UnauthorizedError } from '../errors';
 import { RequestUser } from '../decorators/current-user.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { PrismaService } from '../../prisma/prisma.service';
 
 export type AuthenticatedRequest = Request & { user?: RequestUser };
 
@@ -14,15 +15,23 @@ export type AuthenticatedRequest = Request & { user?: RequestUser };
  * Verifies the access JWT from the `Authorization: Bearer` header OR the
  * `access_token` HttpOnly cookie and attaches `req.user = {id, username}`.
  * Routes decorated with @Public() are skipped.
+ *
+ * R6-S1 (owner-approved policy): EVERY non-public request re-validates the
+ * user's status from the database — a DISABLED/LOCKED user loses access
+ * from the FIRST subsequent request, even while a previously-issued access
+ * token is still signature-valid. The check rides on a single lightweight
+ * query per request (this is the central auth boundary — no duplicate
+ * status checks in downstream guards/services).
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(
     @Inject(CONFIG) private readonly config: AppConfig,
     private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
@@ -43,6 +52,15 @@ export class JwtAuthGuard implements CanActivate {
     }
     if (!payload.sub) {
       throw new UnauthorizedError('Invalid access token payload');
+    }
+
+    // R6-S1: re-validate user status on EVERY non-public request.
+    const dbUser = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { status: true },
+    });
+    if (!dbUser || dbUser.status !== 'ACTIVE') {
+      throw new UnauthorizedError('Account is disabled or does not exist');
     }
 
     request.user = { id: payload.sub, username: payload.username ?? '' };

@@ -81,17 +81,22 @@ export class CompanyContextService {
   ): Promise<string | null> {
     if (!user) return null;
 
+    // R6-S1 note: user status is enforced centrally in JwtAuthGuard (one
+    // query per request covering ALL non-public routes). This method does
+    // NOT duplicate the check — it only resolves the company.
+    const row = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      select: { defaultCompanyId: true },
+    });
+    if (!row) return null;
+
     const headerValue = headerString(headers, 'x-company-id');
     if (headerValue) {
       const member = await this.isMember(user.id, headerValue);
       if (member) return headerValue;
     }
 
-    const row = await this.prisma.user.findUnique({
-      where: { id: user.id },
-      select: { defaultCompanyId: true },
-    });
-    if (row?.defaultCompanyId && (await this.isMember(user.id, row.defaultCompanyId))) {
+    if (row.defaultCompanyId && (await this.isMember(user.id, row.defaultCompanyId))) {
       return row.defaultCompanyId;
     }
     return null;
