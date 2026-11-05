@@ -2,10 +2,11 @@ import { PrismaClient } from '@prisma/client';
 import { loadConfig } from '../src/config/configuration';
 import {
   CliContext,
+  dbNameFromUrl,
   dbLabel,
   parseArgs,
+  readStdinAll,
   writeAudit,
-  type AuditEntryLite,
 } from './cli-lib';
 import * as resetPassword from './cli-commands/reset-password';
 import * as unlock from './cli-commands/unlock';
@@ -19,26 +20,50 @@ import * as listUsers from './cli-commands/list-users';
  *   npm run cli -- <command> [args] [flags]
  *
  * Commands:
- *   reset-password <username> [--password <pw>|--stdin] [--yes] [--reason "..."] [--no-force-change]
- *   unlock <username> [--yes] [--reason "..."]
- *   set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."]
+ *   reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-db <db>] [--operator <name>]
+ *   unlock <username> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]
+ *   set-status <username> <ACTIVE|DISABLED> [flags...]
  *   list-users [--status <s>]
  *
- * Safety: destructive commands print the target database + user and require
- * an interactive confirmation unless --yes; non-interactive runs REQUIRE
- * --yes. Every mutation writes an AuditLog row with actorName 'cli'.
+ * Safety (CLI-02/CLI-03):
+ *  - passwords come from a hidden interactive prompt or piped --stdin —
+ *    there is NO --password flag; no secret is ever printed.
+ *  - destructive commands: banner + confirm; production additionally
+ *    requires --confirm-db <dbname> and --reason (audit identity is
+ *    'cli:<operator>' — --operator overrides the OS user).
+ *  - mutations + their audit row run in ONE Prisma transaction (CLI-01).
+ *  - unknown flags are rejected (exit 2).
  */
 
 interface Command {
   description: string;
+  allowedFlags: string[];
   run: (prisma: PrismaClient, args: CliContext['args'], ctx: CliContext) => Promise<number>;
 }
 
+const DESTRUCTIVE_FLAGS = ['yes', 'reason', 'confirm-db', 'operator'];
+
 const COMMANDS: Record<string, Command> = {
-  'reset-password': { description: 'set a new password for a user (revokes refresh tokens, clears lockout, forces change at next login)', run: resetPassword.run },
-  unlock: { description: 'clear failed-login lockout + administrative LOCKED (LOCKED → ACTIVE)', run: unlock.run },
-  'set-status': { description: 'enable/disable a user (ACTIVE|DISABLED)', run: setStatus.run },
-  'list-users': { description: 'read-only user table (find exact usernames)', run: listUsers.run },
+  'reset-password': {
+    description: 'set a new password for a user (atomic: revokes refresh tokens, clears lockout window, forces change at next login)',
+    allowedFlags: [...DESTRUCTIVE_FLAGS, 'stdin', 'no-force-change'],
+    run: resetPassword.run,
+  },
+  unlock: {
+    description: 'clear failed-login lockout + administrative LOCKED (LOCKED → ACTIVE); DISABLED stays DISABLED',
+    allowedFlags: [...DESTRUCTIVE_FLAGS],
+    run: unlock.run,
+  },
+  'set-status': {
+    description: 'enable/disable a user (ACTIVE|DISABLED)',
+    allowedFlags: [...DESTRUCTIVE_FLAGS],
+    run: setStatus.run,
+  },
+  'list-users': {
+    description: 'read-only user table (find exact usernames)',
+    allowedFlags: ['status'],
+    run: listUsers.run,
+  },
 };
 
 function printHelp(): void {
@@ -47,7 +72,9 @@ function printHelp(): void {
   for (const [name, cmd] of Object.entries(COMMANDS)) {
     console.log(`  ${name.padEnd(16)} ${cmd.description}`);
   }
-  console.log('\ncommon flags: --yes (skip confirmation)  --reason "..." (stored in audit)');
+  console.log('\nflags: --yes (skip generic confirm)  --reason "..." (audit)  --operator <name> (audit identity)');
+  console.log('       production: --confirm-db <dbname> is REQUIRED (typed target; --yes is not enough)');
+  console.log('       passwords: interactive hidden prompt, or pipe with --stdin — never --password');
 }
 
 async function main(): Promise<number> {
@@ -65,23 +92,48 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Unknown flags are a hard error — a mistyped flag must never silently
+  // change semantics of a destructive operation.
+  const allowed = new Set(cmd.allowedFlags);
+  const unknown = Object.keys(parsed.flags).filter((flag) => !allowed.has(flag));
+  if (unknown.length > 0) {
+    console.error(`ERROR: unknown flag(s) for "${command}": ${unknown.map((f) => `--${f}`).join(', ')}`);
+    console.error(`       allowed: ${cmd.allowedFlags.map((f) => `--${f}`).join(', ')}`);
+    return 2;
+  }
+
   const config = loadConfig(); // loads .env + validates (same config the backend boots with)
   const prisma = new PrismaClient();
   await prisma.$connect();
   try {
     const ctx: CliContext = {
       // ONE parse for the whole argv — the command takes the first positional
-      // and the command receives the remaining positionals + the SAME flags
-      // (re-parsing only `rest` would drop every --flag).
+      // and the command receives the remaining positionals + the SAME flags.
       args: { positionals: rest, flags: parsed.flags },
       dbLabel: dbLabel(process.env.DATABASE_URL),
+      dbName: dbNameFromUrl(process.env.DATABASE_URL),
       production: config.NODE_ENV === 'production',
-      audit: writeAudit,
+      operator:
+        (typeof parsed.flags['operator'] === 'string' ? parsed.flags['operator'].trim() : '') ||
+        process.env.USERNAME ||
+        process.env.USER ||
+        'unknown',
+      stdin: readStdinAll,
+      audit: (client, entry) => writeAudit(client, entry, ctxOperator(parsed.flags)),
     };
     return await cmd.run(prisma, ctx.args, ctx);
   } finally {
     await prisma.$disconnect();
   }
+}
+
+function ctxOperator(flags: Record<string, string | boolean>): string {
+  return (
+    (typeof flags['operator'] === 'string' && flags['operator'].trim()) ||
+    process.env.USERNAME ||
+    process.env.USER ||
+    'unknown'
+  );
 }
 
 main()

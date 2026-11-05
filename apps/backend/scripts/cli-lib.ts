@@ -5,13 +5,19 @@ import { isForbiddenSeedPassword } from '../src/config/configuration';
 /**
  * Shared helpers for the TCERP operator CLI (scripts/cli.ts).
  *
- * Conventions:
- *  - Commands NEVER print secrets (passwords, hashes) — only the outcome.
+ * Conventions (CLI-02/CLI-03):
+ *  - Commands NEVER print secrets (passwords, hashes, connection strings,
+ *    tokens) — output states outcomes only; the DB banner shows host/db only.
+ *  - Password input is interactive-hidden (double confirm) or piped --stdin;
+ *    there is deliberately NO --password flag (raw secrets on the command
+ *    line leak via shell history and process listings).
  *  - Destructive commands print a target banner (db + username) and require
- *    an interactive `y` confirmation UNLESS `--yes` is passed; non-interactive
- *    runs (no TTY) REQUIRE `--yes` so scripts are explicit about intent.
- *  - Every mutation writes an AuditLog row with actorName 'cli' (same shape
- *    as AuditService.record — see src/audit/audit.service.ts auditData()).
+ *    an interactive `y` confirmation UNLESS `--yes`; non-interactive runs
+ *    (no TTY) REQUIRE `--yes`. In PRODUCTION the target itself must be
+ *    confirmed with `--confirm-db <dbname>` — `--yes` alone is NOT enough.
+ *  - Every mutation runs in ONE Prisma transaction together with its audit
+ *    row (CLI-01) — audit actor is `cli:<operator>` (CLI-03 identity).
+ *  - In production a `--reason` is REQUIRED for destructive commands.
  */
 
 /** Error carrying a process exit code — the dispatcher turns it into exit(n). */
@@ -54,7 +60,7 @@ export function strFlag(flags: Record<string, string | boolean>, key: string): s
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-/** host:port/database for the safety banner (never logs credentials). */
+/** host:port/db for the safety banner (never logs credentials). */
 export function dbLabel(url: string | undefined): string {
   if (!url) return '(DATABASE_URL not set)';
   try {
@@ -65,11 +71,21 @@ export function dbLabel(url: string | undefined): string {
   }
 }
 
+/** Database name from a postgres URL — the production confirmation token. */
+export function dbNameFromUrl(url: string | undefined): string {
+  if (!url) return '';
+  try {
+    return new URL(url).pathname.replace(/^\//, '');
+  } catch {
+    return '';
+  }
+}
+
 /** Hidden (non-echoed) prompt — works on Windows terminals too. */
 export function askHidden(question: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!process.stdin.isTTY) {
-      reject(new CliError(2, 'interactive password prompt requires a TTY — use --password <pw> or pipe with --stdin'));
+      reject(new CliError(2, 'interactive password prompt requires a TTY — pipe the password with --stdin'));
       return;
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -160,18 +176,28 @@ export interface AuditEntryLite {
 export interface CliContext {
   args: ParsedArgs;
   dbLabel: string;
+  dbName: string;
   production: boolean;
-  audit: (prisma: PrismaClient, entry: AuditEntryLite) => Promise<void>;
+  /** Audit identity: --operator override, else the OS user (documented). */
+  operator: string;
+  /** Piped password source (overridable for tests). */
+  stdin: () => Promise<string>;
+  /** Write the audit row through the CALLER's transaction client (CLI-01). */
+  audit: (client: PrismaClient | Prisma.TransactionClient, entry: AuditEntryLite) => Promise<void>;
 }
 
-/** Same row shape as AuditService.record (auditData) with actor 'cli'. */
-export async function writeAudit(prisma: PrismaClient, entry: AuditEntryLite): Promise<void> {
+/** Same row shape as AuditService.record (auditData) with actor 'cli:<operator>'. */
+export async function writeAudit(
+  client: PrismaClient | Prisma.TransactionClient,
+  entry: AuditEntryLite,
+  operator: string,
+): Promise<void> {
   const data: Prisma.AuditLogUncheckedCreateInput = {
     entityType: entry.entityType,
     entityId: entry.entityId,
     action: entry.action,
     actorId: null,
-    actorName: 'cli',
+    actorName: `cli:${operator}`,
     reason: entry.reason ?? null,
     ip: 'cli',
     userAgent: 'tcerp-cli',
@@ -182,15 +208,34 @@ export async function writeAudit(prisma: PrismaClient, entry: AuditEntryLite): P
   if (entry.newValues !== undefined) {
     data.newValues = JSON.parse(JSON.stringify(entry.newValues)) as Prisma.InputJsonValue;
   }
-  await prisma.auditLog.create({ data });
+  await client.auditLog.create({ data });
 }
 
-/** Destructive-command gate: banner + confirm (non-TTY requires --yes). */
+/**
+ * CLI-01/CLI-03 destructive gate, in order:
+ *  1. banner (always printed — db + user + current state)
+ *  2. PRODUCTION: the target DB must be confirmed explicitly with
+ *     --confirm-db <dbname> (matches the DATABASE_URL database). --yes does
+ *     NOT bypass this — automation must state the target knowingly.
+ *  3. PRODUCTION: --reason is required for the audit trail.
+ *  4. generic confirmation: skipped by --yes; a non-TTY run without --yes
+ *     aborts (exit 2).
+ */
 export async function guardDestructive(
   args: ParsedArgs,
   banner: string,
+  opts: { production: boolean; dbName: string; requiresReason?: boolean },
 ): Promise<void> {
   console.log(banner);
+  if (opts.production) {
+    const provided = strFlag(args.flags, 'confirm-db');
+    if (provided !== opts.dbName) {
+      throw new CliError(2, `production target must be confirmed explicitly — pass --confirm-db ${opts.dbName} (the database of DATABASE_URL)`);
+    }
+    if (opts.requiresReason && !strFlag(args.flags, 'reason')) {
+      throw new CliError(2, '--reason is REQUIRED in production for sensitive operations');
+    }
+  }
   if (args.flags['yes'] === true) return;
   if (!process.stdin.isTTY) {
     throw new CliError(2, 'non-interactive run requires --yes (explicit operator intent)');

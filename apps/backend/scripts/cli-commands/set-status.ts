@@ -7,17 +7,17 @@ import {
 } from '../cli-lib';
 
 /**
- * set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."]
+ * set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]
  *
  * Mirrors UsersService.enable()/disable() — the status gate is checked on
  * EVERY request (R6-S1), so DISABLED takes effect from the next request.
- * LOCKED is deliberately NOT settable here (an administrative hard lock is
- * managed by the user-management API); unlock() is the way out of it.
+ * The status change and its audit row are ONE transaction (CLI-01).
+ * LOCKED is deliberately NOT settable here; unlock() is the way out of it.
  */
 export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: CliContext): Promise<number> {
   const [username, targetStatus] = args.positionals;
   if (!username || !targetStatus) {
-    console.error('usage: cli set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."]');
+    console.error('usage: cli set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]');
     return 2;
   }
   const status = targetStatus.toUpperCase();
@@ -34,21 +34,23 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
   await guardDestructive(
     args,
     `target: db=${ctx.dbLabel}  user=${user.username} (${user.status} → ${status})  action=set-status`,
+    { production: ctx.production, dbName: ctx.dbName, requiresReason: true },
   );
 
-  await prisma.user.update({ where: { id: user.id }, data: { status } });
-
   const reason = strFlag(args.flags, 'reason');
-  await ctx.audit(prisma, {
-    entityType: 'user',
-    entityId: user.id,
-    action: 'UPDATE',
-    oldValues: { status: user.status },
-    newValues: { status },
-    reason,
+  await prisma.$transaction(async (trx) => {
+    await trx.user.update({ where: { id: user.id }, data: { status } });
+    await ctx.audit(trx, {
+      entityType: 'user',
+      entityId: user.id,
+      action: 'UPDATE',
+      oldValues: { status: user.status },
+      newValues: { status },
+      reason,
+    });
   });
 
-  console.log(`OK ${user.username}: ${user.status} → ${status}`);
-  console.log(`  audit: UPDATE by 'cli'${reason ? ` (reason: ${reason})` : ''}`);
+  console.log(`OK ${user.username}: ${user.status} → ${status} (operator: ${ctx.operator})`);
+  console.log(`  audit: UPDATE by 'cli:${ctx.operator}'${reason ? ` (reason: ${reason})` : ''}`);
   return 0;
 }
