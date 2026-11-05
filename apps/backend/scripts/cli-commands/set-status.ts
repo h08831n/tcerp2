@@ -17,7 +17,7 @@ import {
 export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: CliContext): Promise<number> {
   const [username, targetStatus] = args.positionals;
   if (!username || !targetStatus) {
-    console.error('usage: cli set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]');
+    console.error('usage: cli set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-target "<host:port/db>"] [--operator <name>]');
     return 2;
   }
   const status = targetStatus.toUpperCase();
@@ -33,8 +33,8 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
 
   await guardDestructive(
     args,
-    `target: db=${ctx.dbLabel}  user=${user.username} (${user.status} → ${status})  action=set-status`,
-    { production: ctx.production, dbName: ctx.dbName, requiresReason: true },
+    `target: db=${ctx.target}  user=${user.username} (${user.status} → ${status})  action=set-status`,
+    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
   );
 
   const reason = strFlag(args.flags, 'reason');

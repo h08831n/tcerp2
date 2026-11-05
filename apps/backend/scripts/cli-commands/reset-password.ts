@@ -32,7 +32,7 @@ import {
 export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: CliContext): Promise<number> {
   const username = args.positionals[0];
   if (!username) {
-    console.error('usage: cli reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-db <db>] [--operator <name>]');
+    console.error('usage: cli reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-target "<host:port/db>"] [--operator <name>]');
     return 2;
   }
   const user = await findUserOrThrow(prisma, username);
@@ -60,8 +60,8 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
 
   await guardDestructive(
     args,
-    `target: db=${ctx.dbLabel}  user=${user.username} (status=${user.status})  action=reset-password`,
-    { production: ctx.production, dbName: ctx.dbName, requiresReason: true },
+    `target: db=${ctx.target}  user=${user.username} (status=${user.status})  action=reset-password`,
+    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
   );
 
   const mustChangePassword = args.flags['no-force-change'] !== true;

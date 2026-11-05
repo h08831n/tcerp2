@@ -20,7 +20,7 @@ import {
 export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: CliContext): Promise<number> {
   const username = args.positionals[0];
   if (!username) {
-    console.error('usage: cli unlock <username> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]');
+    console.error('usage: cli unlock <username> [--yes] [--reason "..."] [--confirm-target "<host:port/db>"] [--operator <name>]');
     return 2;
   }
   const user = await findUserOrThrow(prisma, username);
@@ -31,8 +31,8 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
 
   await guardDestructive(
     args,
-    `target: db=${ctx.dbLabel}  user=${user.username} (status=${user.status}, failed=${user.failedLoginCount}, lockedUntil=${user.lockedUntil?.toISOString() ?? 'null'})  action=unlock`,
-    { production: ctx.production, dbName: ctx.dbName, requiresReason: true },
+    `target: db=${ctx.target}  user=${user.username} (status=${user.status}, failed=${user.failedLoginCount}, lockedUntil=${user.lockedUntil?.toISOString() ?? 'null'})  action=unlock`,
+    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
   );
 
   const newStatus: CliUser['status'] = user.status === 'LOCKED' ? 'ACTIVE' : user.status;

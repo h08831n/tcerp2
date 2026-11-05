@@ -175,13 +175,22 @@ export interface AuditEntryLite {
 /** Everything a command gets from the dispatcher. */
 export interface CliContext {
   args: ParsedArgs;
-  dbLabel: string;
-  dbName: string;
+  /**
+   * CLI-05: the FULL destructive target `host:port/database` extracted from
+   * the REAL DATABASE_URL — credentials and query parameters are excluded.
+   * Confirmation must match THIS exact string, not just the database name
+   * (two databases can share a name across hosts).
+   */
+  target: string;
   production: boolean;
   /** Audit identity: --operator override, else the OS user (documented). */
   operator: string;
   /** Piped password source (overridable for tests). */
   stdin: () => Promise<string>;
+  /** Interactive typed confirmation (overridable for tests). */
+  confirmInput: (question: string) => Promise<string>;
+  /** TTY override for tests (undefined = process.stdin.isTTY). */
+  interactive?: boolean;
   /** Write the audit row through the CALLER's transaction client (CLI-01). */
   audit: (client: PrismaClient | Prisma.TransactionClient, entry: AuditEntryLite) => Promise<void>;
 }
@@ -212,11 +221,15 @@ export async function writeAudit(
 }
 
 /**
- * CLI-01/CLI-03 destructive gate, in order:
- *  1. banner (always printed — db + user + current state)
- *  2. PRODUCTION: the target DB must be confirmed explicitly with
- *     --confirm-db <dbname> (matches the DATABASE_URL database). --yes does
- *     NOT bypass this — automation must state the target knowingly.
+ * CLI-01/CLI-03/CLI-05 destructive gate, in order:
+ *  1. banner (always printed — full host:port/db target + user + state;
+ *     never credentials or query parameters)
+ *  2. FULL-TARGET confirmation — ALWAYS, independent of NODE_ENV, including
+ *     --yes and non-interactive runs: the confirmation must match the exact
+ *     `host:port/database` string of the REAL DATABASE_URL (CLI-05 — a
+ *     same-named database on another host does NOT match). Interactive runs
+ *     type it at a prompt; automation passes `--confirm-target` verbatim.
+ *     A mismatch aborts with exit 2 BEFORE any database access.
  *  3. PRODUCTION: --reason is required for the audit trail.
  *  4. generic confirmation: skipped by --yes; a non-TTY run without --yes
  *     aborts (exit 2).
@@ -224,17 +237,25 @@ export async function writeAudit(
 export async function guardDestructive(
   args: ParsedArgs,
   banner: string,
-  opts: { production: boolean; dbName: string; requiresReason?: boolean },
+  opts: { target: string; production: boolean; requiresReason?: boolean; confirmInput?: (question: string) => Promise<string>; interactive?: boolean },
 ): Promise<void> {
   console.log(banner);
-  if (opts.production) {
-    const provided = strFlag(args.flags, 'confirm-db');
-    if (provided !== opts.dbName) {
-      throw new CliError(2, `production target must be confirmed explicitly — pass --confirm-db ${opts.dbName} (the database of DATABASE_URL)`);
+  const provided = strFlag(args.flags, 'confirm-target');
+  if (provided === undefined) {
+    const interactive = opts.interactive ?? process.stdin.isTTY;
+    if (interactive) {
+      const typed = (await (opts.confirmInput ?? defaultConfirmInput)(`Type the full target (${opts.target}) to confirm: `)).trim();
+      if (typed !== opts.target) {
+        throw new CliError(2, `target confirmation mismatch — expected "${opts.target}", nothing changed`);
+      }
+    } else {
+      throw new CliError(2, `target confirmation required — pass --confirm-target "${opts.target}" (the exact host:port/database of DATABASE_URL)`);
     }
-    if (opts.requiresReason && !strFlag(args.flags, 'reason')) {
-      throw new CliError(2, '--reason is REQUIRED in production for sensitive operations');
-    }
+  } else if (provided !== opts.target) {
+    throw new CliError(2, `target confirmation mismatch — expected "${opts.target}", got "${provided}" — nothing changed`);
+  }
+  if (opts.production && opts.requiresReason && !strFlag(args.flags, 'reason')) {
+    throw new CliError(2, '--reason is REQUIRED in production for sensitive operations');
   }
   if (args.flags['yes'] === true) return;
   if (!process.stdin.isTTY) {
@@ -242,4 +263,15 @@ export async function guardDestructive(
   }
   const okFlag = await confirm('Apply? (y/N)');
   if (!okFlag) throw new CliError(1, 'aborted — nothing changed');
+}
+
+/** Echoed typed confirmation of the target name (not a secret). */
+export function defaultConfirmInput(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
 }

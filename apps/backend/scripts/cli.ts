@@ -2,8 +2,8 @@ import { PrismaClient } from '@prisma/client';
 import { loadConfig } from '../src/config/configuration';
 import {
   CliContext,
-  dbNameFromUrl,
   dbLabel,
+  defaultConfirmInput,
   parseArgs,
   readStdinAll,
   writeAudit,
@@ -28,9 +28,11 @@ import * as listUsers from './cli-commands/list-users';
  * Safety (CLI-02/CLI-03):
  *  - passwords come from a hidden interactive prompt or piped --stdin —
  *    there is NO --password flag; no secret is ever printed.
- *  - destructive commands: banner + confirm; production additionally
- *    requires --confirm-db <dbname> and --reason (audit identity is
- *    'cli:<operator>' — --operator overrides the OS user).
+ *  - destructive commands ALWAYS confirm the FULL target `host:port/db`
+ *    (CLI-05): interactive runs type it, automation passes --confirm-target
+ *    verbatim; --yes does NOT bypass it. Production additionally requires
+ *    --reason (audit identity is 'cli:<operator>' — --operator overrides
+ *    the OS user).
  *  - mutations + their audit row run in ONE Prisma transaction (CLI-01).
  *  - unknown flags are rejected (exit 2).
  */
@@ -41,7 +43,7 @@ interface Command {
   run: (prisma: PrismaClient, args: CliContext['args'], ctx: CliContext) => Promise<number>;
 }
 
-const DESTRUCTIVE_FLAGS = ['yes', 'reason', 'confirm-db', 'operator'];
+const DESTRUCTIVE_FLAGS = ['yes', 'reason', 'confirm-target', 'operator'];
 
 const COMMANDS: Record<string, Command> = {
   'reset-password': {
@@ -110,8 +112,9 @@ async function main(): Promise<number> {
       // ONE parse for the whole argv — the command takes the first positional
       // and the command receives the remaining positionals + the SAME flags.
       args: { positionals: rest, flags: parsed.flags },
-      dbLabel: dbLabel(process.env.DATABASE_URL),
-      dbName: dbNameFromUrl(process.env.DATABASE_URL),
+      // CLI-05: the full target from the REAL DATABASE_URL — credentials and
+      // query parameters are never part of it.
+      target: dbLabel(process.env.DATABASE_URL),
       production: config.NODE_ENV === 'production',
       operator:
         (typeof parsed.flags['operator'] === 'string' ? parsed.flags['operator'].trim() : '') ||
@@ -119,6 +122,7 @@ async function main(): Promise<number> {
         process.env.USER ||
         'unknown',
       stdin: readStdinAll,
+      confirmInput: defaultConfirmInput,
       audit: (client, entry) => writeAudit(client, entry, ctxOperator(parsed.flags)),
     };
     return await cmd.run(prisma, ctx.args, ctx);
