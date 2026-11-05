@@ -16,7 +16,7 @@ import {
 } from './users.dto';
 import { Paginated } from '../common/dto/pagination.dto';
 
-const BCRYPT_ROUNDS = 10;
+export const BCRYPT_ROUNDS = 10;
 
 const USER_LIST_SELECT = {
   id: true,

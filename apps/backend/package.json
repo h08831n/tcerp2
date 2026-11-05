@@ -13,6 +13,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "db:seed": "ts-node prisma/seed.ts",
+    "cli": "ts-node scripts/cli.ts",
     "test:integration": "node scripts/test-integration.js"
   },
   "dependencies": {
