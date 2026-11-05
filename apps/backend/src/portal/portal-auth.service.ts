@@ -56,12 +56,16 @@ export class PortalOtpService {
     const codeHmac = this.hmac(challengeId + code);
     const expiresAt = new Date(Date.now() + PORTAL_OTP_TTL_MS);
 
-    // D2-11: atomic rate limit + challenge creation in ONE transaction. The
-    // per-mobile advisory lock serializes concurrent requests so the
-    // count-then-create pair cannot race; a limited request throws BEFORE
-    // any row exists (rollback → no exploitable challenge row).
+    // D2-11: atomic rate limit + challenge creation in ONE transaction.
+    // Advisory locks are ALWAYS taken in the same order — mobile first, then
+    // IP — so two concurrent requests (different mobiles, shared IP) cannot
+    // deadlock, and the count-then-create pair cannot race on EITHER
+    // dimension: a limited request throws BEFORE any row exists.
     await this.prisma.$transaction(async (trx) => {
       await trx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${mobile}))`;
+      if (ip) {
+        await trx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'ip:' + ip}))`;
+      }
       const recentPerMinute = await trx.portalOtpCode.count({
         where: { mobile, createdAt: { gt: new Date(Date.now() - 60_000) } },
       });
@@ -76,6 +80,13 @@ export class PortalOtpService {
           throw PortalOtpService.otpRateLimited();
         }
       }
+      // Resend contract (docs/17 §4): a fresh challenge invalidates every
+      // previous unconsumed challenge for the same mobile — two live codes
+      // can never coexist.
+      await trx.portalOtpCode.updateMany({
+        where: { mobile, consumed: false },
+        data: { consumed: true },
+      });
       await trx.portalOtpCode.create({
         data: { mobile, challengeId, codeHmac, expiresAt, ip: ip ?? null },
       });
@@ -107,6 +118,7 @@ export class PortalOtpService {
   async verifyOtp(mobileInput: string, challengeId: string, code: string): Promise<{
     portalAccountIds: string[];
     pendingToken?: string;
+    pendingOptions?: Array<{ portalAccountId: string; companyName: string }>;
     sessionToken?: string;
     companyId?: string;
     partyId?: string;
@@ -115,55 +127,78 @@ export class PortalOtpService {
     const codeHmac = this.hmac(challengeId + code);
     const now = new Date();
 
-    // Atomic consumption: only ONE concurrent verify can succeed.
-    const consumed = await this.prisma.portalOtpCode.updateMany({
-      where: {
-        mobile,
-        challengeId,
-        codeHmac,
-        consumed: false,
-        attempts: { lt: PORTAL_OTP_MAX_ATTEMPTS },
-        expiresAt: { gt: now },
-      },
-      data: { consumed: true },
-    });
-    if (consumed.count === 0) {
-      // Increment attempts for wrong code (atomic)
-      await this.prisma.portalOtpCode.updateMany({
-        where: { mobile, challengeId, consumed: false },
-        data: { attempts: { increment: 1 } },
+    // Consumption and the resulting state (session OR pending selection) are
+    // ONE transaction: if the account lookup or the session/pending insert
+    // fails, the whole tx rolls back and the code stays usable — a failed
+    // verify never burns the OTP (recovery = retry the same code).
+    return this.prisma.$transaction(async (trx) => {
+      // Atomic consumption: only ONE concurrent verify can succeed.
+      const consumed = await trx.portalOtpCode.updateMany({
+        where: {
+          mobile,
+          challengeId,
+          codeHmac,
+          consumed: false,
+          attempts: { lt: PORTAL_OTP_MAX_ATTEMPTS },
+          expiresAt: { gt: now },
+        },
+        data: { consumed: true },
       });
-      throw new UnauthorizedError('INVALID_OTP');
-    }
+      if (consumed.count === 0) {
+        // Increment attempts for wrong code (atomic)
+        await trx.portalOtpCode.updateMany({
+          where: { mobile, challengeId, consumed: false },
+          data: { attempts: { increment: 1 } },
+        });
+        throw new UnauthorizedError('INVALID_OTP');
+      }
 
-    // Find ACTIVE PortalAccounts with this mobile (companies must be ACTIVE —
-    // a session on a suspended company could never pass the guard).
-    const accounts = await this.prisma.portalAccount.findMany({
-      where: { verifiedMobile: mobile, status: 'ACTIVE', company: { status: 'ACTIVE' } },
-      select: { id: true, companyId: true, partyId: true },
-    });
+      // Find ACTIVE PortalAccounts with this mobile (companies must be
+      // ACTIVE — a session on a suspended company could never pass the
+      // guard). A failure here rolls the consumption back.
+      const accounts = await trx.portalAccount.findMany({
+        where: { verifiedMobile: mobile, status: 'ACTIVE', company: { status: 'ACTIVE' } },
+        select: { id: true, companyId: true, partyId: true, company: { select: { nameFa: true } } },
+      });
 
-    if (accounts.length === 0) {
-      throw new UnauthorizedError('INVALID_OTP');
-    }
+      if (accounts.length === 0) {
+        throw new UnauthorizedError('INVALID_OTP');
+      }
 
-    if (accounts.length === 1) {
-      // Single account → direct ACTIVE_SESSION
-      const sessionToken = await this.createSession(accounts[0].id);
-      return { portalAccountIds: [accounts[0].id], pendingToken: undefined, sessionToken };
-    }
+      if (accounts.length === 1) {
+        // Single account → direct ACTIVE_SESSION (raw token generated first —
+        // its HMAC is stored; the raw value only ever leaves via Set-Cookie).
+        const sessionToken = randomBytes(48).toString('hex');
+        await trx.portalSession.create({
+          data: {
+            portalAccountId: accounts[0].id,
+            tokenHash: this.hmac(sessionToken),
+            expiresAt: new Date(Date.now() + PORTAL_SESSION_TTL_MS),
+          },
+        });
+        return {
+          portalAccountIds: [accounts[0].id],
+          sessionToken,
+        };
+      }
 
-    // Multiple accounts → PENDING_SELECTION
-    const rawPending = randomBytes(48).toString('hex');
-    const pendingHash = this.hmac(rawPending);
-    await this.prisma.portalPendingSelection.create({
-      data: {
-        tokenHash: pendingHash,
+      // Multiple accounts → PENDING_SELECTION with the SAFE options list
+      // (D2-18: portalAccountId + company display name, nothing internal).
+      const rawPending = randomBytes(48).toString('hex');
+      const pendingHash = this.hmac(rawPending);
+      await trx.portalPendingSelection.create({
+        data: {
+          tokenHash: pendingHash,
+          portalAccountIds: accounts.map((a) => a.id),
+          expiresAt: new Date(Date.now() + PORTAL_PENDING_TTL_MS),
+        },
+      });
+      return {
         portalAccountIds: accounts.map((a) => a.id),
-        expiresAt: new Date(Date.now() + PORTAL_PENDING_TTL_MS),
-      },
+        pendingToken: rawPending,
+        pendingOptions: accounts.map((a) => ({ portalAccountId: a.id, companyName: a.company.nameFa })),
+      };
     });
-    return { portalAccountIds: accounts.map((a) => a.id), pendingToken: rawPending };
   }
 
   async selectCompany(rawPendingToken: string, selectedPortalAccountId: string): Promise<{ sessionToken: string; companyId: string; partyId: string }> {
@@ -221,15 +256,9 @@ export class PortalOtpService {
     });
   }
 
-  private async createSession(portalAccountId: string): Promise<string> {
-    const raw = randomBytes(48).toString('hex');
-    await this.prisma.portalSession.create({
-      data: {
-        portalAccountId,
-        tokenHash: this.hmac(raw),
-        expiresAt: new Date(Date.now() + PORTAL_SESSION_TTL_MS),
-      },
-    });
-    return raw;
+  /** Logout contract: the stored session row is revoked (deleted) so every
+   *  copy of the cookie becomes invalid immediately. Idempotent. */
+  async revokeSession(sessionId: string): Promise<void> {
+    await this.prisma.portalSession.deleteMany({ where: { id: sessionId } });
   }
 }

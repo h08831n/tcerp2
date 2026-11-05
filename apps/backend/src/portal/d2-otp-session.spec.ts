@@ -45,6 +45,7 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
   const createdCompanies: string[] = [];
   const portalAccountIds: string[] = [];
   const partyIds: string[] = [];
+  const otpMobiles: string[] = [];
   let partyAId = '';
   let partyBId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
@@ -141,19 +142,18 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
         }
       };
       // OTP SMS rows carry companyId — they MUST go before the companies or
-      // the FK blocks company deletion (this leak accumulated across runs).
+      // the FK blocks company deletion. Scoped STRICTLY to the mobiles this
+      // suite used (D2-15: no prefix/global deletes).
       await step('otpSmsMessages', () =>
         prisma.smsMessage.deleteMany({
-          where: { idempotencyKey: { startsWith: 'portal-otp:' }, OR: [{ to: { startsWith: '091200001' } }, { to: '09129999999' }] },
+          where: { idempotencyKey: { startsWith: 'portal-otp:' }, to: { in: otpMobiles } },
         }));
       await step('portalOtpCodes', () =>
-        prisma.portalOtpCode.deleteMany({
-          where: { OR: [{ mobile: { startsWith: '091200001' } }, { mobile: '09129999999' }] },
-        }));
+        prisma.portalOtpCode.deleteMany({ where: { mobile: { in: otpMobiles } } }));
       await step('portalSessions', () =>
         prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
       await step('portalPendingSelections', () =>
-        prisma.portalPendingSelection.deleteMany({}));
+        prisma.portalPendingSelection.deleteMany({ where: { portalAccountIds: { hasSome: portalAccountIds } } }));
       await step('portalAccounts', () =>
         prisma.portalAccount.deleteMany({ where: { id: { in: portalAccountIds } } }));
       await step('parties', () =>
@@ -176,12 +176,11 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
 
   // Rate-limit hygiene: back-to-back jest runs reuse the SAME fixed mobile
   // numbers and the 1/min mobile limit (D2-11) would trip across runs 60s
-  // apart. Every test starts with a fresh challenge budget.
+  // apart. Every test starts with a fresh challenge budget, scoped to the
+  // mobiles this suite actually used.
   beforeEach(async () => {
     if (!prisma) return;
-    await prisma.portalOtpCode.deleteMany({
-      where: { OR: [{ mobile: { startsWith: '091200001' } }, { mobile: '09129999999' }] },
-    });
+    await prisma.portalOtpCode.deleteMany({ where: { mobile: { in: otpMobiles } } });
   });
 
   async function createPortalAccount(companyId: string, partyId: string, mobile: string, status: 'ACTIVE' | 'PENDING' = 'ACTIVE'): Promise<string> {
@@ -204,6 +203,7 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
   }
 
   async function requestOtp(mobile: string, companyId: string): Promise<{ challengeId: string }> {
+    otpMobiles.push(mobile);
     const res = await portalPost('/api/portal/request-otp', { mobile, companyId });
     return (await res.json()) as { challengeId: string };
   }
@@ -282,9 +282,12 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
     const code = smsMessage.text.match(/(\d{6})/)?.[1]!;
 
     const verifyRes = await portalPost('/api/portal/verify-otp', { mobile, challengeId: otpRes.challengeId, code });
-    const body = (await verifyRes.json()) as { sessionActive: boolean; pendingSelection?: number };
+    const body = (await verifyRes.json()) as { sessionActive: boolean; pendingSelection?: Array<{ portalAccountId: string; companyName: string }> };
     expect(body.sessionActive).toBe(false);
-    expect(body.pendingSelection).toBe(2);
+    // D2-18: the response carries the SAFE allowed options (docs/17 §1).
+    expect(Array.isArray(body.pendingSelection)).toBe(true);
+    expect(body.pendingSelection).toHaveLength(2);
+    expect(body.pendingSelection!.map((o) => o.portalAccountId).sort()).toEqual([paA, paB].sort());
 
     // Select company A → ACTIVE_SESSION for A only.
     const selectRes = await portalPost('/api/portal/select-company', { portalAccountId: paA }, verifyRes.headers.getSetCookie().find(c => c.startsWith('portal_pending='))?.split(';')[0]);

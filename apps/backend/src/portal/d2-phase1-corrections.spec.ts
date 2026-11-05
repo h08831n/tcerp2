@@ -6,7 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 import * as bcrypt from 'bcryptjs';
-import { randomBytes, createHmac } from 'crypto';
+import { randomBytes, randomUUID, createHmac } from 'crypto';
 
 jest.setTimeout(300_000);
 const DB_URL = process.env.DATABASE_URL;
@@ -54,6 +54,7 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
   const portalAccountIds: string[] = [];
   const partyIds: string[] = [];
   const otpMobiles: string[] = [];
+  let foreignPendingId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
 
   function hmac(data: string): string {
@@ -124,6 +125,19 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
     });
     adminToken = ((await res.json()) as { accessToken?: string }).accessToken ?? '';
     expect(adminToken).toBeTruthy();
+
+    // D2-15 protective fixture: a PendingSelection owned by NO suite account.
+    // If any cleanup uses an unscoped deleteMany, this row disappears and the
+    // suite fails loudly — before and after every test.
+    const foreign = await prisma.portalPendingSelection.create({
+      data: {
+        tokenHash: 'f'.repeat(64),
+        portalAccountIds: ['00000000-0000-4000-8000-00000000d2f1'],
+        consumed: false,
+        expiresAt: new Date(Date.now() + 3_600_000),
+      },
+    });
+    foreignPendingId = foreign.id;
   });
 
   afterAll(async () => {
@@ -146,13 +160,20 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
       await step('portalSessions', () =>
         prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
       await step('portalPendingSelections', () =>
-        prisma.portalPendingSelection.deleteMany({}));
+        prisma.portalPendingSelection.deleteMany({ where: { portalAccountIds: { hasSome: portalAccountIds } } }));
       await step('portalAccounts', () =>
         prisma.portalAccount.deleteMany({ where: { id: { in: portalAccountIds } } }));
       await step('parties', () =>
         prisma.party.deleteMany({ where: { id: { in: partyIds } } }));
       await step('users', () =>
         prisma.user.deleteMany({ where: { id: { in: createdUsers } } }));
+      // D2-15 protective fixture: the FOREIGN pending selection belongs to no
+      // suite-owned account — every cleanup above must have left it intact.
+      await step('foreignPendingSelectionSurvived', async () => {
+        const still = await prisma.portalPendingSelection.findUnique({ where: { id: foreignPendingId } });
+        if (!still) throw new Error('FOREIGN pending selection was DELETED by suite cleanup');
+        await prisma.portalPendingSelection.delete({ where: { id: foreignPendingId } });
+      });
       for (const companyId of createdCompanies) {
         await step(`company(${companyId})`, async () => {
           await prisma.company.delete({ where: { id: companyId } }).catch(() => undefined);
@@ -216,12 +237,12 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
 
   // Run-to-run interference guard: back-to-back jest runs reuse the same
   // fixed mobile numbers, and the 1/min mobile limit would trip across runs
-  // (observed 53s apart). Each test starts with a fresh challenge budget.
+  // (observed 53s apart). Each test starts with a fresh challenge budget —
+  // scoped STRICTLY to the mobiles this suite actually used (D2-15: no
+  // prefix/global deletes; a foreign fixture must survive).
   beforeEach(async () => {
     if (!prisma) return;
-    await prisma.portalOtpCode.deleteMany({
-      where: { OR: [{ mobile: { startsWith: '09120002' } }, { mobile: { in: otpMobiles } }] },
-    });
+    await prisma.portalOtpCode.deleteMany({ where: { mobile: { in: otpMobiles } } });
   });
 
   // ---------------------------------------------------------------- D2-10
@@ -416,32 +437,47 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
     expect(body.partyId).toBe(partyId);
   });
 
-  itif('D2-13: Sec-Fetch-Site: cross-site request → 403 (Fetch Metadata defense, docs/17 §5)', async () => {
-    const res = await portalPost('/api/portal/request-otp', { mobile: '09120002402' }, undefined, {
+  itif('D2-16: Sec-Fetch-Site: cross-site request → 403 and NO database change (docs/17 §5)', async () => {
+    const { res, body } = await requestOtp('09120002402', {
       'Sec-Fetch-Site': 'cross-site',
       Origin: 'https://evil.example',
     });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { message?: string }).message).toBe('CROSS_SITE_REJECTED');
-    // And the rejected request must not have consumed the rate-limit budget.
+    expect(body.message).toBe('CROSS_SITE_REJECTED');
+    // The rejected request must not have created a challenge row.
     expect(await challengeCount('09120002402')).toBe(0);
   });
 
-  itif('D2-13: same-site / same-origin Sec-Fetch-Site is allowed', async () => {
-    const res = await portalPost('/api/portal/request-otp', { mobile: '09120002403' }, undefined, {
-      'Sec-Fetch-Site': 'same-site',
+  itif('D2-16: ALLOWED Origin (CORS_ORIGINS whitelist) without Sec-Fetch-Site is accepted', async () => {
+    const { res, body } = await requestOtp('09120002403', {
       Origin: 'http://localhost:3000',
     });
     expect(res.status).toBe(200);
+    expect(body.challengeId).toBeTruthy();
   });
 
-  itif('D2-13: cross-origin Origin is NOT reflected in Access-Control-Allow-Origin (CORS whitelist)', async () => {
-    const res = await portalPost('/api/portal/request-otp', { mobile: '09120002404' }, undefined, {
+  itif('D2-16: DISALLOWED Origin → 403 OriginNotAllowed and NO database change', async () => {
+    const { res, body } = await requestOtp('09120002404', {
       Origin: 'https://evil.example',
     });
-    expect(res.status).toBe(200); // endpoint itself works
-    const acao = res.headers.get('access-control-allow-origin');
-    expect(acao === null || acao === 'http://localhost:3000').toBe(true);
+    expect(res.status).toBe(403);
+    expect(body.message).toBe('ORIGIN_NOT_ALLOWED');
+    expect(await challengeCount('09120002404')).toBe(0);
+  });
+
+  itif('D2-16: request with NO Origin header → accepted (documented non-browser policy)', async () => {
+    // Node fetch/curl/server-to-server integrations send no Origin. This
+    // policy is explicit: absent Origin is NOT cross-site evidence, and
+    // SameSite=Lax keeps the session cookie off cross-site browsers.
+    const { res, body } = await requestOtp('09120002410');
+    expect(res.status).toBe(200);
+    expect(body.challengeId).toBeTruthy();
+  });
+
+  itif('D2-15: the FOREIGN pending-selection fixture survives mid-suite (unscoped-delete tripwire)', async () => {
+    const still = await prisma.portalPendingSelection.findUnique({ where: { id: foreignPendingId } });
+    expect(still).not.toBeNull();
+    expect(still!.consumed).toBe(false);
   });
 
   itif('D2-13: OTP replay after a successful verify → 401 INVALID_OTP', async () => {
@@ -528,5 +564,227 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
   itif('D2-13: request-otp WITHOUT mobile → 422 (never 500)', async () => {
     const res = await portalPost('/api/portal/request-otp', {});
     expect(res.status).toBe(422);
+  });
+
+  // ---------------------------------------------------------------- D2-18
+
+  itif('D2-18: PENDING_SELECTION response carries the SAFE allowed options (id + company name only)', async () => {
+    const mobile = '09120002501';
+    const paA = await createPortalAccount(A, await newParty(A, 'd2-18A'), mobile);
+    const paB = await createPortalAccount(B, await newParty(B, 'd2-18B'), mobile);
+    const companyAName = (await prisma.company.findUniqueOrThrow({ where: { id: A }, select: { nameFa: true } })).nameFa;
+    const companyBName = (await prisma.company.findUniqueOrThrow({ where: { id: B }, select: { nameFa: true } })).nameFa;
+
+    await requestOtp(mobile);
+    const code = await readOtpCodeFromSms(mobile);
+    const verifyRes = await portalPost('/api/portal/verify-otp', { mobile, challengeId: (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId, code });
+    expect(verifyRes.status).toBe(200);
+    const body = (await verifyRes.json()) as {
+      sessionActive: boolean;
+      pendingSelection: Array<{ portalAccountId?: string; companyName?: string }>;
+    };
+    expect(body.sessionActive).toBe(false);
+
+    // The client must be able to ACTUALLY choose: the response carries the
+    // allowed options (docs/17 §1) — id + display name, nothing internal.
+    expect(Array.isArray(body.pendingSelection)).toBe(true);
+    expect(body.pendingSelection).toHaveLength(2);
+    const ids = body.pendingSelection.map((o) => o.portalAccountId).sort();
+    expect(ids).toEqual([paA, paB].sort());
+    const names = body.pendingSelection.map((o) => o.companyName).sort();
+    expect(names).toEqual([companyAName, companyBName].sort());
+    for (const option of body.pendingSelection) {
+      expect(Object.keys(option).sort()).toEqual(['companyName', 'portalAccountId']);
+    }
+
+    // Selecting the option the user picked binds the session to THAT company.
+    const selectRes = await portalPost('/api/portal/select-company', { portalAccountId: paB }, verifyRes.headers.getSetCookie().find((c) => c.startsWith('portal_pending='))?.split(';')[0]);
+    expect(selectRes.status).toBe(200);
+    const me = await portalGet('/api/portal/me', selectRes.headers.getSetCookie().find((c) => c.startsWith('portal_session='))!.split(';')[0]);
+    expect(((await me.json()) as { companyId: string }).companyId).toBe(B);
+  });
+
+  itif('D2-18: NO company options are disclosed before a VALID OTP', async () => {
+    // Wrong code → uniform INVALID_OTP and no option list.
+    const mobile = '09120002502';
+    await createPortalAccount(A, await newParty(A, 'd2-18n'), mobile);
+    await createPortalAccount(B, await newParty(B, 'd2-18n2'), mobile);
+    await requestOtp(mobile);
+    const verifyRes = await portalPost('/api/portal/verify-otp', { mobile, challengeId: (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId, code: '000000' });
+    expect(verifyRes.status).toBe(401);
+    const body = (await verifyRes.json()) as { pendingSelection?: unknown };
+    expect(body.pendingSelection).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------- D2-14
+
+  itif('D2-14: creating a PortalAccount with a party from ANOTHER company → 422 PORTAL_PARTY_NOT_IN_COMPANY', async () => {
+    const partyB = await newParty(B, 'd2-14cross');
+    const res = await fetch(`${baseUrl}/api/portalaccounts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'x-company-id': A, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companyId: A, partyId: partyB, verifiedMobile: '09120002601', status: 'ACTIVE' }),
+    });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { message?: string }).message).toBe('PORTAL_PARTY_NOT_IN_COMPANY');
+    // Nothing must have been persisted.
+    expect(await prisma.portalAccount.count({ where: { companyId: A, partyId: partyB } })).toBe(0);
+  });
+
+  itif('D2-14: a CORRUPT record (party of another company) is rejected by PortalAuthGuard → 403', async () => {
+    // Simulate pre-existing inconsistent data written directly to the DB.
+    const partyB = await newParty(B, 'd2-14corrupt');
+    const corrupt = await prisma.portalAccount.create({
+      data: { companyId: A, partyId: partyB, verifiedMobile: '09120002602', status: 'ACTIVE' },
+    });
+    portalAccountIds.push(corrupt.id);
+    const raw = randomBytes(48).toString('hex');
+    await prisma.portalSession.create({
+      data: { portalAccountId: corrupt.id, tokenHash: hmac(raw), expiresAt: new Date(Date.now() + 3_600_000) },
+    });
+
+    const me = await portalGet('/api/portal/me', `portal_session=${raw}`);
+    expect(me.status).toBe(403);
+  });
+
+  // ------------------------------------------- OTP/session contract review
+
+  itif('CONTRACT: resending OTP invalidates the previous challenge (no two live codes)', async () => {
+    const mobile = '09120002701';
+    await createPortalAccount(A, await newParty(A, 'd2-resend'), mobile);
+
+    // Simulate a challenge issued 61s ago (outside the 1/min window) with a
+    // known code, so the resend is a legitimate request under the policy.
+    const oldChallengeId = randomUUID();
+    const oldCode = '123456';
+    await prisma.portalOtpCode.create({
+      data: {
+        mobile,
+        challengeId: oldChallengeId,
+        codeHmac: hmac(oldChallengeId + oldCode),
+        expiresAt: new Date(Date.now() + 120_000),
+        createdAt: new Date(Date.now() - 61_000),
+      },
+    });
+    otpMobiles.push(mobile);
+
+    // Resend → new challenge.
+    const { res, body } = await requestOtp(mobile);
+    expect(res.status).toBe(200);
+    expect(body.challengeId).toBeTruthy();
+
+    // The OLD code must no longer verify.
+    const oldVerify = await portalPost('/api/portal/verify-otp', { mobile, challengeId: oldChallengeId, code: oldCode });
+    expect(oldVerify.status).toBe(401);
+    expect(((await oldVerify.json()) as { message?: string }).message).toBe('INVALID_OTP');
+
+    // The NEW challenge still verifies.
+    const newCode = await readOtpCodeFromSms(mobile);
+    const newVerify = await portalPost('/api/portal/verify-otp', { mobile, challengeId: body.challengeId, code: newCode });
+    expect(newVerify.status).toBe(200);
+  });
+
+  itif('CONTRACT: verify that cannot create a session does NOT consume the code (recoverable)', async () => {
+    const mobile = '09120002702';
+    const paId = await createPortalAccount(A, await newParty(A, 'd2-recover'), mobile);
+    await requestOtp(mobile);
+    const code = await readOtpCodeFromSms(mobile);
+    const challengeId = (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId;
+
+    // The account is suspended between request and verify — session creation
+    // cannot succeed, but the code must NOT be burned.
+    await prisma.portalAccount.update({ where: { id: paId }, data: { status: 'SUSPENDED' } });
+    const failed = await portalPost('/api/portal/verify-otp', { mobile, challengeId, code });
+    expect(failed.status).toBe(401);
+    expect(((await failed.json()) as { message?: string }).message).toBe('INVALID_OTP');
+    const row = await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId } });
+    expect(row.consumed).toBe(false); // ← RED today: the CAS burns the code
+
+    // Recovery: once the account is ACTIVE again, the SAME code verifies.
+    await prisma.portalAccount.update({ where: { id: paId }, data: { status: 'ACTIVE' } });
+    const retry = await portalPost('/api/portal/verify-otp', { mobile, challengeId, code });
+    expect(retry.status).toBe(200);
+    expect(retry.headers.getSetCookie().find((c) => c.startsWith('portal_session='))).toBeTruthy();
+  });
+
+  itif('CONTRACT: POST /api/portal/logout revokes the session and clears the cookie', async () => {
+    const mobile = '09120002703';
+    const paId = await createPortalAccount(A, await newParty(A, 'd2-logout'), mobile);
+    await requestOtp(mobile);
+    const code = await readOtpCodeFromSms(mobile);
+    const verifyRes = await portalPost('/api/portal/verify-otp', { mobile, challengeId: (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId, code });
+    const sessionCookie = verifyRes.headers.getSetCookie().find((c) => c.startsWith('portal_session='))?.split(';')[0];
+    expect(sessionCookie).toBeTruthy();
+    expect((await portalGet('/api/portal/me', sessionCookie!)).status).toBe(200);
+
+    const logout = await fetch(`${baseUrl}/api/portal/logout`, { method: 'POST', headers: { Cookie: sessionCookie! } });
+    expect(logout.status).toBe(200);
+
+    // The stored session is revoked (row gone) and the cookie is cleared.
+    const tokenHash = hmac(sessionCookie!.split('=')[1]);
+    expect(await prisma.portalSession.count({ where: { tokenHash } })).toBe(0);
+    const cleared = logout.headers.getSetCookie().find((c) => c.startsWith('portal_session='));
+    expect(cleared).toBeTruthy();
+    expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970|Max-Age=0/i);
+    expect((await portalGet('/api/portal/me', sessionCookie!)).status).toBe(401);
+  });
+
+  // --------------------------------------- D2-11 IP race (kept LAST: it
+  // temporarily saturates the IP budget with seeded rows)
+
+  itif('D2-11: CONCURRENT different mobiles, same IP at 999/1000 → exactly ONE is accepted', async () => {
+    const seedIds: string[] = [];
+    try {
+      // Determine the exact IP value real requests record.
+      const probe = '09120002800';
+      await createPortalAccount(A, await newParty(A, 'd2-11probe'), probe);
+      const { res: probeRes } = await requestOtp(probe);
+      expect(probeRes.status).toBe(200);
+      const probeRow = await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile: probe }, orderBy: { createdAt: 'desc' } });
+      const ip = probeRow.ip;
+      expect(ip).toBeTruthy();
+      // The probe row itself consumes budget — remove it precisely so the
+      // seed below lands on exactly 999.
+      await prisma.portalOtpCode.delete({ where: { challengeId: probeRow.challengeId } });
+
+      // Fill the IP budget to exactly 999/1000 (PORTAL_OTP_IP_PER_HOUR=1000
+      // in tests): seed the DIFFERENCE so rows created by earlier tests in
+      // this run do not skew the count. Seed rows use a dedicated namespace
+      // no real flow can produce.
+      const current = await prisma.portalOtpCode.count({ where: { ip: ip! } });
+      const seedIdsNew = Array.from({ length: Math.max(0, 999 - current) }, () => randomUUID());
+      seedIds.push(...seedIdsNew);
+      await prisma.portalOtpCode.createMany({
+        data: seedIdsNew.map((challengeId, i) => ({
+          mobile: `ip-race-seed-${i}`,
+          challengeId,
+          codeHmac: '0'.repeat(64),
+          ip: ip!,
+          expiresAt: new Date(Date.now() + 120_000),
+        })),
+      });
+      expect(await prisma.portalOtpCode.count({ where: { ip: ip! } })).toBe(999);
+
+      const m1 = '09120002801';
+      const m2 = '09120002802';
+      await createPortalAccount(A, await newParty(A, 'd2-11race1'), m1);
+      await createPortalAccount(A, await newParty(A, 'd2-11race2'), m2);
+      otpMobiles.push(m1, m2);
+
+      // Two CONCURRENT requests, different mobiles, same IP, one slot left.
+      const [r1, r2] = await Promise.all([
+        portalPost('/api/portal/request-otp', { mobile: m1 }),
+        portalPost('/api/portal/request-otp', { mobile: m2 }),
+      ]);
+      const statuses = [r1.status, r2.status].sort();
+      expect(statuses).toEqual([200, 429]); // ← RED today: both pass the race
+      expect(await challengeCount(m1) + await challengeCount(m2)).toBe(1);
+    } finally {
+      // Release the seeded budget NO MATTER HOW the test fails — a leaked
+      // seed would saturate the IP budget for every later run.
+      if (seedIds.length > 0) {
+        await prisma.portalOtpCode.deleteMany({ where: { challengeId: { in: seedIds } } });
+      }
+    }
   });
 });
