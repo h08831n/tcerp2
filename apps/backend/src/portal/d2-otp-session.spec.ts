@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../app.module';
+import { GlobalExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from '../prisma/prisma.service';
 import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
@@ -14,6 +15,11 @@ for (const [key, value] of Object.entries({
   JWT_SECRET: 'd2-otp-jwt-secret-0123456789',
   JWT_REFRESH_SECRET: 'd2-otp-jwt-refresh-secret-0123456789',
   REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
+  // The IP-hourly dimension (10/hour default, docs/15) is shared by every
+  // integration spec booted from loopback — this file issues ~7 OTP requests
+  // from the same IP, so it opts out here; the MOBILE 1/min policy runs at
+  // its production default and every test uses a distinct mobile.
+  PORTAL_OTP_IP_PER_HOUR: '1000',
 })) {
   if (!process.env[key]) process.env[key] = value;
 }
@@ -92,16 +98,20 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
       data: { companyId: A, type: 'COMPANY', nameFa: `d2-party-A ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
     partyAId = partyARow.id;
+    partyIds.push(partyARow.id);
     const partyBRow = await prisma.party.create({
       data: { companyId: B, type: 'COMPANY', nameFa: `d2-party-B ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
     partyBId = partyBRow.id;
+    partyIds.push(partyBRow.id);
 
-    // Boot the REAL app.
+    // Boot the REAL app — WITH the production global filter so the error
+    // envelope under test is the one production actually serves.
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     const nestApp = await moduleRef.createNestApplication();
     nestApp.setGlobalPrefix('api');
     nestApp.use(require('cookie-parser')());
+    nestApp.useGlobalFilters(new GlobalExceptionFilter());
     await nestApp.init();
     const server = nestApp.getHttpServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -130,8 +140,16 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
           failures.push(`${label}: ${String(error)}`);
         }
       };
+      // OTP SMS rows carry companyId — they MUST go before the companies or
+      // the FK blocks company deletion (this leak accumulated across runs).
+      await step('otpSmsMessages', () =>
+        prisma.smsMessage.deleteMany({
+          where: { idempotencyKey: { startsWith: 'portal-otp:' }, OR: [{ to: { startsWith: '091200001' } }, { to: '09129999999' }] },
+        }));
       await step('portalOtpCodes', () =>
-        prisma.portalOtpCode.deleteMany({ where: { mobile: { startsWith: '091200000' } } }));
+        prisma.portalOtpCode.deleteMany({
+          where: { OR: [{ mobile: { startsWith: '091200001' } }, { mobile: '09129999999' }] },
+        }));
       await step('portalSessions', () =>
         prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
       await step('portalPendingSelections', () =>
@@ -154,6 +172,16 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
         throw new Error(`D2 CLEANUP FAILURES:\n- ${failures.join('\n- ')}`);
       }
     }
+  });
+
+  // Rate-limit hygiene: back-to-back jest runs reuse the SAME fixed mobile
+  // numbers and the 1/min mobile limit (D2-11) would trip across runs 60s
+  // apart. Every test starts with a fresh challenge budget.
+  beforeEach(async () => {
+    if (!prisma) return;
+    await prisma.portalOtpCode.deleteMany({
+      where: { OR: [{ mobile: { startsWith: '091200001' } }, { mobile: '09129999999' }] },
+    });
   });
 
   async function createPortalAccount(companyId: string, partyId: string, mobile: string, status: 'ACTIVE' | 'PENDING' = 'ACTIVE'): Promise<string> {
@@ -243,8 +271,8 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
     const partyB = await prisma.party.create({
       data: { companyId: B, type: 'COMPANY', nameFa: `d2-multi ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
-    partyIds.push(partyBId);
-    const paB = await createPortalAccount(B, partyBId, mobile);
+    partyIds.push(partyB.id);
+    const paB = await createPortalAccount(B, partyB.id, mobile);
 
     const otpRes = await requestOtp(mobile, A);
     const smsMessage = await prisma.smsMessage.findFirstOrThrow({

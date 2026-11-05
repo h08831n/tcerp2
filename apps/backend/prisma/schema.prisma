@@ -3316,12 +3316,15 @@ model PortalOtpCode {
   mobile      String
   challengeId String   @unique @map("challenge_id") @db.Uuid
   codeHmac    String   @map("code_hmac") @db.Char(64)
+  ip          String?
   attempts    Int      @default(0)
   consumed    Boolean  @default(false)
   expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([mobile, expiresAt])
+  @@index([mobile, createdAt])
+  @@index([ip, createdAt])
   @@map("portal_otp_codes")
 }
 
