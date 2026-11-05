@@ -14,6 +14,14 @@ export const PORTAL_SESSION_TTL_MS = 24 * 3_600_000;
 export const PORTAL_PENDING_TTL_MS = 5 * 60_000;
 
 /**
+ * D2-19 internal control-flow marker: the CAS rejected the attempt (wrong
+ * code, exhausted attempts, or a dead challenge). NEVER escapes the service —
+ * the verifyOtp catch block turns it into the uniform INVALID_OTP response
+ * after a DURABLE attempts increment OUTSIDE the rolled-back transaction.
+ */
+class OtpAttemptRejected extends Error {}
+
+/**
  * Portal OTP + Session infrastructure (Gate D-2 Phase 1).
  * OTP is HMAC-SHA256(JWT_SECRET, challengeId + code) — not plain sha256.
  * Consumption is atomic (updateMany CAS). Session selection is atomic.
@@ -131,74 +139,96 @@ export class PortalOtpService {
     // ONE transaction: if the account lookup or the session/pending insert
     // fails, the whole tx rolls back and the code stays usable — a failed
     // verify never burns the OTP (recovery = retry the same code).
-    return this.prisma.$transaction(async (trx) => {
-      // Atomic consumption: only ONE concurrent verify can succeed.
-      const consumed = await trx.portalOtpCode.updateMany({
-        where: {
-          mobile,
-          challengeId,
-          codeHmac,
-          consumed: false,
-          attempts: { lt: PORTAL_OTP_MAX_ATTEMPTS },
-          expiresAt: { gt: now },
-        },
-        data: { consumed: true },
+    try {
+      return await this.prisma.$transaction(async (trx) => {
+        // Atomic consumption: only ONE concurrent verify can succeed.
+        const consumed = await trx.portalOtpCode.updateMany({
+          where: {
+            mobile,
+            challengeId,
+            codeHmac,
+            consumed: false,
+            attempts: { lt: PORTAL_OTP_MAX_ATTEMPTS },
+            expiresAt: { gt: now },
+          },
+          data: { consumed: true },
+        });
+        if (consumed.count === 0) {
+          // D2-19: NOT counted here — an increment inside this tx would be
+          // rolled back together with the marker error below. The catch
+          // block records it as its own atomic statement.
+          throw new OtpAttemptRejected();
+        }
+
+        // Find ACTIVE PortalAccounts with this mobile (companies must be
+        // ACTIVE — a session on a suspended company could never pass the
+        // guard). A failure here rolls the consumption back.
+        const accounts = await trx.portalAccount.findMany({
+          where: { verifiedMobile: mobile, status: 'ACTIVE', company: { status: 'ACTIVE' } },
+          select: { id: true, companyId: true, partyId: true, company: { select: { nameFa: true } } },
+        });
+
+        if (accounts.length === 0) {
+          throw new UnauthorizedError('INVALID_OTP');
+        }
+
+        if (accounts.length === 1) {
+          // Single account → direct ACTIVE_SESSION (raw token generated first —
+          // its HMAC is stored; the raw value only ever leaves via Set-Cookie).
+          const sessionToken = randomBytes(48).toString('hex');
+          await trx.portalSession.create({
+            data: {
+              portalAccountId: accounts[0].id,
+              tokenHash: this.hmac(sessionToken),
+              expiresAt: new Date(Date.now() + PORTAL_SESSION_TTL_MS),
+            },
+          });
+          return {
+            portalAccountIds: [accounts[0].id],
+            sessionToken,
+          };
+        }
+
+        // Multiple accounts → PENDING_SELECTION with the SAFE options list
+        // (D2-18: portalAccountId + company display name, nothing internal).
+        const rawPending = randomBytes(48).toString('hex');
+        const pendingHash = this.hmac(rawPending);
+        await trx.portalPendingSelection.create({
+          data: {
+            tokenHash: pendingHash,
+            portalAccountIds: accounts.map((a) => a.id),
+            expiresAt: new Date(Date.now() + PORTAL_PENDING_TTL_MS),
+          },
+        });
+        return {
+          portalAccountIds: accounts.map((a) => a.id),
+          pendingToken: rawPending,
+          pendingOptions: accounts.map((a) => ({ portalAccountId: a.id, companyName: a.company.nameFa })),
+        };
       });
-      if (consumed.count === 0) {
-        // Increment attempts for wrong code (atomic)
-        await trx.portalOtpCode.updateMany({
-          where: { mobile, challengeId, consumed: false },
+    } catch (error) {
+      if (error instanceof OtpAttemptRejected) {
+        // D2-19: the failed attempt MUST be counted. The verify transaction
+        // rolled back, so this runs as its OWN atomic statement — a single
+        // `attempts = attempts + 1` row-lock update, so concurrent wrong
+        // verifies can never lose an update. The WHERE mirrors the CAS so
+        // consumed / expired / exhausted challenges are never touched.
+        await this.prisma.portalOtpCode.updateMany({
+          where: {
+            mobile,
+            challengeId,
+            consumed: false,
+            attempts: { lt: PORTAL_OTP_MAX_ATTEMPTS },
+            expiresAt: { gt: new Date() },
+          },
           data: { attempts: { increment: 1 } },
         });
         throw new UnauthorizedError('INVALID_OTP');
       }
-
-      // Find ACTIVE PortalAccounts with this mobile (companies must be
-      // ACTIVE — a session on a suspended company could never pass the
-      // guard). A failure here rolls the consumption back.
-      const accounts = await trx.portalAccount.findMany({
-        where: { verifiedMobile: mobile, status: 'ACTIVE', company: { status: 'ACTIVE' } },
-        select: { id: true, companyId: true, partyId: true, company: { select: { nameFa: true } } },
-      });
-
-      if (accounts.length === 0) {
-        throw new UnauthorizedError('INVALID_OTP');
-      }
-
-      if (accounts.length === 1) {
-        // Single account → direct ACTIVE_SESSION (raw token generated first —
-        // its HMAC is stored; the raw value only ever leaves via Set-Cookie).
-        const sessionToken = randomBytes(48).toString('hex');
-        await trx.portalSession.create({
-          data: {
-            portalAccountId: accounts[0].id,
-            tokenHash: this.hmac(sessionToken),
-            expiresAt: new Date(Date.now() + PORTAL_SESSION_TTL_MS),
-          },
-        });
-        return {
-          portalAccountIds: [accounts[0].id],
-          sessionToken,
-        };
-      }
-
-      // Multiple accounts → PENDING_SELECTION with the SAFE options list
-      // (D2-18: portalAccountId + company display name, nothing internal).
-      const rawPending = randomBytes(48).toString('hex');
-      const pendingHash = this.hmac(rawPending);
-      await trx.portalPendingSelection.create({
-        data: {
-          tokenHash: pendingHash,
-          portalAccountIds: accounts.map((a) => a.id),
-          expiresAt: new Date(Date.now() + PORTAL_PENDING_TTL_MS),
-        },
-      });
-      return {
-        portalAccountIds: accounts.map((a) => a.id),
-        pendingToken: rawPending,
-        pendingOptions: accounts.map((a) => ({ portalAccountId: a.id, companyName: a.company.nameFa })),
-      };
-    });
+      // Real failure (session/pending creation, account lookup): the tx
+      // rolled back — the code stays usable. Nothing sensitive is logged.
+      throw error;
+    }
   }
 
   async selectCompany(rawPendingToken: string, selectedPortalAccountId: string): Promise<{ sessionToken: string; companyId: string; partyId: string }> {

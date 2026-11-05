@@ -707,6 +707,89 @@ describeIntegration('d2-phase1-corrections (real AppModule + portal guards)', ()
     expect(retry.headers.getSetCookie().find((c) => c.startsWith('portal_session='))).toBeTruthy();
   });
 
+  // ------------------------------------------- D2-19: durable OTP attempts
+
+  itif('D2-19: a WRONG code durably increments attempts (must survive the rollback)', async () => {
+    const mobile = '09120002901';
+    await createPortalAccount(A, await newParty(A, 'd2-19'), mobile);
+    await requestOtp(mobile);
+    const challengeId = (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId;
+
+    const wrong = await portalPost('/api/portal/verify-otp', { mobile, challengeId, code: '000000' });
+    expect(wrong.status).toBe(401);
+
+    // The attempt counter must be PERSISTED — the INVALID_OTP error used to
+    // roll the whole transaction (increment included) back.
+    const row = await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId } });
+    expect(row.attempts).toBe(1); // ← RED today: 0
+    expect(row.consumed).toBe(false);
+  });
+
+  itif('D2-19: after MAX wrong attempts even the CORRECT code is rejected', async () => {
+    const mobile = '09120002902';
+    const accountId = await createPortalAccount(A, await newParty(A, 'd2-19max'), mobile);
+    await requestOtp(mobile);
+    const challengeId = (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId;
+    const code = await readOtpCodeFromSms(mobile);
+
+    for (let i = 0; i < 3; i++) {
+      const wrong = await portalPost('/api/portal/verify-otp', { mobile, challengeId, code: '000000' });
+      expect(wrong.status).toBe(401);
+    }
+    expect((await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId } })).attempts).toBe(3);
+
+    // Exhausted challenge: the CORRECT code must now be rejected too.
+    const correct = await portalPost('/api/portal/verify-otp', { mobile, challengeId, code });
+    expect(correct.status).toBe(401);
+    expect(((await correct.json()) as { message?: string }).message).toBe('INVALID_OTP');
+    const row = await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId } });
+    expect(row.consumed).toBe(false); // never consumed — and never re-opened
+    expect(await prisma.portalSession.count({ where: { portalAccountId: accountId } })).toBe(0);
+  });
+
+  itif('D2-19: two CONCURRENT wrong verifies → attempts = 2 (no lost update)', async () => {
+    const mobile = '09120002903';
+    await createPortalAccount(A, await newParty(A, 'd2-19race'), mobile);
+    await requestOtp(mobile);
+    const challengeId = (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile }, orderBy: { createdAt: 'desc' } })).challengeId;
+
+    const [r1, r2] = await Promise.all([
+      portalPost('/api/portal/verify-otp', { mobile, challengeId, code: '000000' }),
+      portalPost('/api/portal/verify-otp', { mobile, challengeId, code: '000000' }),
+    ]);
+    expect(r1.status).toBe(401);
+    expect(r2.status).toBe(401);
+    expect((await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId } })).attempts).toBe(2);
+  });
+
+  itif('D2-19: EXPIRED and CONSUMED challenges never accumulate attempts', async () => {
+    // EXPIRED: a wrong guess on a dead challenge leaves it untouched.
+    const mobile = '09120002904';
+    await createPortalAccount(A, await newParty(A, 'd2-19exp'), mobile);
+    const expiredId = randomUUID();
+    await prisma.portalOtpCode.create({
+      data: { mobile, challengeId: expiredId, codeHmac: hmac(expiredId + '000000'), expiresAt: new Date(Date.now() - 1000) },
+    });
+    otpMobiles.push(mobile);
+    const expiredTry = await portalPost('/api/portal/verify-otp', { mobile, challengeId: expiredId, code: '000000' });
+    expect(expiredTry.status).toBe(401);
+    expect((await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId: expiredId } })).attempts).toBe(0);
+
+    // CONSUMED: a wrong guess after a successful verify changes nothing.
+    const mobile2 = '09120002905';
+    await createPortalAccount(A, await newParty(A, 'd2-19cons'), mobile2);
+    await requestOtp(mobile2);
+    const code = await readOtpCodeFromSms(mobile2);
+    const liveId = (await prisma.portalOtpCode.findFirstOrThrow({ where: { mobile: mobile2 }, orderBy: { createdAt: 'desc' } })).challengeId;
+    const ok = await portalPost('/api/portal/verify-otp', { mobile: mobile2, challengeId: liveId, code });
+    expect(ok.status).toBe(200);
+    const replay = await portalPost('/api/portal/verify-otp', { mobile: mobile2, challengeId: liveId, code: '000000' });
+    expect(replay.status).toBe(401);
+    const consumedRow = await prisma.portalOtpCode.findUniqueOrThrow({ where: { challengeId: liveId } });
+    expect(consumedRow.consumed).toBe(true);
+    expect(consumedRow.attempts).toBe(0);
+  });
+
   itif('CONTRACT: POST /api/portal/logout revokes the session and clears the cookie', async () => {
     const mobile = '09120002703';
     const paId = await createPortalAccount(A, await newParty(A, 'd2-logout'), mobile);
