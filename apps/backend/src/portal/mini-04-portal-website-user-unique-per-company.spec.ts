@@ -1,4 +1,4 @@
-import { ConflictError } from '../common/errors';
+import { ConflictError, ValidationError } from '../common/errors';
 import { Prisma } from '@prisma/client';
 import { PortalAccountService } from './portal.service';
 import { describeIntegration, integrationPrisma, INTEGRATION_COMPANY_ID, testUuid, disconnectIntegrationPrisma } from '../testing/integration';
@@ -13,9 +13,13 @@ import { describeIntegration, integrationPrisma, INTEGRATION_COMPANY_ID, testUui
 describe('mini-04 portal-website-user-unique-per-company', () => {
   const COMPANY = 'company-1';
 
-  function makeMocks(existing: { verifiedMobile: string; websiteUserId: string | null }[]) {
+  function makeMocks(existing: { verifiedMobile: string; websiteUserId: string | null }[], partyFound: { id: string } | null = { id: 'party-1' }) {
     const created: object[] = [];
     const prisma = {
+      // D2-14: create() first resolves the party's company ownership.
+      party: {
+        findFirst: jest.fn().mockResolvedValue(partyFound),
+      },
       portalAccount: {
         findMany: jest.fn().mockResolvedValue(existing),
         create: jest.fn(async () => {
@@ -29,6 +33,19 @@ describe('mini-04 portal-website-user-unique-per-company', () => {
     const service = new PortalAccountService(prisma as never, { record: jest.fn() } as never);
     return { service, prisma, created };
   }
+
+  it('D2-14: the service rejects a partyId that does not belong to the company', async () => {
+    const { service, prisma } = makeMocks([], null);
+    await expect(
+      service.create(
+        COMPANY,
+        { partyId: testUuid(), verifiedMobile: '09120000009' },
+        { id: 'u1', username: 'a' },
+        {},
+      ),
+    ).rejects.toMatchObject({ message: 'PORTAL_PARTY_NOT_IN_COMPANY' });
+    expect(prisma.portalAccount.create).not.toHaveBeenCalled();
+  });
 
   it('the service rejects a websiteUserId already linked in the same company', async () => {
     const { service } = makeMocks([{ verifiedMobile: '09120000001', websiteUserId: 'web-1' }]);

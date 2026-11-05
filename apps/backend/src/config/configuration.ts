@@ -24,6 +24,13 @@ const envSchema = z.object({
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   LOGIN_LOCK_MINUTES: z.coerce.number().int().positive().default(15),
 
+  /** Portal OTP rate limits (docs/15: 1/min per mobile + 10/hour per IP). */
+  PORTAL_OTP_MOBILE_PER_MINUTE: z.coerce.number().int().positive().default(1),
+  PORTAL_OTP_IP_PER_HOUR: z.coerce.number().int().positive().default(10),
+
+  /** Comma-separated CORS origin whitelist (CORS + portal Origin check, D2-16). */
+  CORS_ORIGINS: z.string().default('http://localhost:3000'),
+
   /** Seed credentials — no defaults for the password (see startup guard below). */
   SEED_ADMIN_USERNAME: z.string().min(1).default('admin'),
   SEED_ADMIN_PASSWORD: z.string().optional(),

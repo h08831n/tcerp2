@@ -1,0 +1,79 @@
+import { CanActivate, ExecutionContext, Injectable, Inject } from '@nestjs/common';
+import { createHmac } from 'crypto';
+import { PrismaService } from '../prisma/prisma.service';
+import { UnauthorizedError, ForbiddenError } from '../common/errors';
+import { AppConfig, CONFIG } from '../config/configuration';
+
+export const PORTAL_SESSION_COOKIE = 'portal_session';
+
+/**
+ * Portal session guard (Gate D-2 Phase 1): validates the portal_session
+ * cookie on EVERY /api/portal/* request. Checks:
+ *   - session exists and not expired
+ *   - PortalAccount.status is ACTIVE
+ *   - Company.status is ACTIVE
+ *   - Party is not archived
+ * Attaches request.portalSession for the controller.
+ */
+@Injectable()
+export class PortalAuthGuard implements CanActivate {
+  constructor(
+    @Inject(CONFIG) private readonly config: AppConfig,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest();
+    const raw = request.cookies?.[PORTAL_SESSION_COOKIE];
+    if (!raw) {
+      throw new UnauthorizedError('Portal session required');
+    }
+
+    const tokenHash = createHmac('sha256', this.config.JWT_SECRET).update(raw).digest('hex');
+    const session = await this.prisma.portalSession.findUnique({
+      where: { tokenHash },
+      include: {
+        portalAccount: {
+          include: {
+            company: { select: { id: true, status: true } },
+          },
+        },
+      },
+    });
+
+    if (!session || session.expiresAt < new Date()) {
+      throw new UnauthorizedError('Portal session expired');
+    }
+
+    const pa = session.portalAccount;
+    if (pa.status !== 'ACTIVE') {
+      throw new ForbiddenError('Portal account is not active');
+    }
+    if (pa.company.status !== 'ACTIVE') {
+      throw new ForbiddenError('Company is not active');
+    }
+
+    // D2-14: the party must EXIST, belong to the SAME company as the portal
+    // account, and not be archived — a corrupt (companyId, partyId) pairing
+    // written directly to the DB can never pass.
+    const party = await this.prisma.party.findFirst({
+      where: { id: pa.partyId, companyId: pa.companyId },
+      select: { archivedAt: true },
+    });
+    if (!party) {
+      throw new ForbiddenError('Party is not available');
+    }
+    if (party.archivedAt) {
+      throw new ForbiddenError('Party is archived');
+    }
+
+    request.portalSession = {
+      sessionId: session.id,
+      portalAccountId: pa.id,
+      companyId: pa.companyId,
+      partyId: pa.partyId,
+      verifiedMobile: pa.verifiedMobile,
+    };
+    return true;
+  }
+}

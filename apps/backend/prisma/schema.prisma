@@ -918,6 +918,7 @@ enum SmsMessageSource {
   AUTOMATION
   NOTIFICATION_RULE
   MANUAL
+  PORTAL
 }
 
 model SmsTemplate {
@@ -3299,7 +3300,8 @@ model PortalAccount {
   status         PortalAccountStatus @default(PENDING)
   createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company Company @relation(fields: [companyId], references: [id])
+  company           Company            @relation(fields: [companyId], references: [id])
+  sessions          PortalSession[]
 
   @@unique([companyId, verifiedMobile])
   // Mini-Gate #3: one website user may link to at most one Party per company.
@@ -3307,4 +3309,45 @@ model PortalAccount {
   //   portal_accounts_website_user_uniq
   @@index([partyId])
   @@map("portal_accounts")
+}
+
+model PortalOtpCode {
+  id          String   @id @default(uuid()) @db.Uuid
+  mobile      String
+  challengeId String   @unique @map("challenge_id") @db.Uuid
+  codeHmac    String   @map("code_hmac") @db.Char(64)
+  ip          String?
+  attempts    Int      @default(0)
+  consumed    Boolean  @default(false)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([mobile, expiresAt])
+  @@index([mobile, createdAt])
+  @@index([ip, createdAt])
+  @@map("portal_otp_codes")
+}
+
+model PortalPendingSelection {
+  id                String   @id @default(uuid()) @db.Uuid
+  tokenHash         String   @unique @map("token_hash") @db.Char(64)
+  portalAccountIds  String[] @map("portal_account_ids")
+  consumed          Boolean  @default(false)
+  expiresAt         DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("portal_pending_selections")
+}
+
+model PortalSession {
+  id              String        @id @default(uuid()) @db.Uuid
+  tokenHash       String        @unique @map("token_hash") @db.Char(64)
+  portalAccountId String        @map("portal_account_id") @db.Uuid
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt       DateTime      @map("expires_at") @db.Timestamptz(6)
+
+  portalAccount PortalAccount @relation(fields: [portalAccountId], references: [id], onDelete: Cascade)
+
+  @@index([portalAccountId, expiresAt])
+  @@map("portal_sessions")
 }

@@ -16,8 +16,9 @@ async function bootstrap(): Promise<void> {
   app.use(cookieParser());
 
   // CORS for the Next.js frontend (cookies are HttpOnly credentials).
+  // Single source of truth with the portal Origin whitelist (D2-16).
   app.enableCors({
-    origin: 'http://localhost:3000',
+    origin: config.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
     credentials: true,
   });
 

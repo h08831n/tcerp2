@@ -983,7 +983,7 @@ describe('g7j — accounting bugfix regressions (hermetic live DB)', () => {
     }
   });
 
-  it('g7j-16 (R-4 review): legacy NULL-staged rows are safely assigned — never deleted', async () => {
+  itif('g7j-16 (R-4 review): legacy NULL-staged rows are safely assigned — never deleted', async () => {
     // Simulate 80502ae-era data: an unassigned STAGED row.
     const legacy = await prismaService.openingBalanceEntry.create({
       data: {
