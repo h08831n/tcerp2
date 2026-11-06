@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, SalesDocumentStatus, LoadingStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { FilesService } from '../files/files.service';
 import { NotFoundError } from '../common/errors';
 
 /**
@@ -31,7 +32,76 @@ export interface PortalSessionContext {
 
 @Injectable()
 export class PortalBusinessService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly files: FilesService,
+  ) {}
+
+  /**
+   * Phase 3 — files attached to the CUSTOMER'S OWN orders and loadings.
+   * The target document must belong to the session's (company, party) — an
+   * attachment on any other document is invisible, listable or downloadable.
+   */
+  async listFiles(ctx: PortalSessionContext) {
+    const [docIds, loadingIds] = await Promise.all([
+      this.prisma.salesDocument.findMany({
+        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId },
+        select: { id: true },
+      }),
+      this.prisma.loading.findMany({
+        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId },
+        select: { id: true },
+      }),
+    ]);
+    const items = await this.prisma.fileAttachment.findMany({
+      where: {
+        companyId: ctx.companyId,
+        OR: [
+          { entityType: 'sales_document', entityId: { in: docIds.map((d) => d.id) } },
+          { entityType: 'loading', entityId: { in: loadingIds.map((l) => l.id) } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { fileBlob: { select: { mimeType: true, size: true } } },
+    });
+    return {
+      items: items.map((a) => ({
+        id: a.id,
+        entityType: a.entityType,
+        entityId: a.entityId,
+        filename: a.displayName ?? a.originalFilename,
+        mimeType: a.fileBlob.mimeType,
+        size: Number(a.fileBlob.size),
+        createdAt: a.createdAt,
+      })),
+      total: items.length,
+    };
+  }
+
+  /** Stream one attachment — ownership resolved from the SESSION, never input. */
+  async downloadFile(ctx: PortalSessionContext, attachmentId: string) {
+    const attachment = await this.prisma.fileAttachment.findFirst({
+      where: { id: attachmentId, companyId: ctx.companyId },
+      select: { id: true, entityType: true, entityId: true },
+    });
+    if (!attachment) throw new NotFoundError('Attachment not found', { id: attachmentId });
+
+    // Party ownership of the TARGET document — the real access decision.
+    let owned = false;
+    if (attachment.entityType === 'sales_document') {
+      owned = (await this.prisma.salesDocument.count({
+        where: { id: attachment.entityId, companyId: ctx.companyId, customerPartyId: ctx.partyId },
+      })) > 0;
+    } else if (attachment.entityType === 'loading') {
+      owned = (await this.prisma.loading.count({
+        where: { id: attachment.entityId, companyId: ctx.companyId, customerPartyId: ctx.partyId },
+      })) > 0;
+    }
+    if (!owned) throw new NotFoundError('Attachment not found', { id: attachmentId });
+
+    // company-scoped S3 download (target-validity asserted inside).
+    return this.files.downloadAttachment(attachmentId, ctx.companyId);
+  }
 
   async getProfile(ctx: PortalSessionContext) {
     const party = await this.prisma.party.findFirstOrThrow({
