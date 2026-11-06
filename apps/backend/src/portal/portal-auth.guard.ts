@@ -53,16 +53,22 @@ export class PortalAuthGuard implements CanActivate {
       throw new ForbiddenError('Company is not active');
     }
 
-    // Party archived check via direct query (no Prisma relation on PortalAccount)
-    const party = await this.prisma.party.findUnique({
-      where: { id: pa.partyId },
+    // D2-14: the party must EXIST, belong to the SAME company as the portal
+    // account, and not be archived — a corrupt (companyId, partyId) pairing
+    // written directly to the DB can never pass.
+    const party = await this.prisma.party.findFirst({
+      where: { id: pa.partyId, companyId: pa.companyId },
       select: { archivedAt: true },
     });
-    if (party?.archivedAt) {
+    if (!party) {
+      throw new ForbiddenError('Party is not available');
+    }
+    if (party.archivedAt) {
       throw new ForbiddenError('Party is archived');
     }
 
     request.portalSession = {
+      sessionId: session.id,
       portalAccountId: pa.id,
       companyId: pa.companyId,
       partyId: pa.partyId,

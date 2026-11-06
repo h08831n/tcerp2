@@ -3,7 +3,7 @@ import { PortalAccount, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
-import { ConflictError, NotFoundError } from '../common/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../common/errors';
 import { RequestContext } from '../auth/auth.service';
 import { CreatePortalAccountDto } from './portal.dto';
 
@@ -42,6 +42,17 @@ export class PortalAccountService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<PortalAccount> {
+    // D2-14: the party MUST belong to the same company as the new portal
+    // account — a cross-company partyId would silently corrupt the portal
+    // authorization chain (session → account → party → company).
+    const party = await this.prisma.party.findFirst({
+      where: { id: dto.partyId, companyId },
+      select: { id: true },
+    });
+    if (!party) {
+      throw new ValidationError('PORTAL_PARTY_NOT_IN_COMPANY', { partyId: dto.partyId });
+    }
+
     // Service-level uniqueness checks (the DB unique indexes stay the last
     // line of defence for concurrent races).
     const clashes = await this.prisma.portalAccount.findMany({

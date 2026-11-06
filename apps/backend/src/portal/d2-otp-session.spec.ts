@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../app.module';
+import { GlobalExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from '../prisma/prisma.service';
 import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
@@ -14,6 +15,11 @@ for (const [key, value] of Object.entries({
   JWT_SECRET: 'd2-otp-jwt-secret-0123456789',
   JWT_REFRESH_SECRET: 'd2-otp-jwt-refresh-secret-0123456789',
   REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
+  // The IP-hourly dimension (10/hour default, docs/15) is shared by every
+  // integration spec booted from loopback — this file issues ~7 OTP requests
+  // from the same IP, so it opts out here; the MOBILE 1/min policy runs at
+  // its production default and every test uses a distinct mobile.
+  PORTAL_OTP_IP_PER_HOUR: '1000',
 })) {
   if (!process.env[key]) process.env[key] = value;
 }
@@ -39,6 +45,7 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
   const createdCompanies: string[] = [];
   const portalAccountIds: string[] = [];
   const partyIds: string[] = [];
+  const otpMobiles: string[] = [];
   let partyAId = '';
   let partyBId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
@@ -92,16 +99,20 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
       data: { companyId: A, type: 'COMPANY', nameFa: `d2-party-A ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
     partyAId = partyARow.id;
+    partyIds.push(partyARow.id);
     const partyBRow = await prisma.party.create({
       data: { companyId: B, type: 'COMPANY', nameFa: `d2-party-B ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
     partyBId = partyBRow.id;
+    partyIds.push(partyBRow.id);
 
-    // Boot the REAL app.
+    // Boot the REAL app — WITH the production global filter so the error
+    // envelope under test is the one production actually serves.
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     const nestApp = await moduleRef.createNestApplication();
     nestApp.setGlobalPrefix('api');
     nestApp.use(require('cookie-parser')());
+    nestApp.useGlobalFilters(new GlobalExceptionFilter());
     await nestApp.init();
     const server = nestApp.getHttpServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -130,12 +141,19 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
           failures.push(`${label}: ${String(error)}`);
         }
       };
+      // OTP SMS rows carry companyId — they MUST go before the companies or
+      // the FK blocks company deletion. Scoped STRICTLY to the mobiles this
+      // suite used (D2-15: no prefix/global deletes).
+      await step('otpSmsMessages', () =>
+        prisma.smsMessage.deleteMany({
+          where: { idempotencyKey: { startsWith: 'portal-otp:' }, to: { in: otpMobiles } },
+        }));
       await step('portalOtpCodes', () =>
-        prisma.portalOtpCode.deleteMany({ where: { mobile: { startsWith: '091200000' } } }));
+        prisma.portalOtpCode.deleteMany({ where: { mobile: { in: otpMobiles } } }));
       await step('portalSessions', () =>
         prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
       await step('portalPendingSelections', () =>
-        prisma.portalPendingSelection.deleteMany({}));
+        prisma.portalPendingSelection.deleteMany({ where: { portalAccountIds: { hasSome: portalAccountIds } } }));
       await step('portalAccounts', () =>
         prisma.portalAccount.deleteMany({ where: { id: { in: portalAccountIds } } }));
       await step('parties', () =>
@@ -154,6 +172,15 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
         throw new Error(`D2 CLEANUP FAILURES:\n- ${failures.join('\n- ')}`);
       }
     }
+  });
+
+  // Rate-limit hygiene: back-to-back jest runs reuse the SAME fixed mobile
+  // numbers and the 1/min mobile limit (D2-11) would trip across runs 60s
+  // apart. Every test starts with a fresh challenge budget, scoped to the
+  // mobiles this suite actually used.
+  beforeEach(async () => {
+    if (!prisma) return;
+    await prisma.portalOtpCode.deleteMany({ where: { mobile: { in: otpMobiles } } });
   });
 
   async function createPortalAccount(companyId: string, partyId: string, mobile: string, status: 'ACTIVE' | 'PENDING' = 'ACTIVE'): Promise<string> {
@@ -176,6 +203,7 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
   }
 
   async function requestOtp(mobile: string, companyId: string): Promise<{ challengeId: string }> {
+    otpMobiles.push(mobile);
     const res = await portalPost('/api/portal/request-otp', { mobile, companyId });
     return (await res.json()) as { challengeId: string };
   }
@@ -243,8 +271,8 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
     const partyB = await prisma.party.create({
       data: { companyId: B, type: 'COMPANY', nameFa: `d2-multi ${marker}`, roles: { create: [{ role: 'CUSTOMER' }] } },
     });
-    partyIds.push(partyBId);
-    const paB = await createPortalAccount(B, partyBId, mobile);
+    partyIds.push(partyB.id);
+    const paB = await createPortalAccount(B, partyB.id, mobile);
 
     const otpRes = await requestOtp(mobile, A);
     const smsMessage = await prisma.smsMessage.findFirstOrThrow({
@@ -254,9 +282,12 @@ describeIntegration('d2-otp-session (real AppModule + portal guards)', () => {
     const code = smsMessage.text.match(/(\d{6})/)?.[1]!;
 
     const verifyRes = await portalPost('/api/portal/verify-otp', { mobile, challengeId: otpRes.challengeId, code });
-    const body = (await verifyRes.json()) as { sessionActive: boolean; pendingSelection?: number };
+    const body = (await verifyRes.json()) as { sessionActive: boolean; pendingSelection?: Array<{ portalAccountId: string; companyName: string }> };
     expect(body.sessionActive).toBe(false);
-    expect(body.pendingSelection).toBe(2);
+    // D2-18: the response carries the SAFE allowed options (docs/17 §1).
+    expect(Array.isArray(body.pendingSelection)).toBe(true);
+    expect(body.pendingSelection).toHaveLength(2);
+    expect(body.pendingSelection!.map((o) => o.portalAccountId).sort()).toEqual([paA, paB].sort());
 
     // Select company A → ACTIVE_SESSION for A only.
     const selectRes = await portalPost('/api/portal/select-company', { portalAccountId: paA }, verifyRes.headers.getSetCookie().find(c => c.startsWith('portal_pending='))?.split(';')[0]);
