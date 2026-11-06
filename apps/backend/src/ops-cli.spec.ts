@@ -13,6 +13,17 @@ jest.setTimeout(120_000);
 const DB_URL = process.env.DATABASE_URL;
 if (TEST_INTEGRATION) assertSafeIntegrationDatabase(DB_URL);
 
+// runCli → loadConfig validates the FULL backend env; CI has no .env and
+// this file may execute before any spec that boots AppModule (which would
+// otherwise provide these). Same only-if-unset pattern as the d2 specs.
+for (const [key, value] of Object.entries({
+  JWT_SECRET: 'ops-cli-jwt-secret-0123456789',
+  JWT_REFRESH_SECRET: 'ops-cli-jwt-refresh-secret-0123456789',
+  REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
+})) {
+  if (!process.env[key]) process.env[key] = value;
+}
+
 /**
  * CLI-04 — automated tests for the operator CLI (scripts/cli-commands/*).
  *
