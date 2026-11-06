@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { loadConfig } from '../src/config/configuration';
 import {
   CliContext,
+  confirmTargetGate,
   dbLabel,
   defaultConfirmInput,
   parseArgs,
@@ -20,8 +21,8 @@ import * as listUsers from './cli-commands/list-users';
  *   npm run cli -- <command> [args] [flags]
  *
  * Commands:
- *   reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-db <db>] [--operator <name>]
- *   unlock <username> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]
+ *   reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-target "<host:port/db>"] [--operator <name>]
+ *   unlock <username> [--yes] [--reason "..."] [--confirm-target "<host:port/db>"] [--operator <name>]
  *   set-status <username> <ACTIVE|DISABLED> [flags...]
  *   list-users [--status <s>]
  *
@@ -44,6 +45,7 @@ interface Command {
 }
 
 const DESTRUCTIVE_FLAGS = ['yes', 'reason', 'confirm-target', 'operator'];
+const DESTRUCTIVE_COMMANDS = new Set(['reset-password', 'unlock', 'set-status']);
 
 const COMMANDS: Record<string, Command> = {
   'reset-password': {
@@ -75,12 +77,31 @@ function printHelp(): void {
     console.log(`  ${name.padEnd(16)} ${cmd.description}`);
   }
   console.log('\nflags: --yes (skip generic confirm)  --reason "..." (audit)  --operator <name> (audit identity)');
-  console.log('       production: --confirm-db <dbname> is REQUIRED (typed target; --yes is not enough)');
+  console.log('       production additionally requires --reason');
   console.log('       passwords: interactive hidden prompt, or pipe with --stdin — never --password');
 }
 
-async function main(): Promise<number> {
-  const parsed = parseArgs(process.argv.slice(2));
+/**
+ * CLI-05 ordering guarantee: the FULL-TARGET gate runs BEFORE the Prisma
+ * client is created and connected — a refused target never opens a
+ * connection, runs a query, and therefore can never mutate anything.
+ * Exported so the automated tests can drive the real dispatcher.
+ */
+export async function runCli(argv: string[], opts: { production?: boolean } = {}): Promise<number> {
+  try {
+    return await runCliInner(argv, opts);
+  } catch (error: unknown) {
+    // Same contract as the process exit path: typed CliErrors carry their
+    // own exit code; anything else is a fatal 1.
+    const message = error instanceof Error ? error.message : String(error);
+    const code = typeof (error as { exitCode?: number })?.exitCode === 'number' ? (error as { exitCode: number }).exitCode : 1;
+    console.error(`ERROR: ${message}`);
+    return code;
+  }
+}
+
+async function runCliInner(argv: string[], opts: { production?: boolean } = {}): Promise<number> {
+  const parsed = parseArgs(argv);
   const [command, ...rest] = parsed.positionals;
 
   if (!command || parsed.flags['help'] === true) {
@@ -89,7 +110,8 @@ async function main(): Promise<number> {
   }
   const cmd = COMMANDS[command];
   if (!cmd) {
-    console.error(`ERROR: unknown command "${command}"\n`);
+    console.error(`ERROR: unknown command "${command}"
+`);
     printHelp();
     return 2;
   }
@@ -104,6 +126,15 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // STAGE 1 — full-target confirmation BEFORE any connection or query.
+  if (DESTRUCTIVE_COMMANDS.has(command)) {
+    await confirmTargetGate(parsed, {
+      target: dbLabel(process.env.DATABASE_URL),
+      action: command,
+      confirmInput: defaultConfirmInput,
+    });
+  }
+
   const config = loadConfig(); // loads .env + validates (same config the backend boots with)
   const prisma = new PrismaClient();
   await prisma.$connect();
@@ -112,10 +143,8 @@ async function main(): Promise<number> {
       // ONE parse for the whole argv — the command takes the first positional
       // and the command receives the remaining positionals + the SAME flags.
       args: { positionals: rest, flags: parsed.flags },
-      // CLI-05: the full target from the REAL DATABASE_URL — credentials and
-      // query parameters are never part of it.
       target: dbLabel(process.env.DATABASE_URL),
-      production: config.NODE_ENV === 'production',
+      production: opts.production ?? config.NODE_ENV === 'production',
       operator:
         (typeof parsed.flags['operator'] === 'string' ? parsed.flags['operator'].trim() : '') ||
         process.env.USERNAME ||
@@ -129,6 +158,10 @@ async function main(): Promise<number> {
   } finally {
     await prisma.$disconnect();
   }
+}
+
+async function main(): Promise<number> {
+  return runCli(process.argv.slice(2));
 }
 
 function ctxOperator(flags: Record<string, string | boolean>): string {

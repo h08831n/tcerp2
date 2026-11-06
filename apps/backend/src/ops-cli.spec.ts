@@ -3,7 +3,8 @@ import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { describeIntegration, TEST_INTEGRATION } from './testing/integration';
 import { assertSafeIntegrationDatabase } from './testing/db-guard';
-import { CliContext, CliError, dbLabel, parseArgs, writeAudit } from '../scripts/cli-lib';
+import { CliContext, CliError, confirmTargetGate, dbLabel, parseArgs, writeAudit } from '../scripts/cli-lib';
+import { runCli } from '../scripts/cli';
 import * as resetPassword from '../scripts/cli-commands/reset-password';
 import * as unlock from '../scripts/cli-commands/unlock';
 import * as setStatus from '../scripts/cli-commands/set-status';
@@ -145,7 +146,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     const id = await createUser(u('reset'), { failed: 5, locked: true, token: true });
     await prisma.refreshToken.create({ data: { userId: id, tokenHash: 'c'.repeat(64), expiresAt: new Date(Date.now() + 3_600_000) } });
 
-    const code = await resetPassword.run(prisma, args(u('reset'), '--stdin', '--yes', '--confirm-target', TARGET), makeCtx());
+    const code = await resetPassword.run(prisma, args(u('reset'), '--stdin', '--yes'), makeCtx());
     expect(code).toBe(0);
 
     const user = await prisma.user.findUniqueOrThrow({ where: { id } });
@@ -177,7 +178,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
         throw new Error('INJECTED_AUDIT_FAILURE');
       },
     });
-    await expect(resetPassword.run(prisma, args(u('auditfail'), '--stdin', '--yes', '--confirm-target', TARGET), ctx)).rejects.toThrow('INJECTED_AUDIT_FAILURE');
+    await expect(resetPassword.run(prisma, args(u('auditfail'), '--stdin', '--yes'), ctx)).rejects.toThrow('INJECTED_AUDIT_FAILURE');
     const after = await prisma.user.findUniqueOrThrow({ where: { id } });
     expect(after.passwordHash).toBe(before.passwordHash); // password NOT changed
     expect(after.mustChangePassword).toBe(false);
@@ -190,7 +191,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     const id = await createUser(u('tokenfail'), { token: true });
     const before = await prisma.user.findUniqueOrThrow({ where: { id } });
     const poisoned = withInjectedFailure(prisma, 'refreshToken', 'updateMany');
-    await expect(resetPassword.run(poisoned, args(u('tokenfail'), '--stdin', '--yes', '--confirm-target', TARGET), makeCtx())).rejects.toThrow('INJECTED_FAILURE:refreshToken.updateMany');
+    await expect(resetPassword.run(poisoned, args(u('tokenfail'), '--stdin', '--yes'), makeCtx())).rejects.toThrow('INJECTED_FAILURE:refreshToken.updateMany');
     const after = await prisma.user.findUniqueOrThrow({ where: { id } });
     expect(after.passwordHash).toBe(before.passwordHash); // password NOT changed
     expect(after.mustChangePassword).toBe(false);
@@ -201,7 +202,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     const logSpy = jest.spyOn(console, 'log');
     const errSpy = jest.spyOn(console, 'error');
     try {
-      const code = await resetPassword.run(prisma, args(u('quiet'), '--stdin', '--yes', '--confirm-target', TARGET), makeCtx());
+      const code = await resetPassword.run(prisma, args(u('quiet'), '--stdin', '--yes'), makeCtx());
       expect(code).toBe(0);
       const stored = (await prisma.user.findUniqueOrThrow({ where: { id } })).passwordHash;
       for (const spy of [logSpy, errSpy]) {
@@ -219,7 +220,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
 
   itif('15: re-running the command is side-effect free', async () => {
     const id = await createUser(u('rerun'), { token: true });
-    const argv = args(u('rerun'), '--stdin', '--yes', '--reason', 'spec rerun', '--confirm-target', TARGET);
+    const argv = args(u('rerun'), '--stdin', '--yes', '--reason', 'spec rerun');
     expect(await resetPassword.run(prisma, argv, makeCtx())).toBe(0);
     const auditsAfterFirst = (await auditsFor(id)).length;
     expect(await resetPassword.run(prisma, argv, makeCtx())).toBe(0);
@@ -233,7 +234,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
 
   itif('6: unlock on a LOCKED account → ACTIVE + counters cleared + audit', async () => {
     const id = await createUser(u('locked'), { status: 'LOCKED', failed: 3, locked: true });
-    const code = await unlock.run(prisma, args(u('locked'), '--yes', '--reason', 'spec unlock', '--confirm-target', TARGET), makeCtx());
+    const code = await unlock.run(prisma, args(u('locked'), '--yes', '--reason', 'spec unlock'), makeCtx());
     expect(code).toBe(0);
     const user = await prisma.user.findUniqueOrThrow({ where: { id } });
     expect(user.status).toBe('ACTIVE');
@@ -248,7 +249,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
 
   itif('7: unlock on a DISABLED account does NOT activate it', async () => {
     const id = await createUser(u('disabled'), { status: 'DISABLED', failed: 2, locked: true });
-    const code = await unlock.run(prisma, args(u('disabled'), '--yes', '--confirm-target', TARGET), makeCtx());
+    const code = await unlock.run(prisma, args(u('disabled'), '--yes'), makeCtx());
     expect(code).toBe(0);
     const user = await prisma.user.findUniqueOrThrow({ where: { id } });
     expect(user.status).toBe('DISABLED'); // untouched
@@ -260,9 +261,9 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
 
   itif('8: set-status ACTIVE→DISABLED→ACTIVE with audit rows', async () => {
     const id = await createUser(u('status'));
-    expect(await setStatus.run(prisma, args(u('status'), 'DISABLED', '--yes', '--reason', 'spec', '--confirm-target', TARGET), makeCtx())).toBe(0);
+    expect(await setStatus.run(prisma, args(u('status'), 'DISABLED', '--yes', '--reason', 'spec'), makeCtx())).toBe(0);
     expect((await prisma.user.findUniqueOrThrow({ where: { id } })).status).toBe('DISABLED');
-    expect(await setStatus.run(prisma, args(u('status'), 'ACTIVE', '--yes', '--reason', 'spec', '--confirm-target', TARGET), makeCtx())).toBe(0);
+    expect(await setStatus.run(prisma, args(u('status'), 'ACTIVE', '--yes', '--reason', 'spec'), makeCtx())).toBe(0);
     expect((await prisma.user.findUniqueOrThrow({ where: { id } })).status).toBe('ACTIVE');
     const audits = await auditsFor(id);
     expect(audits.map((a) => a.action)).toEqual(['UPDATE', 'UPDATE']);
@@ -270,7 +271,7 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
 
   itif('8b: an invalid status value is rejected with exit 2', async () => {
     await createUser(u('badstatus'));
-    const code = await setStatus.run(prisma, args(u('badstatus'), 'SUSPENDED', '--yes', '--confirm-target', TARGET), makeCtx());
+    const code = await setStatus.run(prisma, args(u('badstatus'), 'SUSPENDED', '--yes'), makeCtx());
     expect(code).toBe(2);
   });
 
@@ -291,80 +292,93 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     });
   });
 
-  itif('12: PRODUCTION requires the FULL target confirmation (--confirm-target)', async () => {
-    await createUser(u('prod'), { token: true });
-    const prodCtx = makeCtx({ production: true });
+  itif('12 + CLI-05: PRODUCTION target confirmation happens at the DISPATCHER, pre-connect (runCli)', async () => {
+    const id = await createUser(u('prod'), { token: true });
+    const before = await prisma.user.findUniqueOrThrow({ where: { id } });
 
-    // no --confirm-target (non-interactive) → refused
-    await expect(resetPassword.run(prisma, args(u('prod'), '--stdin', '--yes', '--reason', 'r'), prodCtx)).rejects.toMatchObject({
-      name: 'CliError',
-      exitCode: 2,
-    });
-    // name-only style value / wrong database → refused
+    // no --confirm-target (non-interactive) → exit 2, NOTHING touched
+    expect(await runCli(['unlock', u('prod'), '--yes', '--reason', 'r'], { production: true })).toBe(2);
+    // wrong host → exit 2
+    expect(await runCli(['unlock', u('prod'), '--yes', '--reason', 'r', '--confirm-target', '10.9.9.9:5433/tcerp_test'], { production: true })).toBe(2);
+    // name-only value → exit 2
+    expect(await runCli(['unlock', u('prod'), '--yes', '--reason', 'r', '--confirm-target', 'tcerp_test'], { production: true })).toBe(2);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id } });
+    expect(after.version).toBe(before.version); // NO mutation (not even a failed one)
+    expect(after.status).toBe(before.status);
+    expect(await prisma.auditLog.count({ where: { entityType: 'user', entityId: id } })).toBe(0);
+
+    // the CORRECT full target proceeds (production + reason present)
+    expect(await runCli(['unlock', u('prod'), '--yes', '--reason', 'r', '--confirm-target', TARGET], { production: true })).toBe(0);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id } })).failedLoginCount).toBe(0);
+  });
+
+  itif('CLI-05: the full-target gate is the FIRST control — a refused target never reaches the command (mutation boundary)', async () => {
+    const id = await createUser(u('boundary'), { token: true });
+    const before = await prisma.user.findUniqueOrThrow({ where: { id } });
+
+    expect(await runCli(['reset-password', u('boundary'), '--stdin', '--yes', '--reason', 'r', '--confirm-target', 'other-host:5432/tcerp_test'], { production: false })).toBe(2);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id } });
+    expect(after.version).toBe(before.version); // optimistic-lock version untouched = zero writes
+    expect(after.passwordHash).toBe(before.passwordHash);
+    expect((await prisma.refreshToken.findMany({ where: { userId: id } })).every((t) => t.revokedAt === null)).toBe(true);
+  });
+
+  itif('CLI-05: the SAME database name on a DIFFERENT host does NOT satisfy the confirmation (gate level)', async () => {
+    // The gate is pure args/ctx logic — it touches NO database at all; a
+    // same-NAME target on another host is a DIFFERENT target.
     await expect(
-      resetPassword.run(prisma, args(u('prod'), '--stdin', '--yes', '--reason', 'r', '--confirm-target', 'tcerp_test'), prodCtx),
+      confirmTargetGate(
+        args('--yes', '--confirm-target', TARGET),
+        { target: 'prod-db.internal:5432/tcerp_test', action: 'unlock' },
+      ),
     ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
-    // the CORRECT full target proceeds (fixture user on the TEST db)
-    const code = await resetPassword.run(prisma, args(u('prod'), '--stdin', '--yes', '--reason', 'r', '--confirm-target', TARGET), prodCtx);
-    expect(code).toBe(0);
   });
 
-  itif('CLI-05: the SAME database name on a DIFFERENT host does NOT satisfy the confirmation', async () => {
-    await createUser(u('samehost'), { token: true });
-    // The REAL target is prod-db.internal:5432/tcerp_test — confirming the
-    // test-db target (same NAME, different host) must be refused BEFORE any
-    // database access, in every NODE_ENV (the old --confirm-db gate was
-    // production-only and name-based — red against that behavior).
-    const hostileCtx = makeCtx({
-      target: 'prod-db.internal:5432/tcerp_test',
-      production: false,
-    });
+  itif('CLI-05: the gate is UNIVERSAL — non-production runs must confirm the full target too', async () => {
     await expect(
-      resetPassword.run(prisma, args(u('samehost'), '--stdin', '--yes', '--reason', 'r', '--confirm-target', TARGET), hostileCtx),
+      confirmTargetGate(args('--yes'), { target: TARGET, action: 'unlock' }),
+    ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 }); // non-interactive without the flag
+    await expect(
+      confirmTargetGate(args('--yes', '--confirm-target', 'localhost:5433/other-db'), { target: TARGET, action: 'unlock' }),
     ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
-    // nothing was mutated — the command never reached the database.
-    const user = await prisma.user.findUniqueOrThrow({ where: { username: u('samehost') } });
-    expect(user.mustChangePassword).toBe(false);
+    await expect(
+      confirmTargetGate(args('--yes', '--confirm-target', TARGET), { target: TARGET, action: 'unlock' }),
+    ).resolves.toBeUndefined();
   });
 
-  itif('CLI-05: the full-target gate is UNIVERSAL — non-production --yes without it is refused', async () => {
-    await createUser(u('universaltarget'), { token: true });
-    await expect(resetPassword.run(prisma, args(u('universaltarget'), '--stdin', '--yes'), makeCtx())).rejects.toMatchObject({
-      name: 'CliError',
-      exitCode: 2,
-    });
+  itif('CLI-05: INTERACTIVE runs type the full target — correct proceeds, wrong refused', async () => {
+    await expect(
+      confirmTargetGate(args('--yes'), {
+        target: TARGET,
+        action: 'unlock',
+        interactive: true,
+        confirmInput: async (question) => {
+          expect(question).toContain(TARGET);
+          return 'localhost:5433/other-db';
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
+    await expect(
+      confirmTargetGate(args('--yes'), {
+        target: TARGET,
+        action: 'unlock',
+        interactive: true,
+        confirmInput: async () => TARGET,
+      }),
+    ).resolves.toBeUndefined();
   });
 
-  itif('CLI-05: interactive runs TYPE the full target — correct proceeds, wrong refused', async () => {
-    await createUser(u('interact'), { token: true });
-    const okCtx = makeCtx({
-      interactive: true,
-      confirmInput: async (question) => {
-        expect(question).toContain(TARGET);
-        return TARGET;
-      },
-    });
-    expect(await resetPassword.run(prisma, args(u('interact'), '--stdin', '--yes', '--reason', 'r'), okCtx)).toBe(0);
-    await createUser(u('interactbad'), { token: true });
-    const badCtx = makeCtx({ interactive: true, confirmInput: async () => 'localhost:5433/other-db' });
-    await expect(resetPassword.run(prisma, args(u('interactbad'), '--stdin', '--yes', '--reason', 'r'), badCtx)).rejects.toMatchObject({
-      name: 'CliError',
-      exitCode: 2,
-    });
-  });
-
-  itif('CLI-05: banners and errors never contain credentials or query parameters', async () => {
-    await createUser(u('quietbanner'), { token: true });
+  itif('CLI-05: the gate banner and errors never contain credentials or query parameters', async () => {
     const target = dbLabel('postgresql://admin:super-secret-pw@db.prod.internal:5432/tcerp?schema=public');
     expect(target).toBe('db.prod.internal:5432/tcerp');
     const logSpy = jest.spyOn(console, 'log');
     const errSpy = jest.spyOn(console, 'error');
     try {
-      const ctx = makeCtx({ target, interactive: false });
-      await expect(resetPassword.run(prisma, args(u('quietbanner'), '--stdin', '--yes', '--reason', 'r'), ctx)).rejects.toMatchObject({
-        name: 'CliError',
-        exitCode: 2,
-      });
+      await expect(
+        confirmTargetGate(args('--yes', '--confirm-target', 'localhost:5433/tcerp_test'), { target, action: 'unlock' }),
+      ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
       for (const spy of [logSpy, errSpy]) {
         for (const call of spy.mock.calls) {
           const line = call.join(' ');
@@ -382,13 +396,13 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     await createUser(u('prodreason'), { token: true });
     const prodCtx = makeCtx({ production: true });
     await expect(
-      unlock.run(prisma, args(u('prodreason'), '--yes', '--confirm-target', TARGET), prodCtx),
+      unlock.run(prisma, args(u('prodreason'), '--yes'), prodCtx),
     ).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
   });
 
   itif('9: reset-password writes a PASSWORD_RESET audit row with the operator identity', async () => {
     const id = await createUser(u('auditrow'), { token: true });
-    await resetPassword.run(prisma, args(u('auditrow'), '--stdin', '--yes', '--reason', 'audit check', '--confirm-target', TARGET), makeCtx());
+    await resetPassword.run(prisma, args(u('auditrow'), '--stdin', '--yes', '--reason', 'audit check'), makeCtx());
     const audits = await auditsFor(id);
     expect(audits).toHaveLength(1);
     expect(audits[0].action).toBe('PASSWORD_RESET');

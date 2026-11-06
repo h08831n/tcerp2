@@ -6,13 +6,13 @@ import {
   CliContext,
   CliError,
   findUserOrThrow,
-  guardDestructive,
+  guardMutation,
   strFlag,
   validatePasswordPolicy,
 } from '../cli-lib';
 
 /**
- * reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-db <db>] [--operator <name>]
+ * reset-password <username> [--stdin] [--yes] [--reason "..."] [--no-force-change] [--confirm-target "<host:port/db>"] [--operator <name>]
  *
  * Mirrors UsersService.resetPassword() EXACTLY (src/users/users.service.ts)
  * and is ATOMIC (CLI-01): the password change, the lockout clear, the
@@ -25,9 +25,14 @@ import {
  * line leak via shell history and process listings. The password, its hash,
  * tokens and connection string are never printed.
  *
+ * Ordering (CLI-05): the FULL target `host:port/db` was already confirmed by
+ * the dispatcher BEFORE this process connected — stage 2 below only handles
+ * the user-level banner, the production --reason requirement and the generic
+ * y/N confirm; it can never re-open a refused target.
+ *
  * LOCKED accounts (CLI-03): the lockout WINDOW is cleared, but the
  * administrative status LOCKED is NOT — the account stays locked until
- * `cli unlock <username>` is run (LOCKED → ACTIVE). The output states this.
+ * `cli unlock <username>` is run (LOCKED -> ACTIVE). The output states this.
  */
 export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: CliContext): Promise<number> {
   const username = args.positionals[0];
@@ -58,10 +63,11 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
     return 1;
   }
 
-  await guardDestructive(
+  // STAGE 2 (the target was already confirmed pre-connect by the dispatcher).
+  await guardMutation(
     args,
-    `target: db=${ctx.target}  user=${user.username} (status=${user.status})  action=reset-password`,
-    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
+    `user=${user.username} (status=${user.status})  action=reset-password`,
+    { production: ctx.production, requiresReason: true },
   );
 
   const mustChangePassword = args.flags['no-force-change'] !== true;
@@ -100,7 +106,7 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
   console.log(`  lockout window cleared (failedLoginCount=0, lockedUntil=null)`);
   if (user.status === 'LOCKED') {
     console.log(`  NOTE: status is LOCKED (administrative) — the lockout window was cleared but`);
-    console.log(`  the account REMAINS locked; run "cli unlock ${user.username}" to clear it (LOCKED → ACTIVE).`);
+    console.log(`  the account REMAINS locked; run "cli unlock ${user.username}" to clear it (LOCKED -> ACTIVE).`);
   }
   console.log(`  audit: PASSWORD_RESET by 'cli:${ctx.operator}'${reason ? ` (reason: ${reason})` : ''}`);
   console.log(`  self-verify bcrypt.compare: ${verified ? 'OK' : 'FAILED'}`);

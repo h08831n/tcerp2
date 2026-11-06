@@ -11,10 +11,11 @@ import { isForbiddenSeedPassword } from '../src/config/configuration';
  *  - Password input is interactive-hidden (double confirm) or piped --stdin;
  *    there is deliberately NO --password flag (raw secrets on the command
  *    line leak via shell history and process listings).
- *  - Destructive commands print a target banner (db + username) and require
- *    an interactive `y` confirmation UNLESS `--yes`; non-interactive runs
- *    (no TTY) REQUIRE `--yes`. In PRODUCTION the target itself must be
- *    confirmed with `--confirm-db <dbname>` — `--yes` alone is NOT enough.
+ *  - Destructive commands confirm the FULL target `host:port/db` at the
+ *    dispatcher, BEFORE any connection or query (CLI-05 stage 1) —
+ *    interactive runs type it, automation passes --confirm-target verbatim;
+ *    --yes does NOT bypass it. Stage 2 (inside the command) adds the
+ *    generic y/N confirm (--yes skips) and the production --reason rule.
  *  - Every mutation runs in ONE Prisma transaction together with its audit
  *    row (CLI-01) — audit actor is `cli:<operator>` (CLI-03 identity).
  *  - In production a `--reason` is REQUIRED for destructive commands.
@@ -221,25 +222,19 @@ export async function writeAudit(
 }
 
 /**
- * CLI-01/CLI-03/CLI-05 destructive gate, in order:
- *  1. banner (always printed — full host:port/db target + user + state;
- *     never credentials or query parameters)
- *  2. FULL-TARGET confirmation — ALWAYS, independent of NODE_ENV, including
- *     --yes and non-interactive runs: the confirmation must match the exact
- *     `host:port/database` string of the REAL DATABASE_URL (CLI-05 — a
- *     same-named database on another host does NOT match). Interactive runs
- *     type it at a prompt; automation passes `--confirm-target` verbatim.
- *     A mismatch aborts with exit 2 BEFORE any database access.
- *  3. PRODUCTION: --reason is required for the audit trail.
- *  4. generic confirmation: skipped by --yes; a non-TTY run without --yes
- *     aborts (exit 2).
+ * CLI-05 gate — STAGE 1, runs at the DISPATCHER before the Prisma client is
+ * even created (no connection, no query, obviously no mutation). Confirms
+ * the FULL target `host:port/database` of the REAL DATABASE_URL — ALWAYS,
+ * independent of NODE_ENV, including --yes and non-interactive runs
+ * (a same-named database on another host does NOT match). Interactive runs
+ * type the target; automation passes --confirm-target verbatim. Credentials
+ * and query parameters are never part of the target or the output.
  */
-export async function guardDestructive(
+export async function confirmTargetGate(
   args: ParsedArgs,
-  banner: string,
-  opts: { target: string; production: boolean; requiresReason?: boolean; confirmInput?: (question: string) => Promise<string>; interactive?: boolean },
+  opts: { target: string; action: string; confirmInput?: (question: string) => Promise<string>; interactive?: boolean },
 ): Promise<void> {
-  console.log(banner);
+  console.log(`target: db=${opts.target}  action=${opts.action}`);
   const provided = strFlag(args.flags, 'confirm-target');
   if (provided === undefined) {
     const interactive = opts.interactive ?? process.stdin.isTTY;
@@ -254,6 +249,24 @@ export async function guardDestructive(
   } else if (provided !== opts.target) {
     throw new CliError(2, `target confirmation mismatch — expected "${opts.target}", got "${provided}" — nothing changed`);
   }
+}
+
+/**
+ * CLI-01/CLI-03 gate — STAGE 2, runs inside the command AFTER the user row
+ * is resolved and BEFORE the mutation transaction:
+ *  1. the user-detail banner (state about to change)
+ *  2. PRODUCTION: --reason is required for the audit trail
+ *  3. generic confirmation: skipped by --yes; a non-TTY run without --yes
+ *     aborts (exit 2)
+ * The TARGET was already confirmed in stage 1 — no confirmation logic here
+ * can re-open a refused target.
+ */
+export async function guardMutation(
+  args: ParsedArgs,
+  banner: string,
+  opts: { production: boolean; requiresReason?: boolean },
+): Promise<void> {
+  console.log(banner);
   if (opts.production && opts.requiresReason && !strFlag(args.flags, 'reason')) {
     throw new CliError(2, '--reason is REQUIRED in production for sensitive operations');
   }

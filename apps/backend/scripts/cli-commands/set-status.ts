@@ -2,12 +2,12 @@ import { PrismaClient } from '@prisma/client';
 import {
   CliContext,
   findUserOrThrow,
-  guardDestructive,
+  guardMutation,
   strFlag,
 } from '../cli-lib';
 
 /**
- * set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]
+ * set-status <username> <ACTIVE|DISABLED> [--yes] [--reason "..."] [--confirm-target "<host:port/db>"] [--operator <name>]
  *
  * Mirrors UsersService.enable()/disable() — the status gate is checked on
  * EVERY request (R6-S1), so DISABLED takes effect from the next request.
@@ -31,10 +31,11 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
     return 0;
   }
 
-  await guardDestructive(
+  // STAGE 2 (the target was already confirmed pre-connect by the dispatcher).
+  await guardMutation(
     args,
-    `target: db=${ctx.target}  user=${user.username} (${user.status} → ${status})  action=set-status`,
-    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
+    `user=${user.username} (${user.status} → ${status})  action=set-status`,
+    { production: ctx.production, requiresReason: true },
   );
 
   const reason = strFlag(args.flags, 'reason');

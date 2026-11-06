@@ -3,12 +3,12 @@ import {
   CliContext,
   CliUser,
   findUserOrThrow,
-  guardDestructive,
+  guardMutation,
   strFlag,
 } from '../cli-lib';
 
 /**
- * unlock <username> [--yes] [--reason "..."] [--confirm-db <db>] [--operator <name>]
+ * unlock <username> [--yes] [--reason "..."] [--confirm-target "<host:port/db>"] [--operator <name>]
  *
  * Clears BOTH independent lock mechanisms (src/auth/auth.service.ts login)
  * in ONE transaction together with the audit row (CLI-01):
@@ -29,10 +29,11 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
     console.error(`NOTE: ${user.username} is DISABLED — unlocking the lockout window will NOT re-enable it; use "cli set-status ${user.username} ACTIVE" if that is intended`);
   }
 
-  await guardDestructive(
+  // STAGE 2 (the target was already confirmed pre-connect by the dispatcher).
+  await guardMutation(
     args,
-    `target: db=${ctx.target}  user=${user.username} (status=${user.status}, failed=${user.failedLoginCount}, lockedUntil=${user.lockedUntil?.toISOString() ?? 'null'})  action=unlock`,
-    { target: ctx.target, production: ctx.production, requiresReason: true, confirmInput: ctx.confirmInput, interactive: ctx.interactive },
+    `user=${user.username} (status=${user.status}, failed=${user.failedLoginCount}, lockedUntil=${user.lockedUntil?.toISOString() ?? 'null'})  action=unlock`,
+    { production: ctx.production, requiresReason: true },
   );
 
   const newStatus: CliUser['status'] = user.status === 'LOCKED' ? 'ACTIVE' : user.status;
