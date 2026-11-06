@@ -30,7 +30,9 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
   const PASSWORD = 'Cli-Spec-Passw0rd!9';
   // CLI-05: the FULL destructive target — every destructive run must confirm
   // THIS exact string (host:port/database), not just the database name.
-  const TARGET = 'localhost:5433/tcerp_test';
+  // DERIVED from the actual DATABASE_URL exactly like the dispatcher does —
+  // hardcoding it broke CI (the CI database is not named tcerp_test).
+  const TARGET = dbLabel(process.env.DATABASE_URL);
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
 
   // CLI-06: unique usernames per RUN — re-runs never collide and no broad
