@@ -33,7 +33,7 @@ export interface DownloadResult {
 export type FileBlobDto = Omit<FileBlob, 'size'> & { size: number };
 
 export interface AttachmentWithBlob extends FileAttachment {
-  fileBlob: FileBlob;
+  fileBlob: FileBlobDto;
 }
 
 /** BigInt does not survive JSON.stringify — expose it as a number. */
@@ -48,6 +48,7 @@ function toBlobDto(blob: FileBlob): FileBlobDto {
  * document buckets) are not resolvable and skip the check.
  */
 const COMPANY_SCOPED_ENTITY_MODELS: Record<string, string> = {
+  loading: 'loading',
   party: 'party',
   product_template: 'productTemplate',
   product_variant: 'productVariant',
@@ -279,7 +280,11 @@ export class FilesService {
       } catch {
         continue; // dangling / foreign target — not listable
       }
-      valid.push({ ...attachment, fileBlob, blob: toBlobDto(fileBlob) });
+      // BigInt never survives JSON.stringify — BOTH blob references must be
+      // the converted DTO (the raw fileBlob made every list response 500
+      // with 'Do not know how to serialize a BigInt').
+      const dto = toBlobDto(fileBlob);
+      valid.push({ ...attachment, fileBlob: dto, blob: dto });
     }
     return valid;
   }

@@ -10,6 +10,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { TimelineService, buildChanges } from '../parties/timeline.service';
+import { RecordWeighbridgeDto } from './loading.dto';
+import { AuditAction } from '../audit/audit.dto';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { AccountingEventService } from '../accounting/accounting-event.service';
 import { AccountingEventType } from '@prisma/client';
@@ -654,6 +656,106 @@ export class LoadingService {
    * reversed loading is rejected before anything is written, so this only
    * protects against pathological races).
    */
+  /**
+   * D-5: record the weighbridge (باسکول) in/out weights for a loading and
+   * compute the net server-side (out - in). The loading's own expected
+   * weight (Σ actualQuantity × variant weightPerUnit × the weight UOM's
+   * conversion ratio) is reported alongside as the delta basis; lines whose
+   * variant has no weight metadata are counted, not silently ignored.
+   * Audited atomically (audit failure rolls the whole write back).
+   */
+  async recordWeighbridge(
+    companyId: string,
+    id: string,
+    dto: RecordWeighbridgeDto,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ) {
+    const loading = await this.prisma.loading.findFirst({
+      where: { id, companyId },
+      include: { lines: { select: { actualQuantity: true, productVariantId: true } } },
+    });
+    if (!loading) throw new NotFoundError('Loading not found', { id });
+    // LoadingLine has NO productVariant relation (Phase 3 FK) — batch lookup.
+    const variantIds = [...new Set(loading.lines.map((l) => l.productVariantId))];
+    const variants = await this.prisma.productVariant.findMany({
+      where: { id: { in: variantIds } },
+      select: { id: true, weightPerUnit: true, weightUom: { select: { conversionRatio: true } } },
+    });
+    const weightById = new Map(variants.map((v) => [v.id, v]));
+    if (loading.status === 'REVERSED') throw new ValidationError('LOADING_REVERSED');
+
+    const inKg = new Prisma.Decimal(dto.inKg);
+    const outKg = new Prisma.Decimal(dto.outKg);
+    if (outKg.lt(inKg)) {
+      throw new ValidationError('WEIGHBRIDGE_OUT_LT_IN', { inKg: dto.inKg, outKg: dto.outKg });
+    }
+    const netKg = outKg.minus(inKg);
+
+    let expectedKg = new Prisma.Decimal(0);
+    let unmeasurableLines = 0;
+    for (const line of loading.lines) {
+      const variant = weightById.get(line.productVariantId);
+      const wpu = variant?.weightPerUnit ?? null;
+      const ratio = variant?.weightUom?.conversionRatio ?? null;
+      if (!wpu || !ratio) {
+        unmeasurableLines += 1;
+        continue;
+      }
+      expectedKg = expectedKg.plus(line.actualQuantity.times(wpu).times(ratio));
+    }
+    const deltaKg = netKg.minus(expectedKg);
+    const deltaPercent = expectedKg.gt(0) ? deltaKg.div(expectedKg).times(100).toDecimalPlaces(2).toNumber() : null;
+
+    const updated = await this.prisma.$transaction(async (trx) => {
+      const row = await trx.loading.update({
+        where: { id: loading.id },
+        data: {
+          weighbridgeTicketNo: dto.ticketNo ?? null,
+          weighbridgeInKg: inKg,
+          weighbridgeOutKg: outKg,
+          weighbridgeNetKg: netKg,
+          weighbridgeAt: new Date(),
+        },
+      });
+      await this.auditService.recordTx(trx, {
+        entityType: 'loading',
+        entityId: loading.id,
+        action: AuditAction.UPDATE,
+        actor,
+        companyId,
+        oldValues: {
+          weighbridgeTicketNo: loading.weighbridgeTicketNo ?? null,
+          weighbridgeInKg: loading.weighbridgeInKg ?? null,
+          weighbridgeOutKg: loading.weighbridgeOutKg ?? null,
+          weighbridgeNetKg: loading.weighbridgeNetKg ?? null,
+        },
+        newValues: {
+          weighbridgeTicketNo: dto.ticketNo ?? null,
+          weighbridgeInKg: inKg.toString(),
+          weighbridgeOutKg: outKg.toString(),
+          weighbridgeNetKg: netKg.toString(),
+        },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      return row;
+    });
+
+    return {
+      loadingId: updated.id,
+      ticketNo: updated.weighbridgeTicketNo ?? null,
+      inKg: inKg.toString(),
+      outKg: outKg.toString(),
+      netKg: netKg.toString(),
+      expectedKg: expectedKg.toString(),
+      deltaKg: deltaKg.toString(),
+      deltaPercent,
+      unmeasurableLines,
+      recordedAt: updated.weighbridgeAt,
+    };
+  }
+
   async reverse(
     companyId: string,
     id: string,

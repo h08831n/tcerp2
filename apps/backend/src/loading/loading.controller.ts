@@ -25,6 +25,10 @@ import { RequestContext } from '../auth/auth.service';
 import { CompanyContextService } from '../companies/company-context.service';
 import { PermissionsService } from '../permissions/permissions.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
+import { FilesService } from '../files/files.service';
+import { RecordWeighbridgeDto } from './loading.dto';
+import { StreamableFile, Res, HttpCode } from '@nestjs/common';
+import { Response } from 'express';
 
 /**
  * Driver-info visibility (REQUIREMENTS §20 / p6-08): a caller sees restricted
@@ -41,7 +45,56 @@ export class LoadingController {
     private readonly companyContext: CompanyContextService,
     private readonly permissionsService: PermissionsService,
     private readonly relations: DocumentRelationService,
+    private readonly filesService: FilesService,
   ) {}
+
+  /** D-5: record the weighbridge in/out weights; net computed server-side. */
+  @Post(':id/weighbridge')
+  @HttpCode(200)
+  @RequirePermissions('loading.edit')
+  async recordWeighbridge(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RecordWeighbridgeDto,
+    @CurrentUser() actor: { id: string; username: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
+    return this.loadingService.recordWeighbridge(companyId, id, dto, actor, this.ctx(request));
+  }
+
+  // NOTE: uploading a loading attachment = the EXISTING multipart
+  // POST /api/files with { entityType: 'loading', entityId: <loadingId> } —
+  // no second upload path is invented here.
+
+  @Get(':id/attachments')
+  @RequirePermissions('loading.view')
+  async listAttachments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+  ) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    const loading = await this.loadingService.getById(companyId, id, await this.viewer(companyId, user.id));
+    return this.filesService.listAttachments(companyId, { entityType: 'loading', entityId: loading.id });
+  }
+
+  @Get(':id/attachments/:attachmentId/download')
+  @RequirePermissions('files.download')
+  async downloadAttachment(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attachmentId', ParseUUIDPipe) attachmentId: string,
+    @CurrentUser() user: { id: string },
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<StreamableFile> {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    await this.loadingService.getById(companyId, id, await this.viewer(companyId, user.id));
+    const result = await this.filesService.downloadAttachment(attachmentId, companyId);
+    response.setHeader('Content-Type', result.contentType);
+    response.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.filename)}"`);
+    response.setHeader('Content-Length', String(result.size));
+    return new StreamableFile(result.stream);
+  }
 
   private ctx(request: Request): RequestContext {
     return { ip: request.ip, userAgent: request.headers['user-agent'] };
