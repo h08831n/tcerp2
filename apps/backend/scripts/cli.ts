@@ -173,13 +173,19 @@ function ctxOperator(flags: Record<string, string | boolean>): string {
   );
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const code = typeof (error as { exitCode?: number })?.exitCode === 'number' ? (error as { exitCode: number }).exitCode : 1;
-    console.error(`ERROR: ${message}`);
-    process.exitCode = code;
-  });
+// Auto-run ONLY as a real script — importing this module for runCli (the
+// ops-cli spec does) must NOT execute main() with the IMPORTER's argv:
+// jest's argv has no command positional, so main() resolved to help (exit 2)
+// and poisoned process.exitCode AFTER the suite had already passed green.
+if (require.main === module) {
+  main()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = typeof (error as { exitCode?: number })?.exitCode === 'number' ? (error as { exitCode: number }).exitCode : 1;
+      console.error(`ERROR: ${message}`);
+      process.exitCode = code;
+    });
+}
