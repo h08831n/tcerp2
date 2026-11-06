@@ -7,6 +7,7 @@ import {
   defaultConfirmInput,
   parseArgs,
   readStdinAll,
+  resolveTarget,
   writeAudit,
 } from './cli-lib';
 import * as resetPassword from './cli-commands/reset-password';
@@ -126,16 +127,21 @@ async function runCliInner(argv: string[], opts: { production?: boolean } = {}):
     return 2;
   }
 
+  // .env is loaded FIRST (loadConfig is env-only — no DB), so a DATABASE_URL
+  // provided ONLY via .env is visible to the target gate; a missing/invalid
+  // URL fails closed with a typed refusal BEFORE anything connects.
+  const config = loadConfig();
+  const target = await resolveTarget(process.env.DATABASE_URL);
+
   // STAGE 1 — full-target confirmation BEFORE any connection or query.
   if (DESTRUCTIVE_COMMANDS.has(command)) {
     await confirmTargetGate(parsed, {
-      target: dbLabel(process.env.DATABASE_URL),
+      target,
       action: command,
       confirmInput: defaultConfirmInput,
     });
   }
 
-  const config = loadConfig(); // loads .env + validates (same config the backend boots with)
   const prisma = new PrismaClient();
   await prisma.$connect();
   try {

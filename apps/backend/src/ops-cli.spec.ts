@@ -3,7 +3,7 @@ import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { describeIntegration, TEST_INTEGRATION } from './testing/integration';
 import { assertSafeIntegrationDatabase } from './testing/db-guard';
-import { CliContext, CliError, confirmTargetGate, dbLabel, parseArgs, writeAudit } from '../scripts/cli-lib';
+import { CliContext, CliError, confirmTargetGate, dbLabel, parseArgs, resolveTarget, writeAudit } from '../scripts/cli-lib';
 import { runCli } from '../scripts/cli';
 import * as resetPassword from '../scripts/cli-commands/reset-password';
 import * as unlock from '../scripts/cli-commands/unlock';
@@ -336,6 +336,18 @@ describeIntegration('ops-cli (in-process command runs on the test DB)', () => {
     expect(after.version).toBe(before.version); // optimistic-lock version untouched = zero writes
     expect(after.passwordHash).toBe(before.passwordHash);
     expect((await prisma.refreshToken.findMany({ where: { userId: id } })).every((t) => t.revokedAt === null)).toBe(true);
+  });
+
+  it('CLI-02 fail-closed: missing / invalid / credential-bearing DATABASE_URL resolution', async () => {
+    // missing → typed CliError 2, NEVER a confusing connect error later
+    await expect(resolveTarget(undefined)).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
+    await expect(resolveTarget('')).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
+    await expect(resolveTarget('   ')).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
+    // invalid URL → typed CliError 2
+    await expect(resolveTarget('not-a-url')).rejects.toMatchObject({ name: 'CliError', exitCode: 2 });
+    // valid → full target WITHOUT credentials or query parameters
+    const target = await resolveTarget('postgresql://admin:secret@db.internal:5433/prod?schema=public');
+    expect(target).toBe('db.internal:5433/prod');
   });
 
   itif('CLI-05: the SAME database name on a DIFFERENT host does NOT satisfy the confirmation (gate level)', async () => {

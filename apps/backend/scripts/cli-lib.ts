@@ -72,6 +72,30 @@ export function dbLabel(url: string | undefined): string {
   }
 }
 
+/**
+ * CLI-02 fail-closed: resolve the FULL destructive target from the DATABASE
+ * URL or abort BEFORE any connection. Missing/garbage URLs are a typed
+ * exit-2 refusal — never a confusing driver error mid-command and never a
+ * guess. The result excludes credentials and query parameters.
+ */
+export function resolveTarget(rawUrl: string | undefined): Promise<string> {
+  const fail = (message: string): Promise<never> => Promise.reject(new CliError(2, message));
+  if (rawUrl === undefined || rawUrl.trim().length === 0) {
+    return fail('DATABASE_URL is not set — cannot determine the destructive target (fail-closed)');
+  }
+  const parsed = (() => {
+    try {
+      return new URL(rawUrl);
+    } catch {
+      return null;
+    }
+  })();
+  if (!parsed || !parsed.hostname || parsed.pathname.replace(/^\//, '').length === 0) {
+    return fail('DATABASE_URL is not a valid URL — cannot determine the destructive target (fail-closed)');
+  }
+  return Promise.resolve(dbLabel(rawUrl));
+}
+
 /** Database name from a postgres URL — the production confirmation token. */
 export function dbNameFromUrl(url: string | undefined): string {
   if (!url) return '';
