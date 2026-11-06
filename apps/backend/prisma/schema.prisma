@@ -477,6 +477,7 @@ model User {
   timezone           String     @default("Asia/Tehran")
   defaultCompanyId   String?    @map("default_company_id") @db.Uuid
   version            Int        @default(1) // optimistic locking
+  tokenVersion       Int        @default(0) @map("token_version") // embedded in access JWTs; incremented on password reset → old ACCESS tokens die
   failedLoginCount   Int        @default(0) @map("failed_login_count")
   lockedUntil        DateTime?  @map("locked_until") @db.Timestamptz(6)
   mustChangePassword Boolean    @default(false) @map("must_change_password")

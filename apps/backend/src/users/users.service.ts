@@ -251,7 +251,7 @@ export class UsersService {
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     await this.prisma.user.update({
       where: { id },
-      data: { passwordHash, mustChangePassword: true, failedLoginCount: 0, lockedUntil: null },
+      data: { passwordHash, mustChangePassword: true, failedLoginCount: 0, lockedUntil: null, tokenVersion: { increment: 1 } },
     });
     // Invalidate all active sessions after an administrative password reset.
     await this.prisma.refreshToken.updateMany({

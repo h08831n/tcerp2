@@ -281,8 +281,11 @@ export class AuthService {
     };
   }
 
-  private signAccessToken(user: User): string {
-    return jwt.sign({ sub: user.id, username: user.username }, this.config.JWT_SECRET, {
+  private signAccessToken(user: Pick<User, 'id' | 'username' | 'tokenVersion'>): string {
+    // tokenVersion binds the JWT to the user's credential generation: every
+    // password reset increments it, so previously issued ACCESS tokens are
+    // rejected by the guard (refresh tokens were already revoked on reset).
+    return jwt.sign({ sub: user.id, username: user.username, ver: user.tokenVersion }, this.config.JWT_SECRET, {
       expiresIn: this.config.ACCESS_TOKEN_TTL,
     } as jwt.SignOptions);
   }
