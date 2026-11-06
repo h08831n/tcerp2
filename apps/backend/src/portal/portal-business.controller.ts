@@ -22,6 +22,11 @@ interface PortalRequest extends Request {
  * Portal Business API (Gate D-2 Phase 2) — safe read models for the
  * customer portal. Every endpoint is protected by PortalAuthGuard and
  * company+party scoped from the verified session.
+ *
+ * D2-13: GET /api/portal/me is THE single session-identity contract
+ * ({companyId, partyId}) owned by PortalAuthController — the business
+ * profile lives HERE at /api/portal/profile (a duplicate /me handler
+ * would be shadowed and was removed).
  */
 @Public()
 @UseGuards(PortalAuthGuard)
@@ -36,8 +41,9 @@ export class PortalBusinessController {
     };
   }
 
-  @Get('me')
-  async me(@Req() request: PortalRequest) {
+  // Business profile (party/company names, roles) — NOT identity (/me).
+  @Get('profile')
+  async profile(@Req() request: PortalRequest) {
     return this.business.getProfile(this.ctx(request));
   }
 

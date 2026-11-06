@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AppModule } from '../app.module';
+import { GlobalExceptionFilter } from '../common/filters/http-exception.filter';
 import { PrismaService } from '../prisma/prisma.service';
 import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
@@ -118,6 +119,7 @@ describeIntegration('d2-portal-business (real AppModule, two companies)', () => 
     const nestApp = await moduleRef.createNestApplication();
     nestApp.setGlobalPrefix('api');
     nestApp.use(require('cookie-parser')());
+    nestApp.useGlobalFilters(new GlobalExceptionFilter());
     await nestApp.init();
     const server = nestApp.getHttpServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -181,14 +183,31 @@ describeIntegration('d2-portal-business (real AppModule, two companies)', () => 
     expect(res.status).toBe(401);
   });
 
-  itif('company A session: /me returns company A data', async () => {
+  itif('company A session: /profile returns the BUSINESS profile (D2-13 route split)', async () => {
     const paA = await prisma.portalAccount.findFirstOrThrow({
       where: { companyId: companyIdA, status: 'ACTIVE' },
     });
     const token = await makeSession(paA.id);
     await prisma.portalSession.findFirstOrThrow({ where: { tokenHash: hmac(token) } });
+    // RED before the D2-13 fix: the business profile lived on /me and was
+    // SHADOWED by PortalAuthController's identity /me — /profile did not exist.
+    const res = await portalGet('/api/portal/profile', token);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.partyId).toBeTruthy();
+    expect(body.companyName).toBeTruthy();
+    expect(Array.isArray(body.roles)).toBe(true);
+  });
+
+  itif('/me stays the identity contract ONLY {companyId, partyId} — no business fields', async () => {
+    const paA = await prisma.portalAccount.findFirstOrThrow({
+      where: { companyId: companyIdA, status: 'ACTIVE' },
+    });
+    const token = await makeSession(paA.id);
     const res = await portalGet('/api/portal/me', token);
     expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['companyId', 'partyId']);
   });
 
   itif('company B session: foreign sales document ID → 404', async () => {
