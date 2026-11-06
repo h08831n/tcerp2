@@ -122,4 +122,26 @@ export class ExportsController {
     response.setHeader('Content-Disposition', 'attachment; filename="parties.csv"');
     response.send(`\uFEFF${csv}`);
   }
+
+  /** D-4 TEMPLATE: product catalog export (one row per active variant). */
+  @Get('products.csv')
+  @RequirePermissions('imports.export')
+  async exportProducts(@CurrentUser() user: { id: string }, @Req() request: Request, @Res() response: Response) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    const csv = await this.imports.exportProductsCsv(companyId);
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition', 'attachment; filename="products.csv"');
+    response.send(`\uFEFF${csv}`);
+  }
+
+  /** D-4 TEMPLATE: contacts export (party contacts with phones). */
+  @Get('contacts.csv')
+  @RequirePermissions('imports.export')
+  async exportContacts(@CurrentUser() user: { id: string }, @Req() request: Request, @Res() response: Response) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    const csv = await this.imports.exportContactsCsv(companyId);
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+    response.send(`\uFEFF${csv}`);
+  }
 }

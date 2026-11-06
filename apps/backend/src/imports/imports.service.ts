@@ -1342,4 +1342,73 @@ export class ImportsService {
     }
     return toCsv(rows);
   }
+
+  /**
+   * D-4: product CATALOG export — one row per VARIANT with its template
+   * context. TEMPLATE (proposed): templateCode, templateNameFa, variantSku,
+   * variantNameFa, variantNameEn, defaultUomSymbol. Owner may adjust the
+   * column set before treating it as a business contract.
+   */
+  async exportProductsCsv(companyId: string): Promise<string> {
+    const variants = await this.prisma.productVariant.findMany({
+      where: { companyId, active: true },
+      orderBy: [{ templateId: 'asc' }, { sku: 'asc' }],
+      select: {
+        sku: true,
+        nameFa: true,
+        nameEn: true,
+        template: { select: { internalCode: true, nameFa: true } },
+        defaultUom: { select: { symbol: true } },
+      },
+    });
+    const rows: Array<Array<string | number | null>> = [
+      ['templateInternalCode', 'templateNameFa', 'variantSku', 'variantNameFa', 'variantNameEn', 'defaultUomSymbol'],
+    ];
+    for (const v of variants) {
+      rows.push([v.template.internalCode, v.template.nameFa, v.sku, v.nameFa, v.nameEn, v.defaultUom?.symbol ?? null]);
+    }
+    return toCsv(rows);
+  }
+
+  /**
+   * D-4: CONTACTS export — one row per party contact with the owning party.
+   * TEMPLATE (proposed): partyNameFa, contactName, position, email, isPrimary,
+   * phones (pipe-separated mobile|phone). Owner may adjust.
+   */
+  async exportContactsCsv(companyId: string): Promise<string> {
+    const parties = await this.prisma.party.findMany({
+      where: { companyId, archivedAt: null },
+      orderBy: { nameFa: 'asc' },
+      select: {
+        nameFa: true,
+        contacts: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            name: true,
+            position: true,
+            email: true,
+            isPrimary: true,
+            phones: { select: { kind: true, normalizedValue: true } },
+          },
+        },
+      },
+    });
+    const rows: Array<Array<string | number | null>> = [
+      ['partyNameFa', 'contactName', 'position', 'email', 'isPrimary', 'mobile', 'phone'],
+    ];
+    for (const party of parties) {
+      for (const c of party.contacts) {
+        rows.push([
+          party.nameFa,
+          c.name,
+          c.position,
+          c.email,
+          c.isPrimary ? '1' : '0',
+          c.phones.find((ph) => ph.kind === 'MOBILE')?.normalizedValue ?? null,
+          c.phones.find((ph) => ph.kind === 'PHONE')?.normalizedValue ?? null,
+        ]);
+      }
+    }
+    return toCsv(rows);
+  }
 }
