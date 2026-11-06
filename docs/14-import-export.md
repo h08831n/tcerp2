@@ -151,3 +151,34 @@ execution for huge files, backup/restore and load tests are NOT done yet.
   of HTTP 500 — a scraping monitor must not page for target-down when only one
   family is unreadable (g11-12 pattern extended; g11-17 pins both paths).
 - Scrape config: standard Prometheus `scrape_configs` entry against `/api/metrics`.
+
+---
+
+## پیوست: D-4 — قالب‌های پیشنهادی صادرات جدید و GRN Import (در انتظار تأیید مالک)
+
+### صادرات محصولات (`GET /api/exports/products.csv`) — پیاده‌سازی‌شده (قالب پیشنهادی)
+
+ستون‌ها: `templateInternalCode, templateNameFa, variantSku, variantNameFa, variantNameEn, defaultUomSymbol` — یک ردیف به‌ازای هر واریانت فعال. ستون‌ها قابل تنظیم بر اساس نیاز کسب‌وکار است.
+
+### صادرات تماس‌ها (`GET /api/exports/contacts.csv`) — پیاده‌سازی‌شده (قالب پیشنهادی)
+
+ستون‌ها: `partyNameFa, contactName, position, email, isPrimary, mobile, phone` — یک ردیف به‌ازای هر تماسِ پارتی‌های غیرآرشیو. `isPrimary` به‌صورت `1/0`.
+
+### GRN Import — قالب پیشنهادی (نیازمند تأیید مالک پیش از پیاده‌سازی)
+
+GoodsReceipt به خرید متصل است و در Integrity Gate با تخصیص SERIALIZABLE ثبت می‌شود؛ ایمپورت انبوه آن بدون قفل‌شدگی و خطای تخصیص معنا ندارد مگر ردیف‌به‌ردیف با همان تراکنش سرویس. قالب پیشنهادی:
+
+```
+purchaseDocumentNumber, receivedDate, lineOrder, variantSku, quantity, uomSymbol, unitCost, notes
+PO-00001, 1405/08/01, 1, VAR-001, 50, kg, 420000, کانکس اول
+PO-00001, 1405/08/01, 2, VAR-002, 20, kg, 610000,
+```
+
+موارد نیازمند تأیید مالک:
+1. آیا GRN همیشه به «یک سند خرید کامل» می‌چسبد یا GRN مستقل (بدون PO) هم مجاز است؟
+2. واحد پولی unitCost و رفتار اختلاف با قیمت خرید سند (خطا یا پذیرش با audit؟)
+3. رفتار ردیف تکراری: خطا یا merge با GRN موجود همان روز/سند؟
+4. batch یا PER_ROW commit (پیش‌فرض موتور: PER_ROW)
+5. آیا stock location هدف ستون است یا انبار پیش‌فرض شرکت؟
+
+تا تأیید نشود GRN import پیاده‌سازی نمی‌شود تا قالب نیمه‌باز رسمی نشود.
