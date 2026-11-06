@@ -232,13 +232,46 @@ export class JournalService {
     );
     // Optional-chain + guard: some callers (legacy unit tests) hand a stubbed
     // tx without fiscal delegates — treated as "no fiscal calendar".
-    const year = (await tx.fiscalYear?.findFirst?.({
+    // Deterministic + overlap-tolerant year resolution: production calendars
+    // never overlap (single candidate → identical behavior), but overlapping
+    // calendars must resolve to whichever candidate can LEGALLY accept the
+    // posting (open year + open period) instead of an arbitrary heap-order
+    // pick — the previous findFirst flipped between OPEN and CLOSED years
+    // run-to-run (observed as flaky PERIOD_CLOSED).
+    const candidates = (await tx.fiscalYear?.findMany?.({
       where: {
         companyId,
         startDate: { lte: calendarDay },
         endDate: { gte: calendarDay },
       },
-    })) ?? null;
+      orderBy: { startDate: 'desc' },
+      select: { id: true, code: true, status: true },
+    })) ?? [];
+    let year: { id: string; code: string; status: string } | null = null;
+    let period: { code: string; status: string } | null = null;
+    if (candidates.length > 0) {
+      const periods = (await tx.fiscalPeriod?.findMany?.({
+        where: {
+          fiscalYearId: { in: candidates.map((c) => c.id) },
+          startDate: { lte: calendarDay },
+          endDate: { gte: calendarDay },
+        },
+      })) ?? [];
+      for (const candidate of candidates) {
+        const match = periods.find((p) => p.fiscalYearId === candidate.id) ?? null;
+        if (candidate.status !== 'CLOSED' && match && match.status !== 'CLOSED') {
+          year = candidate;
+          period = match;
+          break;
+        }
+      }
+      if (!year) {
+        // No candidate can accept the posting — report the FIRST (deterministic)
+        // candidate's state via the original checks below.
+        year = candidates[0];
+        period = periods.find((p) => p.fiscalYearId === year!.id) ?? null;
+      }
+    }
     if (!year) {
       // R5-P1 policy: a company with NO fiscal calendar at all posts
       // unguarded (legacy, documented). A company WITH a calendar must NOT
@@ -256,19 +289,12 @@ export class JournalService {
     if (year.status === 'CLOSED') {
       throw new ValidationError('FISCAL_YEAR_CLOSED', { fiscalYearCode: year.code });
     }
-    const period = (await tx.fiscalPeriod?.findFirst?.({
-      where: {
-        fiscalYearId: year.id,
-        startDate: { lte: calendarDay },
-        endDate: { gte: calendarDay },
-      },
-    })) ?? null;
     if (period) {
       if (period.status === 'CLOSED') {
         throw new ValidationError('PERIOD_CLOSED', { periodCode: period.code });
       }
     } else {
-      throw new ValidationError('PERIOD_NOT_FOUND', { fiscalYearCode: year.code });
+      throw new ValidationError('PERIOD_NOT_FOUND', { fiscalYearCode: year?.code ?? 'unknown' });
     }
   }
 
@@ -280,12 +306,19 @@ export class JournalService {
   async reverse(
     entryId: string,
     actor?: { id?: string },
+    companyId?: string,
   ): Promise<{ original: JournalEntry; reversal: JournalEntry & { lines: unknown[] } }> {
     return this.prisma.$transaction(async (trx) => {
       const original = await trx.journalEntry.findUnique({
         where: { id: entryId },
         include: { lines: { include: { analytics: true } } },
       });
+      // Company scope: a companyId-aware caller (every future HTTP route)
+      // must pass it; a foreign entry is indistinguishable from a missing
+      // one (404 — never 403, no existence leak across companies).
+      if (companyId && original && original.companyId !== companyId) {
+        throw new NotFoundError('Journal entry not found', { entryId });
+      }
       if (!original) throw new NotFoundError('Journal entry not found', { entryId });
       if (original.status === 'REVERSED') {
         throw new ValidationError('Journal entry is already reversed', { entryId });

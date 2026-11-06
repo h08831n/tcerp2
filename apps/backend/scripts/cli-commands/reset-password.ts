@@ -78,7 +78,7 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
   await prisma.$transaction(async (trx) => {
     await trx.user.update({
       where: { id: user.id },
-      data: { passwordHash, mustChangePassword, failedLoginCount: 0, lockedUntil: null },
+      data: { passwordHash, mustChangePassword, failedLoginCount: 0, lockedUntil: null, tokenVersion: { increment: 1 } },
     });
     // Sessions die with the refresh tokens — the admin-reset semantics.
     const revoked = await trx.refreshToken.updateMany({
@@ -104,6 +104,7 @@ export async function run(prisma: PrismaClient, args: CliContext['args'], ctx: C
   console.log(`OK password reset for ${user.username} (operator: ${ctx.operator})`);
   console.log(`  mustChangePassword: ${mustChangePassword}`);
   console.log(`  lockout window cleared (failedLoginCount=0, lockedUntil=null)`);
+  console.log(`  access tokens revoked (tokenVersion incremented)`);
   if (user.status === 'LOCKED') {
     console.log(`  NOTE: status is LOCKED (administrative) — the lockout window was cleared but`);
     console.log(`  the account REMAINS locked; run "cli unlock ${user.username}" to clear it (LOCKED -> ACTIVE).`);

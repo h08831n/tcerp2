@@ -57,10 +57,17 @@ export class JwtAuthGuard implements CanActivate {
     // R6-S1: re-validate user status on EVERY non-public request.
     const dbUser = await this.prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { status: true },
+      select: { status: true, tokenVersion: true },
     });
     if (!dbUser || dbUser.status !== 'ACTIVE') {
       throw new UnauthorizedError('Account is disabled or does not exist');
+    }
+    // Access-token revocation: a token from BEFORE the latest password reset
+    // carries an older generation (missing ver = generation 0) and is dead.
+    const payloadAny = payload as Record<string, unknown>;
+    const tokenVer = typeof payloadAny['ver'] === 'number' ? payloadAny['ver'] : 0;
+    if (tokenVer !== dbUser.tokenVersion) {
+      throw new UnauthorizedError('Access token revoked; sign in again');
     }
 
     request.user = { id: payload.sub, username: payload.username ?? '' };
