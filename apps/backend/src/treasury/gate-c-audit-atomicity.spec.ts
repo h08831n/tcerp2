@@ -103,7 +103,7 @@ describeIntegration('gate-c treasury audit atomicity (receipt/payment)', () => {
     await step('journalEntries', () =>
       prisma.journalEntry.deleteMany({ where: { id: { in: entryIds } } }));
     await step('checks', () =>
-      prisma.check.deleteMany({ where: { id: { in: checks.map((c) => c.id) } } }));
+      prisma.check.deleteMany({ where: { companyId: A } }));
     await step('receipts', () =>
       prisma.receipt.deleteMany({ where: { id: { in: receipts.map((r) => r.id) } } }));
     await step('payments', () =>
