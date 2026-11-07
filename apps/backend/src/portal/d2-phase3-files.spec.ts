@@ -50,6 +50,8 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   const attachmentIds: string[] = [];
   const visibleIds: Record<string, string> = {}; // companyId → visible attachment id
   const internalIds: Record<string, string> = {}; // companyId → internal attachment id
+  const trackedBlobIds: string[] = [];
+  let foreignBlobId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
   let minioUp = false;
 
@@ -154,6 +156,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
         cid, { id: admin.id, username: admin.username }, {},
       );
       attachmentIds.push(attachment.id);
+      trackedBlobIds.push(attachment.fileBlobId);
       internalIds[cid] = attachment.id;
       // CUSTOMER-VISIBLE attachment (explicitly flagged)
       const { attachment: visible } = await files!.upload(
@@ -162,6 +165,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
         cid, { id: admin.id, username: admin.username }, {},
       );
       attachmentIds.push(visible.id);
+      trackedBlobIds.push(visible.fileBlobId);
       visibleIds[cid] = visible.id;
     }
   });
@@ -176,7 +180,13 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
         try { await fn(); } catch (e) { failures.push(`${label}: ${String(e)}`); }
       };
       await step('attachments', () => prisma.fileAttachment.deleteMany({ where: { id: { in: attachmentIds } } }));
-      await step('blobs', () => prisma.fileBlob.deleteMany({ where: { createdAt: { gte: new Date(Date.now() - 3_600_000) } } }));
+      await step('blobs-tracked', () => prisma.fileBlob.deleteMany({ where: { id: { in: trackedBlobIds } } }));
+      await step('foreignBlobSurvived', async () => {
+        if (!foreignBlobId) return;
+        const still = await prisma.fileBlob.findUnique({ where: { id: foreignBlobId } });
+        if (!still) throw new Error('FOREIGN FileBlob was DELETED by suite cleanup');
+        await prisma.fileBlob.delete({ where: { id: foreignBlobId } });
+      });
       await step('docs', () => prisma.salesDocument.deleteMany({ where: { id: { in: docIds } } }));
       await step('sessions', () => prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
       await step('accounts', () => prisma.portalAccount.deleteMany({ where: { id: { in: portalAccountIds } } }));

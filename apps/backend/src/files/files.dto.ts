@@ -22,6 +22,12 @@ export class UploadFileDto {
   @IsString()
   @MaxLength(64)
   category?: string;
+
+  /** D-2 Phase 3: DEFAULT DENY — must be explicitly 'true' (multipart
+   *  fields arrive as strings) for the customer portal to see this file. */
+  @IsOptional()
+  @IsBoolean()
+  customerVisible?: boolean;
 }
 
 export class CreateAttachmentDto {
