@@ -52,23 +52,22 @@ jobs:
       # started as a plain docker step (health-checked with curl).
       - name: Start MinIO (files service storage)
         run: |
-          # Docker Hub anonymous pulls are rate-limited; try the Google
-          # mirror first, then fall back to docker.io with backoff.
+          # D5-01: the S3-backed tests MUST run in CI (a silent skip would
+          # fake file-feature readiness). docker.io is reachable (postgres
+          # pulls from it in the same job); the earlier minio/minio refusal
+          # was a transient anonymous rate limit — retry with backoff and
+          # FAIL the job honestly if no image can be pulled.
           IMAGE=""
-          for ref in mirror.gcr.io/minio/minio:latest minio/minio:latest; do
-            for attempt in 1 2 3; do
-              if docker pull "$ref"; then IMAGE="$ref"; break 2; fi
-              sleep $((attempt * 10))
-            done
+          for attempt in 1 2 3 4; do
+            if docker pull minio/minio:latest; then IMAGE="minio/minio:latest"; break; fi
+            echo "pull attempt $attempt failed — backing off"
+            sleep $((attempt * 20))
           done
           if [ -z "$IMAGE" ]; then
-            echo "::warning::MinIO image unavailable from all registries — S3-backed tests will skip (runtime probe)"
-            exit 0
+            echo "::error::MinIO image could not be pulled — S3-backed tests cannot run; this CI run is a FAILURE, not a pass"
+            exit 1
           fi
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=tcerpminio \
-            -e MINIO_ROOT_PASSWORD=tcerpminio123 \
-            "$IMAGE" server /data
+          docker run -d --name minio -p 9000:9000             -e MINIO_ROOT_USER=tcerpminio             -e MINIO_ROOT_PASSWORD=tcerpminio123             "$IMAGE" server /data
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/live > /dev/null; then
               echo "MinIO healthy after ${i}x2s"

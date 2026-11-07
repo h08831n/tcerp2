@@ -47,6 +47,8 @@ describeIntegration('d5-loading-weighbridge (real AppModule + MinIO)', () => {
   let loadingId = '';
   let loadingIdForeign = '';
   let variantWithWeight = '';
+  const blobIds: string[] = [];
+  let foreignBlobId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
   let minioUp = false;
 
@@ -115,11 +117,28 @@ describeIntegration('d5-loading-weighbridge (real AppModule + MinIO)', () => {
     app = nestApp;
     // S3-backed tests need a REACHABLE MinIO; CI without a MinIO container
     // skips them honestly instead of failing on a missing service.
-    minioUp = await fetch('http://localhost:9000/minio/health/live')
+    // Probe the CONFIGURED S3 endpoint (compose maps MinIO to :9100, CI :9000)
+    const s3Base = loadConfig().S3_ENDPOINT.replace(/\/$/, '');
+    minioUp = await fetch(`${s3Base}/minio/health/live`)
       .then((r) => r.ok)
       .catch(() => false);
     if (!minioUp) {
       console.warn('[d5] MinIO unreachable — S3-backed attachment tests SKIP (real coverage runs where MinIO is up)');
+    }
+
+    // D5-02 tripwire: a FOREIGN blob created RIGHT NOW (inside the same
+    // hour window the old cleanup used to wipe) must survive the suite.
+    if (minioUp) {
+      const foreignBlob = await prisma.fileBlob.create({
+        data: {
+          sha256: `foreign-${marker}`,
+          mimeType: 'text/plain',
+          size: 1n,
+          storageKey: `foreign/${marker}.txt`,
+          createdBy: null,
+        },
+      });
+      foreignBlobId = foreignBlob.id;
     }
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
@@ -140,7 +159,14 @@ describeIntegration('d5-loading-weighbridge (real AppModule + MinIO)', () => {
         try { await fn(); } catch (e) { failures.push(`${label}: ${String(e)}`); }
       };
       await step('fileAttachments', () => prisma.fileAttachment.deleteMany({ where: { companyId: { in: createdCompanies } } }));
-      await step('fileBlobs', () => prisma.fileBlob.deleteMany({ where: { createdAt: { gte: new Date(Date.now() - 3_600_000) } } }));
+      await step('fileBlobs-tracked', () => prisma.fileBlob.deleteMany({ where: { id: { in: blobIds } } }));
+      // D5-02 tripwire: the FOREIGN blob must SURVIVE the suite, then is
+      // removed by its own tracked id.
+      await step('foreignBlobSurvived', async () => {
+        const still = await prisma.fileBlob.findUnique({ where: { id: foreignBlobId } });
+        if (!still) throw new Error('D5-02: the FOREIGN FileBlob was DELETED by suite cleanup');
+        await prisma.fileBlob.delete({ where: { id: foreignBlobId } });
+      });
       await step('auditLogs', () => prisma.auditLog.deleteMany({ where: { companyId: { in: createdCompanies } } }));
       await step('loadingLines', () => prisma.loadingLine.deleteMany({ where: { loading: { companyId: { in: createdCompanies } } } }));
       await step('loadings', () => prisma.loading.deleteMany({ where: { companyId: { in: createdCompanies } } }));
@@ -221,9 +247,10 @@ describeIntegration('d5-loading-weighbridge (real AppModule + MinIO)', () => {
       body: new Uint8Array(body),
     });
     expect([200, 201]).toContain(up.status);
-    const upBody = (await up.json()) as { attachment?: { id?: string } };
+    const upBody = (await up.json()) as { attachment?: { id?: string; fileBlobId?: string } };
     const attachmentId = upBody.attachment?.id ?? '';
     expect(attachmentId).toBeTruthy();
+    if (upBody.attachment?.fileBlobId) blobIds.push(upBody.attachment.fileBlobId);
 
     const list = await fetch(`${baseUrl}/api/loadings/${loadingId}/attachments`, {
       headers: { Authorization: `Bearer ${adminToken}`, 'x-company-id': companyId },
