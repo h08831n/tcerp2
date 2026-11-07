@@ -50,24 +50,15 @@ jobs:
       # D-5/Phase 3 upload tests need a REAL S3-compatible server. GitHub
       # services cannot pass `server /data` to the minio image, so MinIO is
       # started as a plain docker step (health-checked with curl).
+      # D5-01: stable MinIO without registry roulette — Docker Hub removed
+      # the minio images (pull denied), quay/ECR/mirror all fail anonymous.
+      # MinIO's OWN CDN (dl.min.io) serves the static server binary — no
+      # auth, no rate limit. S3-backed tests then run for REAL in CI.
       - name: Start MinIO (files service storage)
         run: |
-          # D5-01: the S3-backed tests MUST run in CI (a silent skip would
-          # fake file-feature readiness). docker.io is reachable (postgres
-          # pulls from it in the same job); the earlier minio/minio refusal
-          # was a transient anonymous rate limit — retry with backoff and
-          # FAIL the job honestly if no image can be pulled.
-          IMAGE=""
-          for attempt in 1 2 3 4; do
-            if docker pull minio/minio:latest; then IMAGE="minio/minio:latest"; break; fi
-            echo "pull attempt $attempt failed — backing off"
-            sleep $((attempt * 20))
-          done
-          if [ -z "$IMAGE" ]; then
-            echo "::error::MinIO image could not be pulled — S3-backed tests cannot run; this CI run is a FAILURE, not a pass"
-            exit 1
-          fi
-          docker run -d --name minio -p 9000:9000             -e MINIO_ROOT_USER=tcerpminio             -e MINIO_ROOT_PASSWORD=tcerpminio123             "$IMAGE" server /data
+          curl -sfL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          chmod +x /tmp/minio
+          MINIO_ROOT_USER=tcerpminio MINIO_ROOT_PASSWORD=tcerpminio123             nohup /tmp/minio server /tmp/minio-data --address :9000 > /tmp/minio.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/live > /dev/null; then
               echo "MinIO healthy after ${i}x2s"
