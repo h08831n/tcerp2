@@ -1,14 +1,16 @@
 # TCERP CI — one workflow, two jobs (backend with a real PostgreSQL test
-# database, frontend typecheck+build). The integration suite runs in-band
-# against the dedicated `tcerp_test` database — the DATABASE_URL fail-closed
-# guard (src/testing/db-guard.ts) allows exactly localhost:5432/tcerp_test.
+# database + a real MinIO for the files service, frontend typecheck+build).
+# The integration suite runs in-band against the dedicated `tcerp_test`
+# database — the DATABASE_URL fail-closed guard (src/testing/db-guard.ts)
+# allows exactly localhost:5432/tcerp_test.
+# pull_request has NO branch filter: stacked PRs (feature → feature) get
+# real CI too, not just PRs targeting main.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
   backend:
@@ -27,11 +29,29 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: tcerpminio
+          MINIO_ROOT_PASSWORD: tcerpminio123
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: apps/backend
     env:
       DATABASE_URL: postgresql://tcerp:tcerp@localhost:5432/tcerp_test?schema=public
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: tcerpminio
+      S3_SECRET_KEY: tcerpminio123
+      S3_BUCKET: tcerp-files
+      S3_FORCE_PATH_STYLE: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
