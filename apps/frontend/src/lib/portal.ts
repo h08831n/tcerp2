@@ -142,9 +142,13 @@ export interface PortalLoadingList {
 }
 
 export interface PortalDebt {
-  balance: number;
+  /** Exact decimal string — the backend returns Decimal.toString() */
+  balance: string;
   direction: "DEBT" | "CREDIT";
-  currency: string;
+  /** null until the base-currency policy is ratified */
+  currency: string | null;
+  /** false = no PartyOperationalBalance row exists yet (≠ computed zero) */
+  computed: boolean;
   lastComputedAt: string | null;
 }
 

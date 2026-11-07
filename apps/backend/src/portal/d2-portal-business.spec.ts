@@ -264,8 +264,11 @@ describeIntegration('d2-portal-business (real AppModule, two companies)', () => 
     const token = await makeSession(paB.id);
     const res = await portalGet('/api/portal/debt', token);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { balance?: number; direction?: string };
-    expect(typeof body.balance).toBe('number');
+    const body = (await res.json()) as { balance?: string; direction?: string; computed?: boolean };
+    // D-4/D-6: the balance is an EXACT decimal STRING (no float precision
+    // loss) and `computed` distinguishes a real row from the default.
+    expect(typeof body.balance).toBe('string');
     expect(['DEBT', 'CREDIT']).toContain(body.direction);
+    expect(body.computed).toBeDefined();
   });
 });

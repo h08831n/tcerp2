@@ -38,29 +38,45 @@ export class PortalBusinessService {
   ) {}
 
   /**
-   * Phase 3 — files attached to the CUSTOMER'S OWN orders and loadings.
-   * The target document must belong to the session's (company, party) — an
-   * attachment on any other document is invisible, listable or downloadable.
+   * Phase 3 (final) — files attached to the CUSTOMER'S OWN orders and
+   * loadings, with THREE independent gates (all must pass):
+   *   1. PARENT SCOPE: the target document belongs to the session's
+   *      (company, party).
+   *   2. PARENT STATUS: the document is in the portal-visible status
+   *      allowlist (same lists the orders/loadings endpoints serve).
+   *   3. CUSTOMER VISIBILITY (DEFAULT DENY): the attachment carries
+   *      customer_visible = TRUE — internal attachments on the same
+   *      documents stay invisible.
+   * List and Download share the EXACT same policy (the where clause below).
    */
-  async listFiles(ctx: PortalSessionContext) {
+  private async visibleFileWhere(ctx: PortalSessionContext): Promise<Prisma.FileAttachmentWhereInput> {
+    // FileAttachment's target is POLYMORPHIC (entityType + entityId, no FK
+    // relation) — the parent allowlist is resolved via ID sets first: the
+    // customer's own orders/loadings restricted to the portal-visible
+    // status lists (a CANCELLED order or DRAFT loading is not file-visible).
     const [docIds, loadingIds] = await Promise.all([
       this.prisma.salesDocument.findMany({
-        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId },
+        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId, status: { in: PORTAL_ORDER_STATUSES } },
         select: { id: true },
       }),
       this.prisma.loading.findMany({
-        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId },
+        where: { companyId: ctx.companyId, customerPartyId: ctx.partyId, status: { in: PORTAL_LOADING_STATUSES } },
         select: { id: true },
       }),
     ]);
+    return {
+      companyId: ctx.companyId,
+      customerVisible: true,
+      OR: [
+        { entityType: 'sales_document', entityId: { in: docIds.map((d) => d.id) } },
+        { entityType: 'loading', entityId: { in: loadingIds.map((l) => l.id) } },
+      ],
+    };
+  }
+
+  async listFiles(ctx: PortalSessionContext) {
     const items = await this.prisma.fileAttachment.findMany({
-      where: {
-        companyId: ctx.companyId,
-        OR: [
-          { entityType: 'sales_document', entityId: { in: docIds.map((d) => d.id) } },
-          { entityType: 'loading', entityId: { in: loadingIds.map((l) => l.id) } },
-        ],
-      },
+      where: await this.visibleFileWhere(ctx),
       orderBy: { createdAt: 'desc' },
       include: { fileBlob: { select: { mimeType: true, size: true } } },
     });
@@ -78,30 +94,19 @@ export class PortalBusinessService {
     };
   }
 
-  /** Stream one attachment — ownership resolved from the SESSION, never input. */
+  /** Stream one attachment — the SAME policy as listFiles (findFirst with
+   *  the identical where + id). No separate authorization path. */
   async downloadFile(ctx: PortalSessionContext, attachmentId: string) {
     const attachment = await this.prisma.fileAttachment.findFirst({
-      where: { id: attachmentId, companyId: ctx.companyId },
-      select: { id: true, entityType: true, entityId: true },
+      where: { ...(await this.visibleFileWhere(ctx)), id: attachmentId },
+      select: { id: true },
     });
     if (!attachment) throw new NotFoundError('Attachment not found', { id: attachmentId });
-
-    // Party ownership of the TARGET document — the real access decision.
-    let owned = false;
-    if (attachment.entityType === 'sales_document') {
-      owned = (await this.prisma.salesDocument.count({
-        where: { id: attachment.entityId, companyId: ctx.companyId, customerPartyId: ctx.partyId },
-      })) > 0;
-    } else if (attachment.entityType === 'loading') {
-      owned = (await this.prisma.loading.count({
-        where: { id: attachment.entityId, companyId: ctx.companyId, customerPartyId: ctx.partyId },
-      })) > 0;
-    }
-    if (!owned) throw new NotFoundError('Attachment not found', { id: attachmentId });
 
     // company-scoped S3 download (target-validity asserted inside).
     return this.files.downloadAttachment(attachmentId, ctx.companyId);
   }
+
 
   async getProfile(ctx: PortalSessionContext) {
     const party = await this.prisma.party.findFirstOrThrow({
@@ -377,20 +382,17 @@ export class PortalBusinessService {
   }
 
   async getDebt(ctx: PortalSessionContext) {
-    const balance = await this.prisma.partyOperationalBalance.findUnique({
+    const row = await this.prisma.partyOperationalBalance.findUnique({
       where: { companyId_partyId: { companyId: ctx.companyId, partyId: ctx.partyId } },
       select: { balance: true, updatedAt: true },
     });
-
-    const raw = balance?.balance ?? new Prisma.Decimal(0);
-    const positive = raw.gte(0);
-
+    const raw = row?.balance ?? new Prisma.Decimal(0);
     return {
-      // positive = customer owes the company; negative = customer has credit
-      balance: raw.toNumber(),
-      direction: positive ? 'DEBT' : 'CREDIT',
-      currency: 'IRR',
-      lastComputedAt: balance?.updatedAt ?? null,
+      balance: raw.toString(),
+      direction: raw.gte(0) ? 'DEBT' : 'CREDIT',
+      currency: null,
+      computed: row !== null,
+      lastComputedAt: row?.updatedAt ?? null,
     };
   }
 }

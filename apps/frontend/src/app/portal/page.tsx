@@ -35,8 +35,10 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("fa-IR");
 }
 
-function formatMoney(value: number, currency: string): string {
-  return `${value.toLocaleString("fa-IR")} ${currency === "IRR" ? "ریال" : currency}`;
+function formatMoney(value: string | number, currency: string): string {
+  const num = typeof value === 'string' ? Number(value) : value;
+  const suffix = currency === 'IRR' ? 'ریال' : currency ? currency : '';
+  return `${num.toLocaleString('fa-IR')}${suffix ? ` ${suffix}` : ''}`;
 }
 
 export default function PortalDashboardPage() {
@@ -110,14 +112,19 @@ export default function PortalDashboardPage() {
             )}
           </div>
           <div className="flex items-center gap-3">
-            {debt && (
+            {debt && debt.computed && (
               <span
                 className={`rounded-full px-3 py-1 text-xs font-medium ${
                   debt.direction === "DEBT" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"
                 }`}
               >
                 {debt.direction === "DEBT" ? "مانده بدهی:" : "اعتبار:"}{" "}
-                {formatMoney(Math.abs(debt.balance), debt.currency)}
+                {formatMoney(debt.balance.replace("-", ""), debt.currency ?? "")}
+              </span>
+            )}
+            {debt && !debt.computed && (
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+                مانده محاسبه نشده
               </span>
             )}
             <Button variant="secondary" size="sm" onClick={handleLogout}>

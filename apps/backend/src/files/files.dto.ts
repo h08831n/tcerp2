@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, IsUUID, MaxLength, MinLength , IsBoolean } from 'class-validator';
 
 /**
  * Metadata for a direct upload (POST /files, multipart). Mini-Gate: entityType
@@ -48,6 +48,12 @@ export class CreateAttachmentDto {
   @IsString()
   @MaxLength(64)
   category?: string;
+
+  /** D-2 Phase 3 (final): DEFAULT DENY — must be explicitly TRUE for the
+   *  customer portal to list/download this attachment. */
+  @IsOptional()
+  @IsBoolean()
+  customerVisible?: boolean;
 }
 
 export class ListAttachmentsQueryDto {

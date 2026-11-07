@@ -752,7 +752,10 @@ model FileAttachment {
   originalFilename String   @map("original_filename")
   displayName      String?  @map("display_name")
   category         String?
-  createdBy        String?  @map("created_by") @db.Uuid
+  // D-2 Phase 3 (final): DEFAULT DENY — the customer portal lists/downloads
+  // an attachment ONLY when customer_visible is explicitly TRUE.
+  customerVisible  Boolean    @default(false) @map("customer_visible")
+  createdBy        String?    @map("created_by") @db.Uuid
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   fileBlob FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)

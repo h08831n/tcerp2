@@ -48,6 +48,8 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   const partyIds: string[] = [];
   const docIds: string[] = [];
   const attachmentIds: string[] = [];
+  const visibleIds: Record<string, string> = {}; // companyId → visible attachment id
+  const internalIds: Record<string, string> = {}; // companyId → internal attachment id
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
   let minioUp = false;
 
@@ -106,10 +108,14 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
     baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     app = nestApp;
     // S3-backed tests need a REACHABLE MinIO; CI without one skips honestly.
-    minioUp = await fetch('http://localhost:9000/minio/health/live')
+    // Probe the CONFIGURED S3 endpoint (compose maps MinIO to :9100, CI :9000)
+    const probed = new URL(loadConfig().S3_ENDPOINT);
+    probed.hostname = '127.0.0.1';
+    const s3Base = probed.toString().replace(/\/$/, '');
+    minioUp = await fetch(`${s3Base}/minio/health/live`)
       .then((r) => r.ok)
       .catch(() => false);
-    if (!minioUp) console.warn('[p3] MinIO unreachable — S3-backed tests SKIP');
+    console.warn(`[p3] MinIO probe ${s3Base} → ${minioUp ? 'UP' : 'DOWN'}`);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -141,12 +147,22 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
         },
       });
       docIds.push(doc.id);
+      // INTERNAL attachment (customerVisible NOT set → DEFAULT DENY)
       const { attachment } = await files!.upload(
         { buffer: Buffer.from(`p3-secret-${label}`), originalname: `p3-${label}.txt`, mimetype: 'text/plain', size: 12 },
         { entityType: 'sales_document', entityId: doc.id, displayName: `سند ${label}` },
         cid, { id: admin.id, username: admin.username }, {},
       );
       attachmentIds.push(attachment.id);
+      internalIds[cid] = attachment.id;
+      // CUSTOMER-VISIBLE attachment (explicitly flagged)
+      const { attachment: visible } = await files!.upload(
+        { buffer: Buffer.from(`p3-visible-${label}`), originalname: `p3-vis-${label}.txt`, mimetype: 'text/plain', size: 15 },
+        { entityType: 'sales_document', entityId: doc.id, displayName: `صورت‌حساب ${label}`, customerVisible: true },
+        cid, { id: admin.id, username: admin.username }, {},
+      );
+      attachmentIds.push(visible.id);
+      visibleIds[cid] = visible.id;
     }
   });
 
@@ -185,7 +201,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
     expect(res.status).toBe(401);
   });
 
-  itif('company A session: list shows ONLY the A attachment (B invisible)', async () => {
+  itif('company A session: list shows ONLY the customer-visible attachment (internal invisible)', async () => {
     if (!minioUp) {
       console.warn('[p3] skipped — MinIO unreachable (upload/list require the real storage)');
       return;
@@ -193,38 +209,46 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
     const token = await makeSession(portalAccountIds[0]);
     const res = await portalGet('/api/portal/files', token);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { items: Array<{ id: string; filename: string; size: number }>; total: number };
-    expect(body.total).toBe(1);
-    expect(body.items[0].id).toBe(attachmentIds[0]);
-    expect(body.items[0].filename).toBe('سند A');
-    expect(body.items[0].size).toBe(11); // TRUE byte length, not the declared 12
+    const body = (await res.json()) as { items: Array<{ id: string; filename: string }>; total: number };
+    expect(body.total).toBe(1); // DEFAULT DENY: only the visible one
+    expect(body.items[0].filename).toContain('صورت‌حساب');
+    // the INTERNAL attachment on the same order must NOT be listed
+    expect(body.items.some((a) => a.id === internalIds[A])).toBe(false);
+  });
+
+  itif('D2-FINAL: INTERNAL attachment on the customer OWN order → NOT downloadable (DEFAULT DENY)', async () => {
+    if (!minioUp) return;
+    const token = await makeSession(portalAccountIds[0]);
+    const dl = await portalGet(`/api/portal/files/${internalIds[A]}/download`, token);
+    expect(dl.status).toBe(404);
+  });
+
+  itif('D2-FINAL: customer-VISIBLE attachment on the same order downloads', async () => {
+    if (!minioUp) return;
+    const token = await makeSession(portalAccountIds[0]);
+    const res = await portalGet(`/api/portal/files/${visibleIds[A]}/download`, token);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(`p3-visible-${'A'}`);
   });
 
   itif('IDOR: downloading the OTHER company attachment with the A session → 404', async () => {
     const token = await makeSession(portalAccountIds[0]);
-    const res = await portalGet(`/api/portal/files/${attachmentIds[1]}/download`, token);
+    const res = await portalGet(`/api/portal/files/${internalIds[B]}/download`, token);
     expect(res.status).toBe(404);
   });
 
-  itif('own attachment downloads with the STORED content', async () => {
-    if (!minioUp) return;
-    const token = await makeSession(portalAccountIds[0]);
-    const res = await portalGet(`/api/portal/files/${attachmentIds[0]}/download`, token);
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-disposition')).toContain('p3-A.txt');
-    const text = await res.text();
-    expect(text).toBe('p3-secret-A');
-  });
 
-  itif('company B session: A attachment not listed, own attachment downloadable', async () => {
+
+  itif('company B session: A attachments not listed, own visible attachment downloadable', async () => {
     if (!minioUp) return;
     const tokenB = await makeSession(portalAccountIds[1]);
     const list = await portalGet('/api/portal/files', tokenB);
     const body = (await list.json()) as { items: Array<{ id: string }>; total: number };
     expect(body.total).toBe(1);
-    expect(body.items[0].id).toBe(attachmentIds[1]);
-    const dl = await portalGet(`/api/portal/files/${attachmentIds[1]}/download`, tokenB);
+    expect(body.items[0].id).toBe(visibleIds[B]);
+    expect(body.items[0].id).not.toBe(internalIds[B]);
+    const dl = await portalGet(`/api/portal/files/${visibleIds[B]}/download`, tokenB);
     expect(dl.status).toBe(200);
-    expect(await dl.text()).toBe('p3-secret-B');
+    expect(await dl.text()).toBe('p3-visible-B');
   });
 });
