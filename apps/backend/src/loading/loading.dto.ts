@@ -173,3 +173,23 @@ export class ReleaseDriverInfoDto {
   @MaxLength(1000)
   note?: string;
 }
+
+/**
+ * D-5: weighbridge (باسکول) recording. inKg/outKg are the scale ticket's
+ * gross weights; the net is COMPUTED server-side (out - in) — the client
+ * never supplies it. Both values must be present together and positive;
+ * out >= in is enforced (a truck cannot weigh less leaving).
+ */
+export class RecordWeighbridgeDto {
+  @IsOptional()
+  @IsString()
+  ticketNo?: string;
+
+  @IsNumber()
+  @IsPositive()
+  inKg!: number;
+
+  @IsNumber()
+  @IsPositive()
+  outKg!: number;
+}
