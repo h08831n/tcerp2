@@ -230,6 +230,22 @@ describeIntegration('d2-portal-business (real AppModule, two companies)', () => 
     expect(res.status).toBe(200);
   });
 
+
+  itif('D5-QA: pagination page/limit garbage → 400 (never 500)', async () => {
+    const paA = await prisma.portalAccount.findFirstOrThrow({
+      where: { companyId: companyIdA, status: 'ACTIVE' },
+    });
+    const token = await makeSession(paA.id);
+    for (const query of ['?page=abc', '?page=NaN', '?limit=-5', '?limit=1.5', '?page=Infinity', '?page=1e5&limit=abc']) {
+      const res = await portalGet(`/api/portal/orders${query}`, token);
+      expect(`${query} → ${res.status}`).toBe(`${query} → 400`);
+    }
+    // a HUGE limit is not garbage — the service caps it at 50 (no 500)
+    const huge = await portalGet('/api/portal/orders?limit=99999999999999999999', token);
+    expect(huge.status).toBe(200);
+    expect(((await huge.json()) as { limit: number }).limit).toBeLessThanOrEqual(50);
+  });
+
   itif('Pagination limit is server-capped at 50', async () => {
     const paA = await prisma.portalAccount.findFirstOrThrow({
       where: { companyId: companyIdA, status: 'ACTIVE' },

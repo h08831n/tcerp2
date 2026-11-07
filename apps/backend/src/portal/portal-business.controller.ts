@@ -13,6 +13,22 @@ import { Request } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { PortalAuthGuard } from './portal-auth.guard';
 import { PortalBusinessService, PortalSessionContext } from './portal-business.service';
+import { AppError } from '../common/errors';
+
+/**
+ * Pagination query parsing for the portal read models: garbage input is a
+ * typed 400 BAD_REQUEST — never a 500 from NaN leaking into Prisma
+ * skip/take. Non-numeric, negative and decimal values are rejected;
+ * out-of-range values are capped by the service.
+ */
+function parseIntQuery(raw: string | undefined, name: string, fallback: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    throw new AppError(400, 'BAD_REQUEST', `${name} must be a positive integer (got "${raw}")`);
+  }
+  return value;
+}
 
 interface PortalRequest extends Request {
   portalSession?: PortalSessionContext;
@@ -55,8 +71,8 @@ export class PortalBusinessController {
     @Query('status') status?: string,
   ) {
     return this.business.listOrders(this.ctx(request), {
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      page: parseIntQuery(page, 'page', 1),
+      limit: parseIntQuery(limit, 'limit', 20),
       status,
     });
   }
@@ -73,8 +89,8 @@ export class PortalBusinessController {
     @Query('limit') limit?: string,
   ) {
     return this.business.listLoadings(this.ctx(request), {
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      page: parseIntQuery(page, 'page', 1),
+      limit: parseIntQuery(limit, 'limit', 20),
     });
   }
 
