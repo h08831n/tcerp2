@@ -69,27 +69,33 @@ jobs:
       # D5-01: MinIO runs in the SAME shell as the integration tests (a
       # background process started in an earlier step was reaped between
       # steps on the runner — the runtime probe saw it DOWN). Start →
-      # health-check → test → kill, atomically in one shell.
+      # health-check → test → kill, atomically in one shell. If the CDN
+      # fails, declare S3 coverage NOT_TESTED and still run jest (the
+      # runtime probe skips the S3-backed tests with a printed reason).
       - name: Integration tests (in-band, tcerp_test)
         run: |
-          set -e
-          curl -sfL --retry 3 -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
-          chmod +x /tmp/minio
-          MINIO_ROOT_USER=tcerpminio MINIO_ROOT_PASSWORD=tcerpminio123 nohup /tmp/minio server /tmp/minio-data --address 127.0.0.1:9000 > /tmp/minio.log 2>&1 &
-          MINIO_PID=$!
-          trap 'kill $MINIO_PID 2>/dev/null || true' EXIT
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:9000/minio/health/live > /dev/null; then
-              echo "MinIO healthy after ${i}x2s"
-              break
-            fi
-            sleep 2
-          done
-          if ! curl -sf http://127.0.0.1:9000/minio/health/live > /dev/null; then
-            echo "::error::S3/MinIO storage tests: NOT_TESTED in this CI run — MinIO could not be started (dl.min.io unreachable). S3-backed tests SKIP via the runtime probe; verified only where a real MinIO exists (local/dev)."
+          MINIO_STARTED=0
+          if curl -sfL --retry 3 --max-time 120 -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio; then
+            chmod +x /tmp/minio
+            MINIO_ROOT_USER=tcerpminio MINIO_ROOT_PASSWORD=tcerpminio123 nohup /tmp/minio server /tmp/minio-data --address 127.0.0.1:9000 > /tmp/minio.log 2>&1 &
+            MINIO_PID=$!
+            for i in $(seq 1 30); do
+              if curl -sf http://127.0.0.1:9000/minio/health/live > /dev/null; then
+                echo "MinIO healthy after ${i}x2s — S3-backed tests RUN"
+                MINIO_STARTED=1
+                break
+              fi
+              sleep 2
+            done
+          fi
+          if [ "$MINIO_STARTED" != "1" ]; then
+            echo "::error::S3/MinIO storage tests: NOT_TESTED in this CI run — MinIO could not be started (all public distributions gated). S3-backed tests SKIP via the runtime probe; verified only where a real MinIO exists (local/dev)."
             echo "## S3/MinIO storage tests: NOT_TESTED in CI" >> "$GITHUB_STEP_SUMMARY"
           fi
           npm run test:integration -- --ci
+          EXIT=$?
+          kill $MINIO_PID 2>/dev/null || true
+          exit $EXIT
       - name: Build
         run: npm run build
 
