@@ -67,6 +67,12 @@ jobs:
             sleep 2
           done
           curl -sf http://localhost:9000/minio/health/live > /dev/null
+      - name: Declare S3 coverage status
+        if: failure()
+        run: |
+          echo "::error::S3/MinIO storage tests: NOT_TESTED in this CI run — no reachable MinIO distribution (Docker Hub removed minio images; quay/ECR anonymous denied; dl.min.io gated). The S3-backed tests SKIP via the runtime probe; they are verified where a real MinIO exists (local/dev)."
+          echo "## S3/MinIO storage tests: NOT_TESTED in CI" >> "$GITHUB_STEP_SUMMARY"
+          echo "No reachable MinIO distribution remains public (Docker Hub removed minio images; quay anonymous 401; ECR 404; dl.min.io gated). The S3-backed tests skipped via the runtime probe — file-feature merge readiness for storage coverage is NOT claimed from this run." >> "$GITHUB_STEP_SUMMARY"
       - name: Install dependencies
         run: npm ci
       - name: Prisma generate
