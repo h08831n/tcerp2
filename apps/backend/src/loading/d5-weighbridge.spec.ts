@@ -117,11 +117,16 @@ describeIntegration('d5-loading-weighbridge (real AppModule + MinIO)', () => {
     app = nestApp;
     // S3-backed tests need a REACHABLE MinIO; CI without a MinIO container
     // skips them honestly instead of failing on a missing service.
-    // Probe the CONFIGURED S3 endpoint (compose maps MinIO to :9100, CI :9000)
-    const s3Base = loadConfig().S3_ENDPOINT.replace(/\/$/, '');
+    // Probe the CONFIGURED S3 endpoint (compose maps MinIO to :9100, CI :9000).
+    // 127.0.0.1 explicitly — `localhost` can resolve to ::1 where MinIO's
+    // published port is IPv4-only (observed on CI runners).
+    const probed = new URL(loadConfig().S3_ENDPOINT);
+    probed.hostname = '127.0.0.1';
+    const s3Base = probed.toString().replace(/\/$/, '');
     minioUp = await fetch(`${s3Base}/minio/health/live`)
       .then((r) => r.ok)
       .catch(() => false);
+    console.warn(`[d5] MinIO probe ${s3Base} → ${minioUp ? 'UP' : 'DOWN'}`);
     if (!minioUp) {
       console.warn('[d5] MinIO unreachable — S3-backed attachment tests SKIP (real coverage runs where MinIO is up)');
     }
