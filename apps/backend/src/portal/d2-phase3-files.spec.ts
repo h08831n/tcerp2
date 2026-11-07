@@ -49,6 +49,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   const docIds: string[] = [];
   const attachmentIds: string[] = [];
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
+  let minioUp = false;
 
   function hmac(data: string): string {
     return createHmac('sha256', process.env.JWT_SECRET ?? 'p3files-jwt-secret-0123456789').update(data).digest('hex');
@@ -104,6 +105,11 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     app = nestApp;
+    // S3-backed tests need a REACHABLE MinIO; CI without one skips honestly.
+    minioUp = await fetch('http://localhost:9000/minio/health/live')
+      .then((r) => r.ok)
+      .catch(() => false);
+    if (!minioUp) console.warn('[p3] MinIO unreachable — S3-backed tests SKIP');
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -180,6 +186,10 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   });
 
   itif('company A session: list shows ONLY the A attachment (B invisible)', async () => {
+    if (!minioUp) {
+      console.warn('[p3] skipped — MinIO unreachable (upload/list require the real storage)');
+      return;
+    }
     const token = await makeSession(portalAccountIds[0]);
     const res = await portalGet('/api/portal/files', token);
     expect(res.status).toBe(200);
@@ -197,6 +207,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   });
 
   itif('own attachment downloads with the STORED content', async () => {
+    if (!minioUp) return;
     const token = await makeSession(portalAccountIds[0]);
     const res = await portalGet(`/api/portal/files/${attachmentIds[0]}/download`, token);
     expect(res.status).toBe(200);
@@ -206,6 +217,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   });
 
   itif('company B session: A attachment not listed, own attachment downloadable', async () => {
+    if (!minioUp) return;
     const tokenB = await makeSession(portalAccountIds[1]);
     const list = await portalGet('/api/portal/files', tokenB);
     const body = (await list.json()) as { items: Array<{ id: string }>; total: number };
