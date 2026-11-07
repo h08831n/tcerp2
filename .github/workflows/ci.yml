@@ -56,9 +56,18 @@ jobs:
       # auth, no rate limit. S3-backed tests then run for REAL in CI.
       - name: Start MinIO (files service storage)
         run: |
+          set +e
           curl -sfL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          PULLED=$?
+          set -e
+          if [ "$PULLED" -ne 0 ]; then
+            echo "::error::S3/MinIO storage tests: NOT_TESTED in this CI run — no reachable MinIO distribution (Docker Hub removed minio images; quay/ECR anonymous denied; dl.min.io gated). S3-backed tests SKIP via the runtime probe; verified only where a real MinIO exists (local/dev)."
+            echo "## S3/MinIO storage tests: NOT_TESTED in CI" >> "$GITHUB_STEP_SUMMARY"
+            echo "No reachable MinIO distribution remains public (Docker Hub removed minio images; quay anonymous 401; ECR 404; dl.min.io gated). S3-backed tests skipped via the runtime probe — file-feature storage coverage is NOT claimed from this run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           chmod +x /tmp/minio
-          MINIO_ROOT_USER=tcerpminio MINIO_ROOT_PASSWORD=tcerpminio123             nohup /tmp/minio server /tmp/minio-data --address :9000 > /tmp/minio.log 2>&1 &
+          MINIO_ROOT_USER=tcerpminio MINIO_ROOT_PASSWORD=tcerpminio123 nohup /tmp/minio server /tmp/minio-data --address :9000 > /tmp/minio.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/live > /dev/null; then
               echo "MinIO healthy after ${i}x2s"
