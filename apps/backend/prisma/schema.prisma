@@ -2818,6 +2818,13 @@ model Loading {
   driverPartyId  String?      @map("driver_party_id") @db.Uuid
   carrierPartyId String?      @map("carrier_party_id") @db.Uuid
   notes          String?
+  // D-5 weighbridge: gross in/out from the scale ticket, net computed
+  // (out - in); nullable — loadings without scale data behave as before.
+  weighbridgeTicketNo String? @map("weighbridge_ticket_no")
+  weighbridgeInKg     Decimal? @map("weighbridge_in_kg") @db.Decimal(18, 4)
+  weighbridgeOutKg    Decimal? @map("weighbridge_out_kg") @db.Decimal(18, 4)
+  weighbridgeNetKg    Decimal? @map("weighbridge_net_kg") @db.Decimal(18, 4)
+  weighbridgeAt       DateTime? @map("weighbridge_at") @db.Timestamptz(6)
   createdBy      String?      @map("created_by") @db.Uuid
   createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
