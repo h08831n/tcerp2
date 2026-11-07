@@ -236,14 +236,10 @@ describeIntegration('d2-portal-business (real AppModule, two companies)', () => 
       where: { companyId: companyIdA, status: 'ACTIVE' },
     });
     const token = await makeSession(paA.id);
-    for (const query of ['?page=abc', '?page=NaN', '?limit=-5', '?limit=1.5', '?page=Infinity', '?page=1e5&limit=abc']) {
+    for (const query of ['?page=abc', '?page=NaN', '?limit=-5', '?limit=1.5', '?page=Infinity', '?page=1e5&limit=abc', '?page=9007199254740992', '?page=2147483648', '?limit=9007199254740992']) {
       const res = await portalGet(`/api/portal/orders${query}`, token);
       expect(`${query} → ${res.status}`).toBe(`${query} → 400`);
     }
-    // a HUGE limit is not garbage — the service caps it at 50 (no 500)
-    const huge = await portalGet('/api/portal/orders?limit=99999999999999999999', token);
-    expect(huge.status).toBe(200);
-    expect(((await huge.json()) as { limit: number }).limit).toBeLessThanOrEqual(50);
   });
 
   itif('Pagination limit is server-capped at 50', async () => {
