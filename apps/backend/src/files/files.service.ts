@@ -130,7 +130,10 @@ export class FilesService {
         data: {
           sha256,
           mimeType: file.mimetype,
-          size: BigInt(file.size),
+          // The BLOB is the source of truth for byte length: the declared
+          // multipart size can lie (and a lying Content-Length on download
+          // makes HTTP clients abort the stream mid-body).
+          size: BigInt(file.buffer.byteLength),
           storageKey: key,
           createdBy: actor.id,
         },
