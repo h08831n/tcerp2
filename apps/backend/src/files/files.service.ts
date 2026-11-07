@@ -100,7 +100,7 @@ export class FilesService {
    */
   async upload(
     file: UploadedFilePayload,
-    data: { entityType: string; entityId: string; displayName?: string; category?: string; customerVisible?: boolean },
+    data: { entityType: string; entityId: string; displayName?: string; category?: string; customerVisible?: string },
     companyId: string,
     actor: { id: string; username: string },
     ctx: RequestContext,
@@ -161,7 +161,7 @@ export class FilesService {
         category: data.category,
         // D-2 Phase 3 (final): DEFAULT DENY — customer portal visibility
         // requires the explicit flag; internal attachments stay hidden.
-        customerVisible: data.customerVisible ?? false,
+        customerVisible: data.customerVisible === 'true',
         createdBy: actor.id,
       },
     });
@@ -194,7 +194,7 @@ export class FilesService {
       originalFilename: string;
       displayName?: string;
       category?: string;
-      customerVisible?: boolean;
+      customerVisible?: string;
     },
     companyId: string,
     actor: { id: string; username: string },
@@ -212,7 +212,7 @@ export class FilesService {
         originalFilename: data.originalFilename,
         displayName: data.displayName,
         category: data.category,
-        customerVisible: data.customerVisible ?? false,
+        customerVisible: data.customerVisible === 'true',
         createdBy: actor.id,
       },
     });

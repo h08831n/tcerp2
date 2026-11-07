@@ -52,6 +52,8 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   const internalIds: Record<string, string> = {}; // companyId → internal attachment id
   const trackedBlobIds: string[] = [];
   let foreignBlobId = '';
+  let sharedBlobId = '';
+  let foreignSharedAttachmentId = '';
   const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
   let minioUp = false;
 
@@ -161,12 +163,27 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
       // CUSTOMER-VISIBLE attachment (explicitly flagged)
       const { attachment: visible } = await files!.upload(
         { buffer: Buffer.from(`p3-visible-${label}`), originalname: `p3-vis-${label}.txt`, mimetype: 'text/plain', size: 15 },
-        { entityType: 'sales_document', entityId: doc.id, displayName: `صورت‌حساب ${label}`, customerVisible: true },
+        { entityType: 'sales_document', entityId: doc.id, displayName: `صورت‌حساب ${label}`, customerVisible: 'true' },
         cid, { id: admin.id, username: admin.username }, {},
       );
       attachmentIds.push(visible.id);
       trackedBlobIds.push(visible.fileBlobId);
       visibleIds[cid] = visible.id;
+      // SHARED BLOB: company B uploads the EXACT SAME internal content as
+      // company A — content-addressed dedup means BOTH point to the SAME
+      // FileBlob row. Deleting the blob in cleanup would cascade and
+      // destroy BOTH attachments.
+      if (label === 'B') {
+        const { attachment: foreignShared } = await files!.upload(
+          { buffer: Buffer.from('p3-secret-A'), originalname: `p3-shared-${label}.txt`, mimetype: 'text/plain', size: 11 },
+          { entityType: 'sales_document', entityId: doc.id, displayName: `shared ${label}` },
+          cid, { id: admin.id, username: admin.username }, {},
+        );
+        sharedBlobId = foreignShared.fileBlobId;
+        foreignSharedAttachmentId = foreignShared.id;
+        attachmentIds.push(foreignShared.id);
+        trackedBlobIds.push(foreignShared.fileBlobId);
+      }
     }
   });
 
@@ -248,6 +265,46 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO)', () => {
   });
 
 
+
+
+  itif('UPLOAD DTO: customerVisible=true stored as TRUE (service-level — HTTP multipart requires main.ts ValidationPipe)', async () => {
+    const { attachment } = await files!.upload(
+      { buffer: Buffer.from('vis-true'), originalname: 'vis-true.txt', mimetype: 'text/plain', size: 8 },
+      { entityType: 'sales_document', entityId: docIds[0], customerVisible: 'true' },
+      A, { id: createdUsers[0], username: 'admin' }, {},
+    );
+    const row = await prisma.fileAttachment.findUniqueOrThrow({ where: { id: attachment.id } });
+    expect(row.customerVisible).toBe(true);
+    attachmentIds.push(attachment.id);
+  });
+
+  itif('UPLOAD DTO: customerVisible unset → DEFAULT FALSE', async () => {
+    const { attachment } = await files!.upload(
+      { buffer: Buffer.from('vis-unset'), originalname: 'vis-unset.txt', mimetype: 'text/plain', size: 9 },
+      { entityType: 'sales_document', entityId: docIds[0] },
+      A, { id: createdUsers[0], username: 'admin' }, {},
+    );
+    const row = await prisma.fileAttachment.findUniqueOrThrow({ where: { id: attachment.id } });
+    expect(row.customerVisible).toBe(false); // DEFAULT DENY
+    attachmentIds.push(attachment.id);
+  });
+
+  itif('SHARED BLOB: both attachments point to the SAME FileBlob (content dedup)', async () => {
+    const sharedRow = await prisma.fileBlob.findUniqueOrThrow({ where: { id: sharedBlobId } });
+    const referencingCount = await prisma.fileAttachment.count({ where: { fileBlobId: sharedBlobId } });
+    expect(referencingCount).toBe(2); // A internal + B shared — SAME blob
+    void sharedRow;
+  });
+
+  itif('SHARED BLOB: the foreign attachment SURVIVES the suite cleanup (blob NOT deleted)', async () => {
+    // This assertion runs BEFORE afterAll — it pins the pre-cleanup state.
+    const foreign = await prisma.fileAttachment.findUniqueOrThrow({
+      where: { id: foreignSharedAttachmentId },
+      include: { fileBlob: true },
+    });
+    expect(foreign.fileBlob.id).toBe(sharedBlobId);
+    expect(foreign.companyId).toBe(B);
+  });
 
   itif('company B session: A attachments not listed, own visible attachment downloadable', async () => {
     if (!minioUp) return;
