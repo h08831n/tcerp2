@@ -24,8 +24,14 @@ import { AppError } from '../common/errors';
 function parseIntQuery(raw: string | undefined, name: string, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
-    throw new AppError(400, 'BAD_REQUEST', `${name} must be a positive integer (got "${raw}")`);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new AppError(400, 'BAD_REQUEST', `${name} must be a positive safe integer (got "${raw}")`);
+  }
+  // Prisma skip/take are int32 — a page beyond ~42M rows at limit 50 would
+  // overflow the offset calculation even if the page itself fits in a safe
+  // integer. The cap is generous (no real dataset needs page 1M+).
+  if (name === 'page' && value > 1_000_000) {
+    throw new AppError(400, 'BAD_REQUEST', `${name} must be at most 1000000 (got "${raw}")`);
   }
   return value;
 }
