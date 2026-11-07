@@ -29,18 +29,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: tcerpminio
-          MINIO_ROOT_PASSWORD: tcerpminio123
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     defaults:
       run:
         working-directory: apps/backend
@@ -52,6 +40,30 @@ jobs:
       S3_SECRET_KEY: tcerpminio123
       S3_BUCKET: tcerp-files
       S3_FORCE_PATH_STYLE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/backend/package-lock.json
+      # D-5/Phase 3 upload tests need a REAL S3-compatible server. GitHub
+      # services cannot pass `server /data` to the minio image, so MinIO is
+      # started as a plain docker step (health-checked with curl).
+      - name: Start MinIO (files service storage)
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=tcerpminio \
+            -e MINIO_ROOT_PASSWORD=tcerpminio123 \
+            minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null; then
+              echo "MinIO healthy after ${i}x2s"
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:9000/minio/health/live > /dev/null
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
