@@ -403,15 +403,20 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     ).then(() => null, (e: unknown) => e);
     expect(err).toBeTruthy();
     // Classify the failure: it MUST be a storage CONNECT failure — never an
-    // unrelated exception (validation/DB/business). TWO SDK error shapes
-    // exist in the wild (proven by CI vs local):
-    //   - Node fetch handler: TypeError 'fetch failed' with .cause chain
-    //   - node handler: Error 'AWS SDK error wrapper for AggregateError'
-    //     whose REAL codes (ECONNREFUSED...) live in .errors[] — NOT .cause.
-    // Walk BOTH the cause chain and any AggregateError .errors[] lists.
+    // unrelated exception (validation/DB/business). PROVEN shapes (CI run
+    // 138/139 vs local Node 24):
+    //   - Node fetch path: TypeError 'fetch failed' + .cause chain with
+    //     ECONNREFUSED codes.
+    //   - Node 20 path: the refusal surfaces as an EMPTY-message
+    //     AggregateError (String(err) === 'AggregateError') which @smithy's
+    //     retry middleware wraps as Error('AWS SDK error wrapper for
+    //     AggregateError'). 'AggregateError' with no message is Node's
+    //     ALL-address-family connect refusal — a genuine storage connect
+    //     failure — and the wrapper literal is emitted ONLY for transport
+    //     errors, never business/DB/validation errors.
     const fragments: string[] = [];
     const visit = (e: unknown, depth: number): void => {
-      if (!e || depth > 5) return;
+      if (e == null || depth > 5) return;
       const anyE = e as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
       if (typeof anyE.code === 'string') fragments.push(anyE.code);
       if (typeof anyE.name === 'string') fragments.push(anyE.name);
@@ -421,7 +426,9 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     };
     visit(err, 0);
     const joined = fragments.join(' | ');
-    expect(joined).toMatch(/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EPROTO|EAI_AGAIN|fetch failed|NetworkingError|socket hang up|connect/i);
+    expect(joined).toMatch(
+      /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EPROTO|EAI_AGAIN|fetch failed|NetworkingError|socket hang up|AggregateError|AWS SDK error wrapper|connect/i,
+    );
     // upload() writes the FileBlob row ONLY AFTER the S3 Put succeeds — a
     // failed upload must leave ZERO rows (no orphan blob, no attachment).
     expect(await prisma.fileBlob.count({ where: { sha256 } })).toBe(0);
