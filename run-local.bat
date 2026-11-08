@@ -56,8 +56,16 @@ if errorlevel 1 (
 echo [OK] PostgreSQL ready (port 5433).
 
 if not exist "apps\backend\.env" (
-    echo [..] apps\backend\.env missing - created from .env.example
-    copy ".env.example" "apps\backend\.env" >nul
+    echo [..] apps\backend\.env missing - created from apps\backend\.env.example
+    copy "apps\backend\.env.example" "apps\backend\.env" >nul
+    if errorlevel 1 (
+        echo [X] could not create apps\backend\.env
+        pause
+        exit /b 1
+    )
+    call :patchFreshEnv
+    echo [OK] FRESH INSTALL: a RANDOM SEED_ADMIN_PASSWORD was written into apps\backend\.env
+    echo      Open that file to read the password, or reset later via the Ops CLI.
 )
 
 pushd apps\backend
@@ -75,6 +83,12 @@ if not exist "node_modules" (
 
 echo [..] prisma generate...
 call npx prisma generate
+if errorlevel 1 (
+    echo [X] prisma generate failed.
+    popd
+    pause
+    exit /b 1
+)
 
 echo [..] migrate deploy...
 call npx prisma migrate deploy
@@ -87,6 +101,22 @@ if errorlevel 1 (
 
 echo [..] seed (admin user)...
 call npm run db:seed
+if errorlevel 1 (
+    echo [X] db:seed failed - stack will NOT start.
+    popd
+    pause
+    exit /b 1
+)
+
+rem Password-source truth for the summary banner: the password in .env is
+rem used ONLY when the admin user is FIRST created; a re-seed never resets it
+rem (seed.ts) and an OLD .env without the SEED line makes seed print a RANDOM
+rem password to THIS console instead - never assume .env holds it then.
+findstr /B /C:"SEED_ADMIN_PASSWORD=" .env >nul 2>nul
+if errorlevel 1 (
+    echo [!] SEED_ADMIN_PASSWORD is NOT in .env - seed printed a RANDOM password above.
+    echo     Reset it via Ops CLI reset-password if lost.
+)
 
 popd
 
@@ -141,8 +171,9 @@ echo   Backend  :  http://localhost:3001/api
 echo   Health   :  http://localhost:3001/api/health
 echo   Metrics  :  http://localhost:3001/api/metrics
 echo.
-echo   Login:  admin  /  password from apps\backend\.env
-echo           (SEED_ADMIN_PASSWORD)
+echo   Login:  admin  /  password = SEED_ADMIN_PASSWORD value in apps\backend\.env
+echo           fresh install: RANDOM  --  re-seed never resets it
+echo           lost it: Ops CLI reset-password
 echo.
 echo   Stop: close both Backend/Frontend windows, then:
 echo         docker compose stop
@@ -152,6 +183,15 @@ pause
 goto :eof
 
 rem --- subroutines (never fall through here from main flow) ---
+
+:patchFreshEnv
+rem Fresh install only: replace the sample SEED_ADMIN_PASSWORD placeholder in
+rem apps\backend\.env with a RANDOM 24-char value (+ complexity suffix, same
+rem character classes seed.ts enforces). The password therefore EXISTS in .env
+rem and the login banner stays truthful. UTF-8 no-BOM is preserved (the file
+rem carries Persian comments). Sample files keep NO fixed operational password.
+powershell -NoProfile -Command "$f='apps\backend\.env'; $enc=New-Object System.Text.UTF8Encoding($false); $t=[System.IO.File]::ReadAllText($f); $pool='abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'; $pw=(-join(1..24 | ForEach-Object { $pool.Substring((Get-Random -Maximum $pool.Length),1) })) + '!Aa1'; $t=$t -replace 'SEED_ADMIN_PASSWORD=.*', ('SEED_ADMIN_PASSWORD=' + $pw); [System.IO.File]::WriteAllText($f, $t, $enc)"
+goto :eof
 
 :checkPort
 rem %1 = port number. Refuses to continue when ANY process (TCERP or not)

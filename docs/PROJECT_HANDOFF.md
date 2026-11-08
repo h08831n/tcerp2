@@ -24,23 +24,36 @@ cd ../frontend && npm ci && npm run dev  # frontend on :3000
 
 ## ورود ادمین
 
-رمز ادمین در `apps/backend/.env` (متغیر `ADMIN_INITIAL_PASSWORD`) تنظیم می‌شود —
-**مقدار پیش‌فرض را قبل از هر استقرار واقعی عوض کنید** و آن را در این سند یا هر
-مستند متنی ذخیره نکنید. در صورت گم‌شدن، با Ops CLI زیر آن را بازنشانی کنید.
+- نام کاربری: `SEED_ADMIN_USERNAME` از `apps/backend/.env` (پیش‌فرض seed: `admin`).
+- رمز: `SEED_ADMIN_PASSWORD` از همان فایل — **فقط هنگام ایجاد اولیهٔ کاربر admin
+  استفاده می‌شود؛ اجرای دوبارهٔ seed رمز موجود را reset نمی‌کند** (seed.ts).
+- **نصب تازه (run-local.bat):** اگر `apps/backend/.env` نباشد، از
+  `apps/backend/.env.example` ساخته می‌شود و یک **رمز تصادفی** جای placeholder
+  می‌نشیند — رمز در همان فایل موجود است؛ آن را از `.env` بخوانید.
+- اگر `.env` قدیمی بدون خط `SEED_ADMIN_PASSWORD` باشد، seed در dev رمز تصادفی
+  می‌سازد و **فقط در کنسول همان اجرا چاپ می‌کند** (در `.env` نمی‌نشیند) — در
+  این حالت بنر run-local هشدار می‌دهد؛ رمز گم‌شده را با Ops CLI بازنشانی کنید.
+- **در production هیچ مقدار پیش‌فرضی وجود ندارد؛ باید صریحاً ست شود** و آن را
+  در این سند یا هر مستند متنی ذخیره نکنید. در صورت گم‌شدن، با Ops CLI زیر بازنشانی کنید.
 
 ## Ops CLI
 
 > هر فرمان جهشی که وضعیت DB را تغییر می‌دهد، ابتدا مقصد را با
-> `--confirm-target "postgresql://<user>@<host>:<port>/<db>"` تأیید می‌کند
-> (نام‌محور کافی نیست — host:port/db کامل باید مطابقت داشته باشد).
+> `--confirm-target` تأیید می‌کند. قالب دقیق همان `host:port/database` است که
+> بنر خود CLI از `DATABASE_URL` استخراج می‌کند (dbLabel) — **بدون URL کامل،
+> بدون username، بدون password**. نام دیتابیس به‌تنهایی کافی نیست؛
+> host و port هم باید دقیقاً مطابقت داشته باشند.
 
 ```bash
 cd apps/backend
 npm run cli -- reset-password <username>          # تعاملی (پرامپت مخفی)
-npm run cli -- unlock <username> --yes --confirm-target "postgresql://...@localhost:5433/tcerp"
-npm run cli -- set-status <username> DISABLED --yes --confirm-target "postgresql://...@localhost:5433/tcerp"
+npm run cli -- unlock <username> --yes --confirm-target "localhost:5433/tcerp"
+npm run cli -- set-status <username> DISABLED --yes --confirm-target "localhost:5433/tcerp"
 npm run cli -- list-users
 ```
+
+مقدار دقیق `host:port/database` را بنر خود CLI نشان می‌دهد — همان را verbatim
+پاس دهید یا بدون `--confirm-target` اجرا کنید تا به‌صورت تعاملی تایپ کنید.
 
 ## اجرای تست‌ها
 
