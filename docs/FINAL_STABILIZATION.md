@@ -15,7 +15,7 @@
 
 | PR | Branch | HEAD | Base | CI | Mergeable | Migration |
 |---|---|---|---|---|---|---|
-| #7 | feature/d2-portal-business-api | `ae34280` | main | ⚠️ g7d flake (رفع در #10؛ S3 NOT_TESTED) | true/unknown | `customer_visible` |
+| #7 | feature/d2-portal-business-api | `549a490` | main | ✅ success (هر دو job؛ دو اجرای متوالی سبز — g7d با فیکس R3-5 داخل branch پایدار) | true/unstable→clean | `customer_visible` |
 | #10 | feature/backlog-security | `eb85307` | main | ✅ success | true/clean | `token_version` |
 | #11 | feature/ops-cli-hardening | `533605d` | feature/backlog-security | — (stacked) | true/clean | none |
 | #13 | feature/d4-imports-exports | `3d9d50e` | main | ✅ success | true/clean | none |
@@ -25,13 +25,18 @@
 ## ترتیب Merge
 
 ```
-۱. #10 (backlog امنیتی — فیکس g7d flake را می‌آورد)
-۲. #7 (Phase 2+3 — پس از #10 سبز می‌شود؛ همهٔ D-2 را یکجا به main می‌آورد)
+۱. #7  (D-2 کامل: Phase 2+3+مستندات — سبز؛ فیکس g7d داخل خودش هست)
+۲. #10 (backlog امنیتی — merge-tree با #7 بدون تداخل؛ هر دو محتوا حفظ می‌شود)
 ۳. #11 (CLI — پس از #10 روی main CI می‌گیرد)
 ۴. #13 (D-4 — مستقل)
 ۵. #15 (D-3 — مستقل)
 ۶. #14 (D-5 — مستقل، با قید NOT_TESTED)
 ```
+
+### تداخل‌سنجی merge-tree (تأییدشده محلی)
+
+- `#7 + #14`: بدون تداخل — `loading` (از #14) + `customerVisible/byteLength` (از #7) + فیکس DTO (هر دو، dedup) همگی در درخت ادغام حضور دارند.
+- `#7 + #10`: بدون تداخل — `tokenVersion` و فیکس فیسکال (از #10) + `customerVisible` (از #7) همگی حفظ می‌شوند.
 
 ## باگ‌های رفع‌شده
 
