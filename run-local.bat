@@ -90,10 +90,13 @@ call npm run db:seed
 
 popd
 
-rem Kill only OUR dev servers on 3000/3001 — never an arbitrary process that
-rem happens to hold the port: taskkill only fires when the image is node.exe.
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3001 " ^| findstr LISTENING') do call :killIfNode %%p
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3000 " ^| findstr LISTENING') do call :killIfNode %%p
+rem NO auto-kill. A node.exe on 3000/3001 is NOT proof it belongs to TCERP —
+rem another Node app could hold the port. If a port is occupied, report it,
+rem show the safe manual command, and stop with a non-zero exit code.
+call :checkPort 3001
+if errorlevel 1 goto :portConflict
+call :checkPort 3000
+if errorlevel 1 goto :portConflict
 
 echo [..] starting Backend on http://localhost:3001/api ...
 start "TCERP Backend" cmd /k "cd /d %~dp0apps\backend && npm run start"
@@ -149,8 +152,28 @@ pause
 goto :eof
 
 rem --- subroutines (never fall through here from main flow) ---
-:killIfNode
-for /f "tokens=1" %%n in ('tasklist /fi "PID eq %1" /nh 2^>nul') do (
-  if /i "%%n"=="node.exe" taskkill /f /pid %1 >nul 2>nul
-)
-goto :eof
+
+:checkPort
+rem %1 = port number. Refuses to continue when ANY process (TCERP or not)
+rem holds the port — this script NEVER kills anything it did not start.
+netstat -aon | findstr ":%1 " | findstr LISTENING >nul 2>nul
+if errorlevel 1 goto :eof
+echo.
+echo [X] Port %1 is ALREADY IN USE by another process.
+echo     TCERP did not start it in this run, so nothing was killed.
+echo.
+echo     Find the owning PID (look at the LAST column of the LISTENING line):
+echo       netstat -aon ^| findstr ":%1 "
+echo.
+echo     After you VERIFY the process is yours, stop it explicitly:
+echo       taskkill /f /pid PID_NUMBER
+echo.
+echo     (A TCERP leftover from an earlier run: close the "TCERP Backend" /
+echo      "TCERP Frontend" window, or stop-local.bat.)
+exit /b 1
+
+:portConflict
+echo.
+echo [!] Resolve the port conflict above, then re-run run-local.bat.
+pause
+exit /b 1

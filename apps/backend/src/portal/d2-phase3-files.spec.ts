@@ -9,7 +9,7 @@ import { loadConfig } from '../config/configuration';
 import { describeIntegration, TEST_INTEGRATION } from '../testing/integration';
 import { assertSafeIntegrationDatabase } from '../testing/db-guard';
 import * as bcrypt from 'bcryptjs';
-import { randomBytes, createHmac } from 'crypto';
+import { randomBytes, createHmac, createHash } from 'crypto';
 
 jest.setTimeout(300_000);
 const DB_URL = process.env.DATABASE_URL;
@@ -35,22 +35,29 @@ const ADMIN_PASSWORD = 'P3-Admin-Passw0rd!';
  *     FOREIGN attachment via blob cascade (ref-count before blob delete).
  *   - FOREIGN protective fixture: a FileBlob + attachment owned by NO suite
  *     company must survive the entire suite (tripwire in afterAll).
- *   - MinIO absence: when the S3 endpoint is unreachable, storage-dependent
- *     tests FAIL with a distinguishable error (not a silent pass).
+ *   - MinIO contract: the probe consults the SAME loadConfig().S3_ENDPOINT
+ *     FilesService uses; storage tests SKIP (Jest counter, NOT_TESTED in CI)
+ *     when unreachable; when UP a REAL upload→download round-trip is the
+ *     storage-coverage gate; when DOWN the upload failure is CLASSIFIED as
+ *     a storage connect error + proven to leave ZERO orphan rows.
  *   - HTTP multipart with the production ValidationPipe: customerVisible
  *     is an @IsIn string converted in the service (multipart sends strings).
  */
 // ── Module-scope sync MinIO probe → itStorage (SKIP if unreachable) ──
-// curl is available on both GH runners (ubuntu) and Windows dev.
+// The probe MUST consult the SAME config source FilesService uses —
+// loadConfig() — not a raw process.env fallback that can drift from it
+// (local compose maps MinIO to :9100 via .env; CI uses :9000). Probe hits
+// 127.0.0.1 explicitly: localhost can resolve to ::1 on GH runners.
+const CONFIG_S3_ENDPOINT = loadConfig().S3_ENDPOINT;
+const PROBE_ENDPOINT = CONFIG_S3_ENDPOINT.replace(/\/$/, '').replace('localhost', '127.0.0.1');
 let minioReachable = false;
 try {
-  const s3Url = (process.env.S3_ENDPOINT || 'http://localhost:9000').replace(/\/$/, '');
   require('child_process').execSync(
-    `curl -sf --max-time 3 ${s3Url}/minio/health/live`,
+    `curl -sf --max-time 3 ${PROBE_ENDPOINT}/minio/health/live`,
     { timeout: 8000, stdio: 'pipe' },
   );
   minioReachable = true;
-} catch { /* MinIO not reachable — S3 tests will SKIP */ }
+} catch { /* MinIO not reachable — S3 tests SKIP (Jest counter, never silent-pass) */ }
 const itStorage = (TEST_INTEGRATION && DB_URL && minioReachable) ? it : it.skip;
 
 describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)', () => {
@@ -62,6 +69,9 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
   let B = '';
   let adminToken = '';
   const marker = `p3-${Date.now()}`;
+  // THE shared dedup content for THIS run only (A internal + B shared +
+  // foreign fixture all upload it → exactly 3 attachments on one blob).
+  const suiteSecret = `p3-secret-${marker}`;
   const createdUsers: string[] = [];
   const createdCompanies: string[] = [];
   const portalAccountIds: string[] = [];
@@ -193,9 +203,15 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
         },
       });
       docIds.push(doc.id);
-      // INTERNAL attachment (customerVisible NOT set → DEFAULT DENY)
+      // INTERNAL attachment (customerVisible NOT set → DEFAULT DENY).
+      // Content contract: A's internal carries THE suiteSecret — B's shared
+      // upload and the foreign fixture reuse it for the dedup proof (exactly
+      // 3 attachments on one blob). B's own internal is DIFFERENT content.
+      // All marker-based: a FIXED shared string would accumulate previous
+      // runs' attachments on the SAME blob (run-to-run contamination).
+      const internalContent = label === 'A' ? suiteSecret : `p3-secret-${label}-${marker}`;
       const { attachment } = await files.upload(
-        { buffer: Buffer.from(`p3-secret-${label}`), originalname: `p3-${label}.txt`, mimetype: 'text/plain', size: Buffer.byteLength(`p3-secret-${label}`) },
+        { buffer: Buffer.from(internalContent), originalname: `p3-${label}.txt`, mimetype: 'text/plain', size: Buffer.byteLength(internalContent) },
         { entityType: 'sales_document', entityId: doc.id, displayName: `سند ${label}` },
         cid, { id: admin.id, username: admin.username }, {},
       );
@@ -216,10 +232,16 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
       // FileBlob row.
       if (label === 'B') {
         const { attachment: foreignShared } = await files.upload(
-          { buffer: Buffer.from('p3-secret-A'), originalname: `p3-shared-B.txt`, mimetype: 'text/plain', size: Buffer.byteLength('p3-secret-A') },
+          { buffer: Buffer.from(suiteSecret), originalname: `p3-shared-B.txt`, mimetype: 'text/plain', size: Buffer.byteLength(suiteSecret) },
           { entityType: 'sales_document', entityId: doc.id, displayName: `shared ${label}` },
           cid, { id: admin.id, username: admin.username }, {},
         );
+        // TRACK IT: this attachment was previously dropped from the cleanup
+        // arrays — company B's delete then failed on its FK forever (silent
+        // leftover company). The blob stays ref-count guarded: at suite-blob
+        // cleanup time the FOREIGN attachment still references it (fixture
+        // survival), so it is only deleted after the foreign cleanup.
+        suiteAttachmentIds.push(foreignShared.id);
         sharedBlobId = foreignShared.fileBlobId;
       }
     }
@@ -239,7 +261,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     });
     docIds.push(foreignDoc.id);
     const foreignResult = await files.upload(
-      { buffer: Buffer.from('p3-secret-A'), originalname: `p3-foreign-${marker}.txt`, mimetype: 'text/plain', size: Buffer.byteLength('p3-secret-A') },
+      { buffer: Buffer.from(suiteSecret), originalname: `p3-foreign-${marker}.txt`, mimetype: 'text/plain', size: Buffer.byteLength(suiteSecret) },
       { entityType: 'sales_document', entityId: foreignDoc.id, displayName: 'foreign doc' },
       foreignCompanyId, { id: admin.id, username: admin.username }, {},
     );
@@ -344,32 +366,84 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
 
   // ---------------------------------------------- MinIO absence control
 
-  it('MinIO probe: storage tests REQUIRE a reachable MinIO (fail explicitly, never silent-pass)', async () => {
-    // This test runs ALWAYS (not gated by itStorage) — it pins the probe
-    // result so the CI log shows whether MinIO was UP or DOWN.
-    console.warn(`[p3] MinIO ${minioUp ? 'UP — storage tests will RUN' : 'DOWN — storage tests will FAIL explicitly (NOT silent-pass)'}`);
-    // No assertion — this is a diagnostic pin.
+  it('MinIO probe consistency: probe endpoint IS the S3_ENDPOINT FilesService loads', async () => {
+    // REAL assertion (not a diagnostic pin): the module-scope probe must
+    // have consulted the SAME config source the FilesService constructor
+    // receives. Drift (probe on :9000 while config says :9100) would SKIP
+    // storage tests that should RUN — or run tests against dead storage.
+    expect(PROBE_ENDPOINT).toBe(CONFIG_S3_ENDPOINT.replace(/\/$/, '').replace('localhost', '127.0.0.1'));
+    expect(PROBE_ENDPOINT).toBe(loadConfig().S3_ENDPOINT.replace(/\/$/, '').replace('localhost', '127.0.0.1'));
+    // The beforeAll probe (async fetch, 127.0.0.1-forced) must AGREE with
+    // the module probe (sync curl, 127.0.0.1-forced) — disagreement means
+    // an unstable storage or a probe-source regression.
+    expect(minioUp).toBe(minioReachable);
+    console.warn(`[p3] MinIO ${minioUp ? 'UP — storage tests RUN' : 'DOWN — storage tests SKIP in Jest counter (NOT_TESTED)'}`);
   });
 
-  it('MinIO DOWN: storage-dependent upload FAILS with a connect error (never silent-pass)', async () => {
+  it('MinIO DOWN: upload fails with a REAL storage connect error + ZERO orphan rows', async () => {
     if (minioUp) {
-      console.warn('[p3] MinIO is UP — this test is not applicable (it proves the DOWN behavior)');
+      console.warn('[p3] MinIO is UP — DOWN-state proof runs only when storage is unreachable');
       return;
     }
-    // When MinIO is down, FilesService.upload MUST throw a connect error —
-    // NOT succeed silently and NOT create an orphan row. FilesService is
-    // null here (not created when MinIO is down) — construct a temporary
-    // one to prove the real S3 connection failure.
+    // Unique content: a dedup hit (existing sha256) BYPASSES S3 entirely —
+    // only a never-uploaded payload actually reaches the PutObject connect.
+    const content = `p3-down-${randomBytes(12).toString('hex')}`;
+    const sha256 = createHash('sha256').update(content).digest('hex');
+    // FilesService is null when storage is down — construct a temporary one
+    // to prove the REAL S3 connection failure.
     const tempFiles = new FilesService(
       prisma as never,
       new AuditService(prisma as never),
       loadConfig(),
     );
-    await expect(tempFiles.upload(
-      { buffer: Buffer.from('x'), originalname: 'x.txt', mimetype: 'text/plain', size: 1 },
-      { entityType: 'sales_document', entityId: docIds[0] || '00000000-0000-4000-8000-000000000001' },
+    const err = await tempFiles.upload(
+      { buffer: Buffer.from(content), originalname: 'down.txt', mimetype: 'text/plain', size: content.length },
+      { entityType: 'sales_document', entityId: '00000000-0000-4000-8000-000000000001' },
       A, { id: createdUsers[0], username: 'admin' }, {},
-    )).rejects.toThrow();
+    ).then(() => null, (e: unknown) => e);
+    expect(err).toBeTruthy();
+    // Classify the failure: it MUST be a storage CONNECT failure walked
+    // through the error.cause chain (Node fetch handler wraps ECONNREFUSED
+    // as cause) — never an unrelated exception (validation/DB/business).
+    const fragments: string[] = [];
+    let cause: unknown = err;
+    for (let depth = 0; cause && depth < 5; depth++) {
+      const anyE = cause as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown };
+      if (typeof anyE.code === 'string') fragments.push(anyE.code);
+      if (typeof anyE.name === 'string') fragments.push(anyE.name);
+      if (typeof anyE.message === 'string') fragments.push(anyE.message);
+      cause = anyE.cause;
+    }
+    const joined = fragments.join(' | ');
+    expect(joined).toMatch(/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EPROTO|EAI_AGAIN|fetch failed|NetworkingError|socket hang up|connect/i);
+    // upload() writes the FileBlob row ONLY AFTER the S3 Put succeeds — a
+    // failed upload must leave ZERO rows (no orphan blob, no attachment).
+    expect(await prisma.fileBlob.count({ where: { sha256 } })).toBe(0);
+  });
+
+  itStorage('MinIO UP: REAL upload→download round-trip (byte-exact content + true size)', async () => {
+    if (!minioUp) throw new Error('itStorage dispatched while MinIO DOWN — probe/dispatch drift');
+    // A reachability probe alone proves nothing — this is the suite's REAL
+    // storage-coverage gate: bytes must round-trip through S3 byte-exactly.
+    const content = `p3-roundtrip-${randomBytes(12).toString('hex')}`;
+    const { attachment, blob } = await files!.upload(
+      { buffer: Buffer.from(content), originalname: 'roundtrip.txt', mimetype: 'text/plain', size: content.length },
+      { entityType: 'sales_document', entityId: docIds[0] },
+      A, { id: createdUsers[0], username: 'admin' }, {},
+    );
+    suiteAttachmentIds.push(attachment.id);
+    suiteBlobIds.push(blob.id);
+    // upload() returns the FileBlobDto — size is ALREADY the Number() form.
+    // TRUE byte length (never the declared multipart size) survives both
+    // the DB Decimal and the DTO conversion.
+    expect(blob.size).toBe(content.length);
+    const dl = await files!.download(blob.id, A);
+    const chunks: Buffer[] = [];
+    for await (const chunk of dl.stream as unknown as AsyncIterable<Buffer>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    expect(Buffer.concat(chunks).toString('utf8')).toBe(content);
+    expect(dl.size).toBe(content.length);
   });
 
   // -------------------------------------- storage-backed tests (MinIO UP)
@@ -451,18 +525,16 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     const foreign = await prisma.fileAttachment.findUniqueOrThrow({ where: { id: foreignAttachmentId } });
     expect(foreign.companyId).toBe(foreignCompanyId);
 
-    // The SHARED BLOB must SURVIVE (B's shared attachment still references it)
+    // The SHARED BLOB must SURVIVE — the FOREIGN attachment still references
+    // it, so the ref-count check prevented the deletion. (B's OWN shared
+    // attachment is suite-tracked and IS deleted by the cleanup above; the
+    // blob's life is now owned by the foreign fixture — that is exactly the
+    // protection the ref-count provides.)
     const blob = await prisma.fileBlob.findUniqueOrThrow({ where: { id: sharedBlobId } });
     expect(blob).toBeTruthy();
 
     // The foreign attachment is still DOWNLOADABLE (the blob is intact)
     const dl = await files!.downloadAttachment(foreignAttachmentId, foreignCompanyId);
     expect(dl.stream).toBeTruthy();
-
-    // B's shared attachment must ALSO survive (same blob)
-    const bShared = await prisma.fileAttachment.findFirstOrThrow({
-      where: { entityType: 'sales_document', entityId: docIds[1], companyId: B, originalFilename: 'p3-shared-B.txt' },
-    });
-    expect(bShared).toBeTruthy();
   });
 });
