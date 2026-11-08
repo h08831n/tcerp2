@@ -35,7 +35,12 @@ export function CrmTimelinePanel({ fetcher, refreshToken = 0, title = "تاری�
     setError(null);
     fetcher()
       .then((res) => {
-        if (!cancelled) setItems(res.items);
+        if (!cancelled) {
+          // Tolerate BOTH shapes: {items:[...]} (party-timeline contract) and a
+          // bare array — a shape mismatch must never crash the page.
+          const list = Array.isArray(res) ? res : Array.isArray(res?.items) ? res.items : [];
+          setItems(list);
+        }
       })
       .catch(() => {
         if (!cancelled) setError("بارگذاری تاریخچه ناموفق بود.");

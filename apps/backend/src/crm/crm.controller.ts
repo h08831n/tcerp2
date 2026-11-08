@@ -103,7 +103,8 @@ export class LeadsController {
     @Req() request?: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(user!, request!.headers);
-    return this.leads.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined });
+    // {items} envelope — the SAME contract as GET /parties/:id/timeline (2fb40d0).
+    return { items: await this.leads.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined }) };
   }
 
   @Patch(':id')
@@ -173,7 +174,8 @@ export class OpportunitiesController {
     @Req() request?: Request,
   ) {
     const companyId = await this.companyContext.requireCompanyId(user!, request!.headers);
-    return this.opportunities.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined });
+    // {items} envelope — same contract as the party timeline.
+    return { items: await this.opportunities.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined }) };
   }
 
   @Patch(':id')

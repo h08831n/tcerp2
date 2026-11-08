@@ -148,7 +148,7 @@ export default function OpportunitiesPage() {
   useEffect(() => {
     if (view !== "kanban") return;
     let cancelled = false;
-    fetchOpportunities({ page: 1, pageSize: 200 })
+    fetchOpportunities({ page: 1, pageSize: 50 }) // PaginationDto cap — the pipeline shows the first 50
       .then((res) => {
         if (!cancelled) setKanbanItems(res.items);
       })

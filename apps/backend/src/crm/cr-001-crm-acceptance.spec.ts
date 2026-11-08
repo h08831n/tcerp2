@@ -340,7 +340,7 @@ describeIntegration('cr-001 CRM acceptance (real AppModule over HTTP)', () => {
     // Timeline carries the conversion trail.
     const timeline = await api('GET', `/api/leads/${lead.id}/timeline`, adminToken);
     expect(timeline.status).toBe(200);
-    const types = (timeline.body as Array<{ type: string }>).map((e) => e.type);
+    const types = (timeline.body.items as Array<{ type: string }>).map((e) => e.type);
     expect(types).toContain('LEAD_CREATED');
     expect(types).toContain('LEAD_CONVERTED');
 
