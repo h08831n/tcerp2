@@ -2,6 +2,28 @@
 
 > متناسب با این Repository. نه Template عمومی.
 
+## وضعیت Git واقعی پیش از merge (تأییدشده با git + GitHub API — 2026-11-08)
+
+- `main` = `603aaeb` (CI سبز)
+- **۶ PR باز** — همگی `mergeable: true`، بدون auto-merge. PR #12 قبلاً به شاخهٔ
+  `feature/d2-portal-business-api` merge شده و PR #7 آن را به main می‌آورد.
+
+| PR | HEAD | Base | CI |
+|---|---|---|---|
+| #7 (D-2 کامل: Phase 2+3) | `54cc6f7` | main | ✅ run #140 — هر دو job |
+| #10 (backlog امنیتی) | `eb85307` | main | ✅ |
+| #11 (CLI hardening — stacked روی #10) | `533605d` | feature/backlog-security | پس از merge #10 روی main اجرا می‌شود |
+| #13 (D-4 exports) | `3d9d50e` | main | ✅ |
+| #14 (D-5 weighbridge) | `52cb34d` | main | ✅ (S3 NOT_TESTED) |
+| #15 (D-3 fiscal tests) | `1d08291` | main | ✅ |
+
+- **ترتیب merge:** #7 → #10 → #11 → #13 → #15 → #14 (آخر — NOT_TESTED)
+- **NOT_TESTED در CI:** تست‌های S3/MinIO. هر ۴ رجیستری عمومی gated است
+  (Docker Hub حذف دائمی 2025، quay 401، ECR 404، dl.min.io 403)؛ تست‌ها در CI
+  با دلیل چاپ‌شده SKIP می‌شوند و هرگز PASS خاموش نیستند. اثبات Storage =
+  اجرای محلی با MinIO واقعی (UP: 10/10؛ DOWN: 2 pass + 8 skip با تفکیک خطای
+  اتصال واقعی) + آیتم‌های بخش Storage زیر روی سرور مقصد.
+
 ## Environment
 
 - [ ] `apps/backend/.env` — DATABASE_URL, JWT_SECRET (≥16 chars), JWT_REFRESH_SECRET, S3_* (MinIO), REDIS_URL

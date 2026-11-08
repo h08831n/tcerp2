@@ -15,12 +15,26 @@
 
 | PR | Branch | HEAD | Base | CI | Mergeable | Migration |
 |---|---|---|---|---|---|---|
-| #7 | feature/d2-portal-business-api | `549a490` | main | ✅ success (هر دو job؛ دو اجرای متوالی سبز — g7d با فیکس R3-5 داخل branch پایدار) | true/unstable→clean | `customer_visible` |
+| #7 | feature/d2-portal-business-api | `54cc6f7` (کد) + docs commit | main | ✅ **run #140 هر دو job سبز روی `54cc6f7`** (runs #138/#139 قرمز با root cause واقعی — شکل خطای Node20 AggregateError در تست DOWN — فیکس‌شده در همین commit) | true | `customer_visible` |
 | #10 | feature/backlog-security | `eb85307` | main | ✅ success | true/clean | `token_version` |
 | #11 | feature/ops-cli-hardening | `533605d` | feature/backlog-security | — (stacked) | true/clean | none |
 | #13 | feature/d4-imports-exports | `3d9d50e` | main | ✅ success | true/clean | none |
 | #14 | feature/d5-loading-completion | `52cb34d` | main | ✅ success (S3 NOT_TESTED) | true/clean | `loading_weighbridge` |
 | #15 | feature/d3-fiscal-closing-tests | `1d08291` | main | ✅ success | true/clean | none |
+
+### باتری محلی نهایی (2026-11-08، Docker محلی با MinIO واقعی :9100)
+
+| سناریو | Suites | Tests |
+|---|---|---|
+| Integration — MinIO **UP** | 215/215 | **1059/1059 سبز** |
+| Integration — MinIO **DOWN** (شرایط دقیق CI) | 215/215 | **1051 سبز + 8 SKIP** (تست‌های S3؛ شمارندهٔ Jest) |
+| Unit | 91 اجرا + 124 skip | **477 سبز / 0 قرمز** |
+| Typecheck BE + Build BE | — | سبز |
+| Build FE | — | سبز (CI؛ محلی هم انجام شد) |
+| p3 spec — MinIO UP | 1 suite | **10 passed / 0 skipped** |
+| p3 spec — MinIO DOWN | 1 suite | **2 passed + 8 skipped** (probe-consistency + DOWN-classification) |
+
+> CI سبزِ بدون MinIO گواهی قابلیت Storage نیست — تست‌های S3 در CI با دلیل چاپ‌شده SKIP می‌شوند (NOT_TESTED شفاف)؛ اثبات Storage فقط اجرای محلی UP و آیتم‌های Storage در RELEASE_CHECKLIST روی سرور واقعی است.
 
 ## ترتیب Merge
 
