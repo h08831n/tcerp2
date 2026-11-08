@@ -402,18 +402,24 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
       A, { id: createdUsers[0], username: 'admin' }, {},
     ).then(() => null, (e: unknown) => e);
     expect(err).toBeTruthy();
-    // Classify the failure: it MUST be a storage CONNECT failure walked
-    // through the error.cause chain (Node fetch handler wraps ECONNREFUSED
-    // as cause) — never an unrelated exception (validation/DB/business).
+    // Classify the failure: it MUST be a storage CONNECT failure — never an
+    // unrelated exception (validation/DB/business). TWO SDK error shapes
+    // exist in the wild (proven by CI vs local):
+    //   - Node fetch handler: TypeError 'fetch failed' with .cause chain
+    //   - node handler: Error 'AWS SDK error wrapper for AggregateError'
+    //     whose REAL codes (ECONNREFUSED...) live in .errors[] — NOT .cause.
+    // Walk BOTH the cause chain and any AggregateError .errors[] lists.
     const fragments: string[] = [];
-    let cause: unknown = err;
-    for (let depth = 0; cause && depth < 5; depth++) {
-      const anyE = cause as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown };
+    const visit = (e: unknown, depth: number): void => {
+      if (!e || depth > 5) return;
+      const anyE = e as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
       if (typeof anyE.code === 'string') fragments.push(anyE.code);
       if (typeof anyE.name === 'string') fragments.push(anyE.name);
       if (typeof anyE.message === 'string') fragments.push(anyE.message);
-      cause = anyE.cause;
-    }
+      visit(anyE.cause, depth + 1);
+      if (Array.isArray(anyE.errors)) for (const sub of anyE.errors) visit(sub, depth + 1);
+    };
+    visit(err, 0);
     const joined = fragments.join(' | ');
     expect(joined).toMatch(/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EPROTO|EAI_AGAIN|fetch failed|NetworkingError|socket hang up|connect/i);
     // upload() writes the FileBlob row ONLY AFTER the S3 Put succeeds — a
