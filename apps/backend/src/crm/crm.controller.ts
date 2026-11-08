@@ -12,11 +12,9 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { LeadsService } from './leads.service';
-import { OpportunitiesService } from './opportunities.service';
 import { LostReasonsService } from './lost-reasons.service';
 import { PaymentTermsService } from './payment-terms.service';
 import {
-  ConvertLeadDto,
   CreateLeadDto,
   CreateLostReasonDto,
   CreateOpportunityDto,
@@ -77,36 +75,6 @@ export class LeadsController {
     return this.leads.getById(companyId, id);
   }
 
-  /** CR-001 §3 — the explicit «تبدیل به فرصت فروش» operation. */
-  @Post(':id/convert')
-  @RequirePermissions('crm.manage')
-  async convert(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: ConvertLeadDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.leads.convert(companyId, id, dto, actor, ctxOf(request));
-  }
-
-  /** Chatter/timeline for the lead (same TimelineEvent machinery as parties).
-   * Gated by crm.view alone — LEAD_* events exist only in CRM context, so the
-   * CRM read permission is the natural gate (AND-semantics would also demand
-   * timeline.view, blocking crm.view-only users from their own records). */
-  @Get(':id/timeline')
-  @RequirePermissions('crm.view')
-  async timeline(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Query('limit') limit?: string,
-    @CurrentUser() user?: { id: string },
-    @Req() request?: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(user!, request!.headers);
-    // {items} envelope — the SAME contract as GET /parties/:id/timeline (2fb40d0).
-    return { items: await this.leads.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined }) };
-  }
-
   @Patch(':id')
   @RequirePermissions('crm.manage')
   async update(
@@ -129,65 +97,6 @@ export class LeadsController {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     await this.leads.archive(companyId, id, actor, ctxOf(request));
     return { success: true };
-  }
-}
-
-@Controller('opportunities')
-export class OpportunitiesController {
-  constructor(
-    private readonly opportunities: OpportunitiesService,
-    private readonly companyContext: CompanyContextService,
-  ) {}
-
-  @Post()
-  @RequirePermissions('crm.manage')
-  async create(
-    @Body() dto: CreateOpportunityDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.opportunities.create(companyId, dto, actor, ctxOf(request));
-  }
-
-  @Get()
-  @RequirePermissions('crm.view')
-  async list(@Query() query: OpportunityQueryDto, @CurrentUser() user: { id: string }, @Req() request: Request) {
-    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.opportunities.list(companyId, query);
-  }
-
-  @Get(':id')
-  @RequirePermissions('crm.view')
-  async getById(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {
-    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.opportunities.getById(companyId, id);
-  }
-
-  /** Chatter/timeline for the opportunity (crm.view gates — see leads). */
-  @Get(':id/timeline')
-  @RequirePermissions('crm.view')
-  async timeline(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Query('limit') limit?: string,
-    @CurrentUser() user?: { id: string },
-    @Req() request?: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(user!, request!.headers);
-    // {items} envelope — same contract as the party timeline.
-    return { items: await this.opportunities.timelineFor(companyId, id, { limit: limit ? parseInt(limit, 10) || undefined : undefined }) };
-  }
-
-  @Patch(':id')
-  @RequirePermissions('crm.manage')
-  async update(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateOpportunityDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.opportunities.update(companyId, id, dto, actor, ctxOf(request));
   }
 }
 

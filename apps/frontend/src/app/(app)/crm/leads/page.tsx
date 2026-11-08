@@ -46,11 +46,9 @@ function userMapItem(raw: unknown): EntityOption | null {
 
 interface LeadFormState {
   name: string;
+  type: "PERSON" | "COMPANY";
   phone: string;
   source: string;
-  campaign: string;
-  media: string;
-  referrer: string;
   notes: string;
   party: EntityOption | null;
   salesperson: EntityOption | null;
@@ -58,11 +56,9 @@ interface LeadFormState {
 
 const EMPTY_FORM: LeadFormState = {
   name: "",
+  type: "COMPANY",
   phone: "",
   source: "",
-  campaign: "",
-  media: "",
-  referrer: "",
   notes: "",
   party: null,
   salesperson: null,
@@ -134,25 +130,20 @@ export default function LeadsPage() {
   useEffect(() => load(), [load, reloadToken]);
 
   async function handleCreate() {
-    if (!form.name.trim()) {
-      setFormError("نام سرنخ الزامی است.");
-      return;
-    }
-    if (!form.party) {
-      // CR-001: a lead is ALWAYS attached to a Party (backend-enforced too).
-      setFormError("انتخاب طرف‌حساب الزامی است — سرنخ بدون هویت ثابت قابل پیگیری و تبدیل نیست.");
+    if (!form.party && !form.name.trim()) {
+      setFormError("نام سرنخ الزامی است (یا طرف‌حساب موجود را انتخاب کنید).");
       return;
     }
     setSaving(true);
     setFormError(null);
     try {
+      // R2 §2: the service creates Party + LEAD role + CRM record in ONE
+      // transaction — or attaches the lead to the EXISTING party selected.
       await createLead({
         name: form.name.trim(),
+        type: form.party ? undefined : form.type,
         phone: form.phone.trim() || undefined,
         source: form.source.trim() || undefined,
-        campaign: form.campaign.trim() || undefined,
-        media: form.media.trim() || undefined,
-        referrer: form.referrer.trim() || undefined,
         notes: form.notes.trim() || undefined,
         partyId: form.party?.id,
         assignedSalespersonId: form.salesperson?.id,
@@ -195,7 +186,7 @@ export default function LeadsPage() {
         header: "نام سرنخ",
         render: (row) => (
           <div>
-            <a href={`/crm/leads/${row.id}`} className="font-medium text-primary-700 hover:underline">
+            <a href={`/parties/${row.party?.id ?? row.id}`} className="font-medium text-primary-700 hover:underline">
               {row.name} ↗
             </a>
             {row.phone && (
@@ -257,7 +248,7 @@ export default function LeadsPage() {
         <div>
           <h2 className="text-lg font-bold text-slate-800">سرنخ‌ها</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            مدیریت سرنخ‌های فروش؛ هر سرنخ به یک طرف‌حساب متصل است. با اعلام قصد خرید، «تبدیل به فرصت فروش» از صفحهٔ جزئیات انجام می‌شود.
+            هر سرنخ یک طرف‌حساب با نقش «سرنخ» است؛ با ذخیرهٔ اولین پیش‌فاکتور معتبر، همان طرف‌حساب مشتری می‌شود. جزئیات = همان صفحهٔ طرف‌حساب.
           </p>
         </div>
         <Button onClick={() => setFormOpen(true)} aria-label="ثبت سرنخ جدید">
@@ -368,7 +359,7 @@ export default function LeadsPage() {
           )}
           <div>
             <label htmlFor="lead-name" className="mb-1 block text-xs font-medium text-slate-600">
-              نام سرنخ *
+              نام سرنخ {form.party ? <span className="text-[10px] text-slate-400">(طرف‌حساب انتخاب‌شده — نام جدید نادیده گرفته می‌شود)</span> : "*"}
             </label>
             <Input
               id="lead-name"
@@ -377,6 +368,25 @@ export default function LeadsPage() {
               aria-label="نام سرنخ"
             />
           </div>
+          {!form.party && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-600">نوع طرف‌حساب جدید</label>
+              <div className="flex gap-2">
+                {(["COMPANY", "PERSON"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, type: t }))}
+                    className={`rounded-md border px-3 py-1.5 text-xs ${
+                      form.type === t ? "border-primary-500 bg-primary-50 font-medium text-primary-700" : "border-slate-300 text-slate-600"
+                    }`}
+                  >
+                    {t === "COMPANY" ? "شرکت" : "شخص"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label htmlFor="lead-phone" className="mb-1 block text-xs font-medium text-slate-600">
@@ -403,7 +413,7 @@ export default function LeadsPage() {
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">
-                طرف‌حساب * <span className="text-[10px] font-normal text-slate-400">(هویت ثابت سرنخ — تکراری‌ها از قبل هشدار داده می‌شوند)</span>
+                طرف‌حساب موجود <span className="text-[10px] font-normal text-slate-400">(اختیاری — خالی = ساخت طرف‌حساب جدید در همان تراکنش)</span>
               </label>
               <EntitySelector
                 endpoint={(q) => `/parties?search=${encodeURIComponent(q)}&pageSize=10`}

@@ -412,6 +412,48 @@ export class SalesDocumentsService {
       },
       include: { lines: true },
     });
+      // ── CR-001 R2 §5: THE customer-conversion law ──────────────────────
+      // A SUCCESSFUL quotation save (any DRAFT/QUOTATION creation — the ONLY
+      // write path, so the sales-menu flow is covered too) grants the
+      // CUSTOMER role to a party holding the LEAD role. Atomic: the grant
+      // lives in THIS transaction — a failed save rolls everything back.
+      // Idempotent: a party that is already CUSTOMER (or has no LEAD role)
+      // is untouched; SUPPLIER/DRIVER/... roles are never disturbed.
+      const leadRole = await tx.partyRole.findUnique({
+        where: { partyId_role: { partyId: params.customerPartyId, role: 'LEAD' } },
+        select: { id: true },
+      });
+      if (leadRole) {
+        const customerRole = await tx.partyRole.findUnique({
+          where: { partyId_role: { partyId: params.customerPartyId, role: 'CUSTOMER' } },
+          select: { id: true },
+        });
+        if (!customerRole) {
+          await tx.partyRole.create({
+            data: { partyId: params.customerPartyId, role: 'CUSTOMER' },
+          });
+          await this.timeline.record(tx, {
+            companyId,
+            entityType: 'PARTY',
+            entityId: params.customerPartyId,
+            type: 'ROLE_ADDED',
+            title: 'مشتری شد',
+            description: `با ثبت پیش‌فاکتور ${documentNumber}، سرنخ به مشتری تبدیل شد`,
+            data: { salesDocumentId: salesDocumentId, documentNumber: documentNumber, role: 'CUSTOMER', via: 'QUOTATION' },
+            actorUserId: actor.id,
+          });
+          await this.auditService.recordTx(tx, {
+            entityType: 'party',
+            entityId: params.customerPartyId,
+            action: 'ROLE_ADDED',
+            actor,
+            companyId,
+            newValues: { role: 'CUSTOMER', via: 'QUOTATION', salesDocumentId: salesDocumentId },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          });
+        }
+      }
 
     await this.auditService.recordTx(tx, {
       entityType: 'sales_document',
@@ -1222,43 +1264,6 @@ export class SalesDocumentsService {
         data: { salesDocumentId: doc.id, documentNumber: doc.documentNumber },
         actorUserId: actor.id,
       });
-      // ── CR-001 §7: THE customer-conversion law ─────────────────────────
-      // Customer-hood is granted EXACTLY here: a VALID sales order
-      // (CUSTOMER_CONFIRMED -> SALES_ORDER). A draft, a sent quotation, or a
-      // tax invoice never grants it; UI-level restrictions are not trusted.
-      // Idempotent: a party that is already a customer keeps its role, its
-      // , its other roles (SUPPLIER etc.) and gets NO duplicate
-      // timeline/audit noise. If the order is later cancelled, the role is
-      // NOT auto-reversed (no ratified reversal policy — history stays).
-      const existingRole = await tx.partyRole.findUnique({
-        where: { partyId_role: { partyId: doc.customerPartyId, role: 'CUSTOMER' } },
-        select: { id: true },
-      });
-      if (!existingRole) {
-        await tx.partyRole.create({
-          data: { partyId: doc.customerPartyId, role: 'CUSTOMER', notes: null },
-        });
-        await this.timeline.record(tx, {
-          companyId,
-          entityType: 'PARTY',
-          entityId: doc.customerPartyId,
-          type: 'ROLE_ADDED',
-          title: 'مشتری شد',
-          description: `با قطعی شدن سفارش ${doc.documentNumber}، نقش مشتری به این طرف‌حساب اضافه شد`,
-          data: { salesDocumentId: doc.id, documentNumber: doc.documentNumber, role: 'CUSTOMER' },
-          actorUserId: actor.id,
-        });
-        await this.auditService.recordTx(tx, {
-          entityType: 'party',
-          entityId: doc.customerPartyId,
-          action: 'ROLE_ADDED',
-          actor,
-          companyId,
-          newValues: { role: 'CUSTOMER', via: 'SALES_ORDER', salesDocumentId: doc.id },
-          ip: ctx.ip,
-          userAgent: ctx.userAgent,
-        });
-      }
     });
     return this.getById(companyId, actorScope, id);
   }

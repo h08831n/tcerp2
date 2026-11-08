@@ -10,8 +10,7 @@
  */
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { fetchLeads, fetchOpportunities, type LeadDto, type OpportunityDto } from "@/lib/crm";
+import { fetchLeads, type LeadDto } from "@/lib/crm";
 
 interface PartyRoleLite {
   role: string;
@@ -26,20 +25,15 @@ export interface PartyCrmChipsProps {
 
 export function PartyCrmChips({ partyId, roles, refreshToken = 0 }: PartyCrmChipsProps) {
   const [lead, setLead] = useState<LeadDto | null>(null);
-  const [activeOpps, setActiveOpps] = useState<OpportunityDto[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    // Wide slice for the chips; detail lives in the CRM pages.
-    Promise.all([
-      fetchLeads({ partyId, pageSize: 20 }).catch(() => null),
-      fetchOpportunities({ customerPartyId: partyId, pageSize: 50 }).catch(() => null),
-    ])
-      .then(([leads, opps]) => {
-        if (cancelled) return;
-        const openLeads = (leads?.items ?? []).filter((l) => l.status !== "LOST");
-        setLead(openLeads[0] ?? null);
-        setActiveOpps((opps?.items ?? []).filter((o) => o.status !== "WON" && o.status !== "LOST"));
+    fetchLeads({ partyId, pageSize: 20 })
+      .then((leads) => {
+        if (!cancelled) {
+          const open = (leads?.items ?? []).find((l) => l.status !== "LOST");
+          setLead(open ?? null);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -48,26 +42,18 @@ export function PartyCrmChips({ partyId, roles, refreshToken = 0 }: PartyCrmChip
   }, [partyId, refreshToken]);
 
   const isCustomer = roles.some((r) => r.role === "CUSTOMER");
+  const isLead = roles.some((r) => r.role === "LEAD");
   const chips: React.ReactNode[] = [];
 
-  if (lead) {
-    chips.push(
-      <Link
-        key="lead"
-        href={`/crm/leads/${lead.id}`}
-        className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-medium text-sky-700 hover:underline"
-      >
-        سرنخ: {lead.name} ↗
-      </Link>,
-    );
-  }
-  if (activeOpps !== null && activeOpps.length > 0) {
+  // R2: a lead IS this party — the chip stays on the same page (no separate
+  // lead identity). History: the LEAD chip shows even after conversion.
+  if (isLead || lead) {
     chips.push(
       <span
-        key="opps"
-        className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-medium text-indigo-700"
+        key="lead"
+        className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-medium text-sky-700"
       >
-        دارای {activeOpps.length === 1 ? "فرصت فروش فعال" : `${activeOpps.length} فرصت فروش فعال`}
+        {isCustomer ? "سرنخ (پیشینه)" : "سرنخ"}
       </span>,
     );
   }

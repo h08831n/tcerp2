@@ -1517,4 +1517,64 @@ export class PartiesService {
     });
     return { removed: true, addressId };
   }
+
+  /**
+   * CR-001 R2 §6 — Smart Buttons: REAL counts from every module that holds a
+   * Party-attributable record, company-scoped, computed in ONE parallel
+   * round-trip. Quotation vs Sales Order never double-count: the document's
+   * CURRENT status decides its bucket. The FE renders a button only for
+   * modules the user may see; no fake/zero-placeholder buttons.
+   */
+  async smartCounts(companyId: string, id: string) {
+    const party = await this.prisma.party.findFirst({
+      where: { id, companyId },
+      select: { id: true },
+    });
+    if (!party) throw new NotFoundError('Party not found', { id });
+
+    const QUOTATION_STATUSES = ['DRAFT', 'QUOTATION', 'SENT', 'CUSTOMER_CONFIRMED', 'LOST', 'CANCELLED'];
+    const ORDER_STATUSES = ['SALES_ORDER', 'PARTIALLY_LOADED', 'COMPLETED'];
+
+    const [
+      quotations,
+      salesOrders,
+      salesTaxInvoices,
+      receipts,
+      payments,
+      checks,
+      purchaseOrders,
+      purchaseTaxInvoices,
+      loadings,
+      priceRequests,
+      openActivities,
+    ] = await Promise.all([
+      this.prisma.salesDocument.count({ where: { companyId, customerPartyId: id, status: { in: QUOTATION_STATUSES as never } } }),
+      this.prisma.salesDocument.count({ where: { companyId, customerPartyId: id, status: { in: ORDER_STATUSES as never } } }),
+      this.prisma.salesTaxInvoice.count({ where: { companyId, customerPartyId: id } }),
+      this.prisma.receipt.count({ where: { companyId, partyId: id } }),
+      this.prisma.payment.count({ where: { companyId, partyId: id } }),
+      this.prisma.check.count({ where: { companyId, partyId: id } }),
+      this.prisma.purchaseDocument.count({ where: { companyId, supplierPartyId: id } }),
+      this.prisma.purchaseTaxInvoice.count({ where: { companyId, supplierPartyId: id } }),
+      this.prisma.loading.count({ where: { companyId, customerPartyId: id } }),
+      this.prisma.priceRequest.count({ where: { companyId, customerPartyId: id } }),
+      this.prisma.activity.count({
+        where: { companyId, relatedEntityType: 'party', relatedEntityId: id, status: 'PENDING' },
+      }),
+    ]);
+
+    return {
+      quotations,
+      salesOrders,
+      salesTaxInvoices,
+      receipts,
+      payments,
+      checks,
+      purchaseOrders,
+      purchaseTaxInvoices,
+      loadings,
+      priceRequests,
+      openActivities,
+    };
+  }
 }

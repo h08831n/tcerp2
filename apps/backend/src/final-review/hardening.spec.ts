@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join, sep } from 'path';
 
 /**
@@ -30,7 +30,10 @@ function trackedFiles(relDir: string): string[] {
   return out
     .split('\n')
     .filter(Boolean)
-    .map((f) => join(REPO_ROOT, f));
+    .map((f) => join(REPO_ROOT, f))
+    // Deleted-in-working-tree entries (stale index rows on a dirty tree) are
+    // skipped — the sweep scans the WORKING TREE, not the git index.
+    .filter((f) => existsSync(f));
 }
 
 function walk(dir: string, out: string[] = []): string[] {

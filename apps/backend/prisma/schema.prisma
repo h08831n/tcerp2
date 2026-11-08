@@ -129,6 +129,11 @@ enum PartyRoleType {
   DRIVER
   CARRIER
   PARTNER
+  // CR-001 R2: a lead IS a Party with the LEAD role (roles stay composable —
+  // the same party may later hold CUSTOMER and keep SUPPLIER). The role is
+  // granted at lead creation and STAYS as history after customer conversion;
+  // the active-leads list excludes parties that already hold CUSTOMER.
+  LEAD
 }
 
 enum PhoneKind {

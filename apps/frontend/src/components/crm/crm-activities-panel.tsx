@@ -27,7 +27,7 @@ import {
 import { jalaliDateTime } from "@/lib/format";
 
 export interface CrmActivitiesPanelProps {
-  relatedEntityType: "lead" | "opportunity";
+  relatedEntityType: "lead" | "opportunity" | "party";
   relatedEntityId: string;
   /** Bump to force a reload after sibling mutations. */
   refreshToken?: number;
@@ -54,6 +54,11 @@ export function CrmActivitiesPanel({ relatedEntityType, relatedEntityId, refresh
   const [busyId, setBusyId] = useState<string | null>(null);
   const [completing, setCompleting] = useState<ActivityRow | null>(null);
   const [completeNote, setCompleteNote] = useState("");
+  // R2 §4: «انجام شد و برنامه‌ریزی فعالیت بعدی» — optionally schedule the
+  // next follow-up in the SAME dialog (Odoo's Open + Schedule next).
+  const [nextTitle, setNextTitle] = useState("");
+  const [nextTypeCode, setNextTypeCode] = useState("");
+  const [nextDue, setNextDue] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<ActivityRow | null>(null);
   const [cancelReason, setCancelReason] = useState("");
 
@@ -122,8 +127,29 @@ export function CrmActivitiesPanel({ relatedEntityType, relatedEntityId, refresh
     setBusyId(completing.id);
     try {
       await completeActivity(completing.id, completeNote.trim() || undefined);
+      // R2 §4: schedule the NEXT activity (same related entity) right after
+      // the completion — «انجام شد + فعالیت بعدی».
+      const wantsNext = nextTitle.trim().length >= 2;
+      if (wantsNext) {
+        try {
+          await createActivity({
+            typeCode: nextTypeCode || types[0]?.code || "",
+            title: nextTitle.trim(),
+            relatedEntityType,
+            relatedEntityId,
+            ...(nextDue ? { dueDate: nextDue } : {}),
+          });
+        } catch (nextErr) {
+          // The completion itself SUCCEEDED — surface the follow-up failure
+          // without rolling back the done state.
+          setError(activityErrorMessage(nextErr));
+        }
+      }
       setCompleting(null);
       setCompleteNote("");
+      setNextTitle("");
+      setNextTypeCode("");
+      setNextDue(null);
       setReloadToken((t) => t + 1);
     } catch (err) {
       setError(activityErrorMessage(err));
@@ -327,7 +353,7 @@ export function CrmActivitiesPanel({ relatedEntityType, relatedEntityId, refresh
         }
       >
         <label htmlFor="crm-act-note" className="mb-1 block text-xs font-medium text-slate-600">
-          یادداشت تکمیل (اختیاری)
+          نتیجه / یادداشت تکمیل (اختیاری)
         </label>
         <textarea
           id="crm-act-note"
@@ -336,6 +362,35 @@ export function CrmActivitiesPanel({ relatedEntityType, relatedEntityId, refresh
           onChange={(e) => setCompleteNote(e.target.value)}
           className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
         />
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2">
+          <p className="mb-1.5 text-[11px] font-medium text-slate-600">
+            برنامه‌ریزی فعالیت بعدی (اختیاری — «انجام شد + فعالیت بعدی»)
+          </p>
+          <div className="space-y-2">
+            <Input
+              value={nextTitle}
+              onChange={(e) => setNextTitle(e.target.value)}
+              placeholder="عنوان فعالیت بعدی…"
+              aria-label="عنوان فعالیت بعدی"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={nextTypeCode}
+                onChange={(e) => setNextTypeCode(e.target.value)}
+                aria-label="نوع فعالیت بعدی"
+                className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              >
+                <option value="">نوع…</option>
+                {types.map((t) => (
+                  <option key={t.code} value={t.code}>
+                    {t.nameFa}
+                  </option>
+                ))}
+              </select>
+              <DateTimePicker value={nextDue} onChange={setNextDue} aria-label="موعد فعالیت بعدی" />
+            </div>
+          </div>
+        </div>
       </Modal>
 
       {/* Cancel */}

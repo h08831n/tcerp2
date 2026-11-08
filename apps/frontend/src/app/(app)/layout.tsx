@@ -36,7 +36,9 @@ const NAV_ITEMS: NavItem[] = [
   { label: "مشتریان و تامین‌کنندگان", href: "/parties", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM21 21v-2a4 4 0 00-3-3.87M15 3.13a4 4 0 010 7.75" /> },
   // CR-001: CRM pipeline — سرنخ‌ها + فرصت‌های فروش (gated by crm.view)
   { label: "سرنخ‌ها (CRM)", href: "/crm/leads", icon: <NavIcon d="M12 19l7-7 3 3-7 7-3-3zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5zM2 2l7.586 7.586M11 11a2 2 0 100-4 2 2 0 000 4z" />, permission: "crm.view" },
-  { label: "فرصت‌های فروش", href: "/crm/opportunities", icon: <NavIcon d="M9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4zm2.5 4H4.5A1.5 1.5 0 013 19.5v-15A1.5 1.5 0 014.5 3h15A1.5 1.5 0 0121 4.5v15a1.5 1.5 0 01-1.5 1.5z" />, permission: "crm.view" },
+  // CR-001 R2 §1: the Opportunity stage was REMOVED from the operational
+  // flow — no menu item, no Kanban, no convert button. Existing opportunity
+  // DATA stays in the database untouched.
   { label: "محصولات", href: "/products", icon: <NavIcon d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16zM3.3 7L12 12l8.7-5M12 22V12" /> },
   { label: "فروش", href: "/sales", icon: <NavIcon d="M12 8c-1.66 0-3 .9-3 2s1.34 2 3 2 3 .9 3 2-1.34 2-3 2m0-8V7m0 10v1m9-6a9 9 0 11-18 0 9 9 0 0118 0z" /> },
   { label: "خرید", href: "/purchases", icon: <NavIcon d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4H6zM3 6h18M16 10a4 4 0 01-8 0" /> },

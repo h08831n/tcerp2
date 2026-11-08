@@ -3,6 +3,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -22,10 +23,17 @@ export class CreateLeadDto {
   @MaxLength(256)
   name: string;
 
-  // CR-001: a lead is ALWAYS attached to a Party — the party is the stable
-  // identity and conversion NEVER creates a second party row.
+  // CR-001 R2: a lead IS a Party with the LEAD role. Either link an EXISTING
+  // party (never duplicated) or let the service create a NEW Party identity
+  // in the SAME transaction — partyId/name drive which path runs.
+  @IsOptional()
   @IsUUID()
-  partyId: string;
+  partyId?: string;
+
+  /** Only for the new-Party path (default COMPANY). */
+  @IsOptional()
+  @IsIn(['PERSON', 'COMPANY'])
+  type?: 'PERSON' | 'COMPANY';
 
   @IsOptional()
   @IsString()
@@ -112,33 +120,6 @@ export class UpdateLeadDto {
 
   @IsInt()
   version: number;
-}
-
-/** CR-001: the explicit «تبدیل به فرصت فروش» operation payload. */
-export class ConvertLeadDto {
-  @IsOptional()
-  @IsString()
-  @MaxLength(256)
-  title?: string;
-
-  // Defaults to the lead's assigned salesperson when omitted; the convert
-  // UI may reassign at conversion time (owner requirement).
-  @IsOptional()
-  @IsUUID()
-  salespersonUserId?: string;
-
-  @IsOptional()
-  @IsNumber()
-  estimatedAmount?: number;
-
-  @IsOptional()
-  @IsNumber()
-  estimatedTonnage?: number;
-
-  /** Date-only ISO («تاریخ احتمالی نهایی شدن»). */
-  @IsOptional()
-  @IsDateString()
-  expectedCloseDate?: string;
 }
 
 export class LeadQueryDto extends PaginationDto {

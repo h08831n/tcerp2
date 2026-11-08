@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { fetchParty } from "@/lib/party";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EntitySelector, type EntityOption } from "@/components/ui/entity-selector";
@@ -42,6 +44,8 @@ export default function SalesPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<SalesDocumentStatus | "">("");
   const [customer, setCustomer] = useState<EntityOption | null>(null);
+  // CR-001 R2 §6: deep-link from the Party Smart Buttons (?customerPartyId).
+  const customerPartyParam = useSearchParams().get("customerPartyId") ?? "";
   const [salesperson, setSalesperson] = useState<EntityOption | null>(null);
   const [expiredOnly, setExpiredOnly] = useState(false);
   const [page, setPage] = useState(1);
@@ -80,7 +84,20 @@ export default function SalesPage() {
     [page, search, status, customer, salesperson, expiredOnly, sort],
   );
 
-  const load = useCallback(() => {
+    useEffect(() => {
+    if (!customerPartyParam) return;
+    let cancelled = false;
+    fetchParty(customerPartyParam)
+      .then((p) => {
+        if (!cancelled) setCustomer({ id: p.id, label: p.nameFa });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [customerPartyParam]);
+
+const load = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
