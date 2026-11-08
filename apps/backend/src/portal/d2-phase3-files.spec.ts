@@ -24,7 +24,7 @@ for (const [key, value] of Object.entries({
 }
 
 const ADMIN_PASSWORD = 'P3-Admin-Passw0rd!';
-const SHARED_CONTENT = 'p3-shared-content-exact-bytes';
+
 
 /**
  * D-2 Phase 3 (final) — customer portal FILES with THREE independent gates
@@ -40,6 +40,19 @@ const SHARED_CONTENT = 'p3-shared-content-exact-bytes';
  *   - HTTP multipart with the production ValidationPipe: customerVisible
  *     is an @IsIn string converted in the service (multipart sends strings).
  */
+// ── Module-scope sync MinIO probe → itStorage (SKIP if unreachable) ──
+// curl is available on both GH runners (ubuntu) and Windows dev.
+let minioReachable = false;
+try {
+  const s3Url = (process.env.S3_ENDPOINT || 'http://localhost:9000').replace(/\/$/, '');
+  require('child_process').execSync(
+    `curl -sf --max-time 3 ${s3Url}/minio/health/live`,
+    { timeout: 8000, stdio: 'pipe' },
+  );
+  minioReachable = true;
+} catch { /* MinIO not reachable — S3 tests will SKIP */ }
+const itStorage = (TEST_INTEGRATION && DB_URL && minioReachable) ? it : it.skip;
+
 describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)', () => {
   let prisma: PrismaService;
   let files: FilesService | null = null;
@@ -67,8 +80,6 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
   const internalIds: Record<string, string> = {};
   const visibleIds: Record<string, string> = {};
   let minioUp = false;
-  const itif = TEST_INTEGRATION && DB_URL ? it : it.skip;
-  const itStorage = TEST_INTEGRATION && DB_URL && minioUp ? it : it.skip;
 
   function hmac(data: string): string {
     return createHmac('sha256', process.env.JWT_SECRET ?? 'p3files-jwt-secret-0123456789').update(data).digest('hex');
@@ -278,7 +289,13 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
         if (foreignAttachmentId) await prisma.fileAttachment.delete({ where: { id: foreignAttachmentId } }).catch(() => undefined);
       });
       await step('foreignBlobCleanup', async () => {
-        if (foreignBlobId) await prisma.fileBlob.delete({ where: { id: foreignBlobId } }).catch(() => undefined);
+        if (!foreignBlobId) return;
+        // D5-02 final: ref-count check — do NOT delete a blob that still
+        // has attachments referencing it (content dedup → shared blob).
+        const refCount = await prisma.fileAttachment.count({ where: { fileBlobId: foreignBlobId } });
+        if (refCount === 0) {
+          await prisma.fileBlob.delete({ where: { id: foreignBlobId } }).catch(() => undefined);
+        }
       });
       await step('docs', () => prisma.salesDocument.deleteMany({ where: { id: { in: docIds } } }));
       await step('sessions', () => prisma.portalSession.deleteMany({ where: { portalAccountId: { in: portalAccountIds } } }));
@@ -334,24 +351,30 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     // No assertion — this is a diagnostic pin.
   });
 
-  itif('MinIO DOWN: storage-dependent upload FAILS with a connect error (never silent-pass)', async () => {
+  it('MinIO DOWN: storage-dependent upload FAILS with a connect error (never silent-pass)', async () => {
     if (minioUp) {
       console.warn('[p3] MinIO is UP — this test is not applicable (it proves the DOWN behavior)');
       return;
     }
     // When MinIO is down, FilesService.upload MUST throw a connect error —
-    // NOT succeed silently and NOT create an orphan row.
-    await expect(files!.upload(
+    // NOT succeed silently and NOT create an orphan row. FilesService is
+    // null here (not created when MinIO is down) — construct a temporary
+    // one to prove the real S3 connection failure.
+    const tempFiles = new FilesService(
+      prisma as never,
+      new AuditService(prisma as never),
+      loadConfig(),
+    );
+    await expect(tempFiles.upload(
       { buffer: Buffer.from('x'), originalname: 'x.txt', mimetype: 'text/plain', size: 1 },
-      { entityType: 'sales_document', entityId: docIds[0] },
+      { entityType: 'sales_document', entityId: docIds[0] || '00000000-0000-4000-8000-000000000001' },
       A, { id: createdUsers[0], username: 'admin' }, {},
     )).rejects.toThrow();
   });
 
   // -------------------------------------- storage-backed tests (MinIO UP)
 
-  itif('DEFAULT DENY: list shows ONLY the customer-visible attachment (internal invisible)', async () => {
-    console.warn('[p3 DEBUG] minioUp:', minioUp, '| internalIds[A]:', internalIds[A], '| docIds[0]:', docIds[0]);
+  itStorage('DEFAULT DENY: list shows ONLY the customer-visible attachment (internal invisible)', async () => {
 
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     const token = await makeSession(portalAccountIds[0]);
@@ -364,14 +387,14 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     expect(body.items.some((a) => a.id === internalIds[A])).toBe(false);
   });
 
-  itif('DEFAULT DENY: INTERNAL attachment on the customer OWN order → NOT downloadable', async () => {
+  itStorage('DEFAULT DENY: INTERNAL attachment on the customer OWN order → NOT downloadable', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     const token = await makeSession(portalAccountIds[0]);
     const dl = await portalGet(`/api/portal/files/${internalIds[A]}/download`, token);
     expect(dl.status).toBe(404);
   });
 
-  itif('customer-VISIBLE attachment on the same order downloads with stored content', async () => {
+  itStorage('customer-VISIBLE attachment on the same order downloads with stored content', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     const token = await makeSession(portalAccountIds[0]);
     const res = await portalGet(`/api/portal/files/${visibleIds[A]}/download`, token);
@@ -379,14 +402,14 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
     expect(await res.text()).toBe('p3-visible-A');
   });
 
-  itif('IDOR: downloading the OTHER company attachment with the A session → 404', async () => {
+  itStorage('IDOR: downloading the OTHER company attachment with the A session → 404', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     const token = await makeSession(portalAccountIds[0]);
     const res = await portalGet(`/api/portal/files/${internalIds[B]}/download`, token);
     expect(res.status).toBe(404);
   });
 
-  itif('SHARED BLOB: both attachments point to the SAME FileBlob (content dedup)', async () => {
+  itStorage('SHARED BLOB: both attachments point to the SAME FileBlob (content dedup)', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     const refCount = await prisma.fileAttachment.count({ where: { fileBlobId: sharedBlobId } });
     expect(refCount).toBe(3); // A internal + B shared + foreign — SAME blob
@@ -394,7 +417,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
 
   // --------------------------------- foreign protective fixture (MinIO UP)
 
-  itif('FOREIGN FIXTURE: same content from foreign company → SAME blob (dedup, verified in beforeAll)', async () => {
+  itStorage('FOREIGN FIXTURE: same content from foreign company → SAME blob (dedup, verified in beforeAll)', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     // The foreign fixture was created in beforeAll — verify the dedup
     expect(foreignBlobId).toBeTruthy();
@@ -408,7 +431,7 @@ describeIntegration('d2-phase3-files (real AppModule + MinIO + ValidationPipe)',
   // --------------------------------- suite cleanup test (runs LAST before
   // --------------------------------- afterAll — proves foreign survives)
 
-  itif('CLEANUP TEST: suite-scoped cleanup does NOT destroy the foreign attachment or shared blob', async () => {
+  itStorage('CLEANUP TEST: suite-scoped cleanup does NOT destroy the foreign attachment or shared blob', async () => {
     if (!minioUp) { console.warn('[p3] SKIP — MinIO DOWN (storage NOT_TESTED in CI)'); return; }
     if (!foreignAttachmentId) throw new Error('foreign fixture not created');
 
