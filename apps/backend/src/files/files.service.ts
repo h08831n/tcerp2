@@ -100,7 +100,7 @@ export class FilesService {
    */
   async upload(
     file: UploadedFilePayload,
-    data: { entityType: string; entityId: string; displayName?: string; category?: string },
+    data: { entityType: string; entityId: string; displayName?: string; category?: string; customerVisible?: string },
     companyId: string,
     actor: { id: string; username: string },
     ctx: RequestContext,
@@ -130,7 +130,10 @@ export class FilesService {
         data: {
           sha256,
           mimeType: file.mimetype,
-          size: BigInt(file.size),
+          // The BLOB is the source of truth for byte length: the declared
+          // multipart size can lie (and a lying Content-Length on download
+          // makes HTTP clients abort the stream mid-body).
+          size: BigInt(file.buffer.byteLength),
           storageKey: key,
           createdBy: actor.id,
         },
@@ -156,6 +159,9 @@ export class FilesService {
         originalFilename: file.originalname,
         displayName: data.displayName,
         category: data.category,
+        // D-2 Phase 3 (final): DEFAULT DENY — customer portal visibility
+        // requires the explicit flag; internal attachments stay hidden.
+        customerVisible: data.customerVisible === 'true',
         createdBy: actor.id,
       },
     });
@@ -188,6 +194,7 @@ export class FilesService {
       originalFilename: string;
       displayName?: string;
       category?: string;
+      customerVisible?: string;
     },
     companyId: string,
     actor: { id: string; username: string },
@@ -205,6 +212,7 @@ export class FilesService {
         originalFilename: data.originalFilename,
         displayName: data.displayName,
         category: data.category,
+        customerVisible: data.customerVisible === 'true',
         createdBy: actor.id,
       },
     });
