@@ -59,13 +59,37 @@ export const CONFIG = 'TCERP_CONFIG';
 /**
  * Passwords that must never reach production as the seed admin password.
  * `loadConfig` refuses to boot in production when one of these is configured.
+ * Includes the SAMPLE placeholder from .env.example files (dev-only: seed.ts
+ * and the backend share this one list — one policy, two consumers).
  */
-export const FORBIDDEN_PRODUCTION_PASSWORDS = ['Admin@12345', 'admin', 'password', '123456'];
+export const FORBIDDEN_PRODUCTION_PASSWORDS = [
+  'Admin@12345',
+  'admin',
+  'password',
+  '123456',
+  'change-me-strong-password',
+];
+
+/**
+ * JWT secrets that must never reach production: the .env.example placeholder
+ * values. They satisfy the length schema but are PUBLIC (anyone reading the
+ * repository can forge tokens with them).
+ */
+export const FORBIDDEN_PRODUCTION_JWT_SECRETS = [
+  'change-me-to-a-long-random-string',
+  'change-me-to-another-long-random-string',
+];
 
 /** True when the configured seed password is a known insecure default. */
 export function isForbiddenSeedPassword(password: string | undefined): boolean {
   if (!password) return false;
   return FORBIDDEN_PRODUCTION_PASSWORDS.includes(password);
+}
+
+/** True when the configured JWT secret is a known public sample value. */
+export function isForbiddenJwtSecret(secret: string | undefined): boolean {
+  if (!secret) return false;
+  return FORBIDDEN_PRODUCTION_JWT_SECRETS.includes(secret);
 }
 
 /** Minimal .env loader (no external dependency). Existing process.env wins. */
@@ -95,18 +119,31 @@ export function loadConfig(): AppConfig {
     throw new Error(`Invalid environment configuration:\n${issues}`);
   }
 
-  // Security startup guard: refuse production with a well-known seed password.
-  // Checked for both the current SEED_* names and the legacy ADMIN_PASSWORD.
+  // Security startup guard: refuse production with a well-known seed password
+  // (both the current SEED_* name and the legacy ADMIN_PASSWORD) or a PUBLIC
+  // sample JWT secret. Development/test keep working with sample values.
   if (parsed.data.NODE_ENV === 'production') {
-    const candidates = [
+    const passwordCandidates = [
       parsed.data.SEED_ADMIN_PASSWORD,
       process.env.ADMIN_PASSWORD,
     ];
-    for (const candidate of candidates) {
+    for (const candidate of passwordCandidates) {
       if (isForbiddenSeedPassword(candidate)) {
         throw new Error(
           'Refusing to start: a well-known default seed admin password is configured in production. ' +
             'Set SEED_ADMIN_PASSWORD to a strong unique value.',
+        );
+      }
+    }
+    const jwtCandidates: Array<[string, string | undefined]> = [
+      ['JWT_SECRET', parsed.data.JWT_SECRET],
+      ['JWT_REFRESH_SECRET', parsed.data.JWT_REFRESH_SECRET],
+    ];
+    for (const [name, secret] of jwtCandidates) {
+      if (isForbiddenJwtSecret(secret)) {
+        throw new Error(
+          `Refusing to start: ${name} is a public sample value in production. ` +
+            'Generate a long random secret (e.g. openssl rand -base64 48).',
         );
       }
     }
