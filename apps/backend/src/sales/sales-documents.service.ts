@@ -9,7 +9,6 @@ import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { assertActiveCompanyMember } from '../common/utils/company-member';
-import { assertCustomer } from '../common/utils/party-roles';
 import { D, calcLineTotals, moneyString, roundMoney, roundQuantity, sumDocumentTotals } from '../common/utils/money';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
@@ -338,8 +337,40 @@ export class SalesDocumentsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await assertCustomer(tx, companyId, params.customerPartyId);
+    // CR-001: NO customer-role requirement at document creation. A quotation
+    // (DRAFT/QUOTATION) is a sales PROPOSAL — it must be creatable for a lead
+    // whose party is not (yet) a customer. Customer-hood is granted EXACTLY
+    // once: at the valid CUSTOMER_CONFIRMED -> SALES_ORDER activation below.
+    // (assertCustomer stays in force for operational flows like loading.)
+    // The party MUST still exist INSIDE THIS COMPANY — the former
+    // assertCustomer call was also the cross-company isolation guard here,
+    // so a company-scoped existence check replaces it (uniform 404 for
+    // missing AND foreign parties: no existence leak).
+    const documentParty = await tx.party.findFirst({
+      where: { id: params.customerPartyId, companyId },
+      select: { id: true },
+    });
+    if (!documentParty) {
+      throw new NotFoundError('Party not found', { customerPartyId: params.customerPartyId });
+    }
     await assertActiveCompanyMember(tx, companyId, params.salespersonUserId, 'SALESPERSON_NOT_COMPANY_MEMBER');
+
+    // CR-001: a document linked to an opportunity must belong to the SAME
+    // party as the opportunity (backend-enforced, not a UI-only constraint).
+    if (params.opportunityId) {
+      const opportunity = await tx.opportunity.findFirst({
+        where: { id: params.opportunityId, companyId },
+        select: { id: true, customerPartyId: true },
+      });
+      if (!opportunity) throw new NotFoundError('Opportunity not found', { opportunityId: params.opportunityId });
+      if (opportunity.customerPartyId !== params.customerPartyId) {
+        throw new ValidationError('OPPORTUNITY_PARTY_MISMATCH', {
+          opportunityId: params.opportunityId,
+          opportunityPartyId: opportunity.customerPartyId,
+          documentPartyId: params.customerPartyId,
+        });
+      }
+    }
 
     const documentDate = params.documentDate ?? new Date();
     const expirationDate =
@@ -1191,6 +1222,43 @@ export class SalesDocumentsService {
         data: { salesDocumentId: doc.id, documentNumber: doc.documentNumber },
         actorUserId: actor.id,
       });
+      // ── CR-001 §7: THE customer-conversion law ─────────────────────────
+      // Customer-hood is granted EXACTLY here: a VALID sales order
+      // (CUSTOMER_CONFIRMED -> SALES_ORDER). A draft, a sent quotation, or a
+      // tax invoice never grants it; UI-level restrictions are not trusted.
+      // Idempotent: a party that is already a customer keeps its role, its
+      // , its other roles (SUPPLIER etc.) and gets NO duplicate
+      // timeline/audit noise. If the order is later cancelled, the role is
+      // NOT auto-reversed (no ratified reversal policy — history stays).
+      const existingRole = await tx.partyRole.findUnique({
+        where: { partyId_role: { partyId: doc.customerPartyId, role: 'CUSTOMER' } },
+        select: { id: true },
+      });
+      if (!existingRole) {
+        await tx.partyRole.create({
+          data: { partyId: doc.customerPartyId, role: 'CUSTOMER', notes: null },
+        });
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'PARTY',
+          entityId: doc.customerPartyId,
+          type: 'ROLE_ADDED',
+          title: 'مشتری شد',
+          description: `با قطعی شدن سفارش ${doc.documentNumber}، نقش مشتری به این طرف‌حساب اضافه شد`,
+          data: { salesDocumentId: doc.id, documentNumber: doc.documentNumber, role: 'CUSTOMER' },
+          actorUserId: actor.id,
+        });
+        await this.auditService.recordTx(tx, {
+          entityType: 'party',
+          entityId: doc.customerPartyId,
+          action: 'ROLE_ADDED',
+          actor,
+          companyId,
+          newValues: { role: 'CUSTOMER', via: 'SALES_ORDER', salesDocumentId: doc.id },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+      }
     });
     return this.getById(companyId, actorScope, id);
   }

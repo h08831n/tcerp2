@@ -49,6 +49,7 @@ const LEAD_BADGE_CLASSES: Record<LeadStatus, string> = {
   CONTACTED: "border-indigo-200 bg-indigo-50 text-indigo-700",
   QUALIFIED: "border-emerald-200 bg-emerald-50 text-emerald-700",
   LOST: "border-rose-200 bg-rose-50 text-rose-700",
+  CONVERTED: "border-violet-200 bg-violet-50 text-violet-700",
 };
 
 export function LeadStatusBadge({ status }: { status: LeadStatus }) {

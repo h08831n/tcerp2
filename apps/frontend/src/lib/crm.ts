@@ -6,28 +6,33 @@
 
 import { ApiError, apiJson } from "@/lib/api";
 import type { PaginatedResponse } from "@/lib/product";
+import type { TimelineItemDto } from "@/lib/party";
 
 // ---------------------------------------------------------------------------
 // Enums + Persian label maps
 // ---------------------------------------------------------------------------
 
-export type LeadStatus = "NEW" | "CONTACTED" | "QUALIFIED" | "LOST";
+// CR-001: CONVERTED is a TERMINAL state set only by the explicit
+// «تبدیل به فرصت فروش» operation — never by a plain status PATCH.
+export type LeadStatus = "NEW" | "CONTACTED" | "QUALIFIED" | "LOST" | "CONVERTED";
 
-export const LEAD_STATUSES: LeadStatus[] = ["NEW", "CONTACTED", "QUALIFIED", "LOST"];
+export const LEAD_STATUSES: LeadStatus[] = ["NEW", "CONTACTED", "QUALIFIED", "LOST", "CONVERTED"];
 
 export const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
   NEW: "جدید",
   CONTACTED: "تماس گرفته‌شده",
   QUALIFIED: "واجد شرایط",
   LOST: "باخته",
+  CONVERTED: "تبدیل‌شده",
 };
 
-/** Backend-enforced transitions: NEW → CONTACTED → QUALIFIED|LOST. */
+/** Backend-enforced transitions: NEW → CONTACTED → QUALIFIED|LOST; CONVERTED terminal. */
 export const LEAD_TRANSITIONS: Record<LeadStatus, LeadStatus[]> = {
   NEW: ["CONTACTED"],
   CONTACTED: ["QUALIFIED", "LOST"],
   QUALIFIED: [],
   LOST: [],
+  CONVERTED: [],
 };
 
 export type OpportunityStatus = "OPEN" | "QUALIFIED" | "QUOTED" | "WON" | "LOST";
@@ -60,7 +65,12 @@ export const OPPORTUNITY_TRANSITIONS: Record<OpportunityStatus, OpportunityStatu
 export function crmErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     const message = error.message;
-    if (message === "NOT_A_CUSTOMER") return "شخص انتخاب‌شده نقش مشتری ندارد.";
+    if (message === "LEAD_PARTY_REQUIRED") return "هر سرنخ باید به یک طرف‌حساب متصل باشد.";
+    if (message === "LEAD_LOST_CANNOT_CONVERT") return "سرنخ باخته را نمی‌توان به فرصت فروش تبدیل کرد.";
+    if (message === "LEAD_CONVERT_REQUIRES_CONVERT_OPERATION")
+      return "تبدیل سرنخ فقط از طریق عملیات «تبدیل به فرصت فروش» انجام می‌شود.";
+    if (message === "OPPORTUNITY_PARTY_MISMATCH")
+      return "فرصت انتخاب‌شده به طرف‌حساب دیگری تعلق دارد.";
     if (message === "LOST_REASON_REQUIRED") return "برای باخت، انتخاب دلیل الزامی است.";
     if (message === "VERSION_CONFLICT")
       return "رکورد توسط کاربر دیگری تغییر کرده است. لطفاً صفحه را بازخوانی کنید.";
@@ -99,6 +109,14 @@ export function userDisplayName(
 // Leads
 // ---------------------------------------------------------------------------
 
+/** CR-001 — next-activity chip (same machinery as party activities). */
+export interface CrmActivitySummaryDto {
+  nextActivityAt: string | null;
+  nextActivityTitle: string | null;
+  overdueCount: number;
+  openCount: number;
+}
+
 export interface LeadDto {
   id: string;
   partyId: string | null;
@@ -114,8 +132,10 @@ export interface LeadDto {
   version: number;
   createdAt: string;
   updatedAt: string;
-  party: { id: string; nameFa: string } | null;
+  party: { id: string; nameFa: string; type?: string } | null;
   salesperson: { id: string; username: string } | null;
+  /** CR-001 — computed next/overdue activity chip. */
+  activity?: CrmActivitySummaryDto;
 }
 
 export interface LeadQuery {
@@ -177,6 +197,39 @@ export function deleteLead(id: string): Promise<{ success: boolean }> {
 }
 
 // ---------------------------------------------------------------------------
+// CR-001 — convert lead → opportunity + CRM timeline (chatter)
+// ---------------------------------------------------------------------------
+
+export interface ConvertLeadBody {
+  title?: string;
+  salespersonUserId?: string;
+  estimatedAmount?: number;
+  estimatedTonnage?: number;
+  /** Date-only ISO «YYYY-MM-DD» («تاریخ احتمالی نهایی شدن»). */
+  expectedCloseDate?: string;
+}
+
+export interface ConvertLeadResult {
+  opportunity: { id: string; title: string; customerPartyId: string; leadId: string | null };
+  alreadyConverted: boolean;
+}
+
+export function convertLead(id: string, body: ConvertLeadBody = {}): Promise<ConvertLeadResult> {
+  return apiJson<ConvertLeadResult>(`/leads/${id}/convert`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function fetchLeadTimeline(id: string, limit = 50): Promise<{ items: TimelineItemDto[] }> {
+  return apiJson(`/leads/${id}/timeline?limit=${limit}`);
+}
+
+export function fetchOpportunityTimeline(id: string, limit = 50): Promise<{ items: TimelineItemDto[] }> {
+  return apiJson(`/opportunities/${id}/timeline?limit=${limit}`);
+}
+
+// ---------------------------------------------------------------------------
 // Opportunities
 // ---------------------------------------------------------------------------
 
@@ -193,12 +246,19 @@ export interface OpportunityDto {
   status: OpportunityStatus;
   source: string | null;
   lostReasonId: string | null;
+  /** CR-001 — «تاریخ احتمالی نهایی شدن» (date-only ISO). */
+  expectedCloseDate: string | null;
+  /** CR-001 — the lead this opportunity was converted from (if any). */
+  leadId: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
-  customer: { id: string; nameFa: string };
+  customer: { id: string; nameFa: string; type?: string };
   salesperson: UserRef;
   lostReason?: { id: string; nameFa: string; code: string } | null;
+  lead?: { id: string; name: string } | null;
+  /** CR-001 — computed next/overdue activity chip. */
+  activity?: CrmActivitySummaryDto;
 }
 
 export interface OpportunityQuery {
@@ -234,6 +294,7 @@ export interface CreateOpportunityBody {
   description?: string;
   estimatedAmount?: number;
   estimatedTonnage?: number;
+  expectedCloseDate?: string;
   source?: string;
 }
 
@@ -247,6 +308,7 @@ export function createOpportunity(body: CreateOpportunityBody): Promise<Opportun
 export interface UpdateOpportunityBody extends Partial<CreateOpportunityBody> {
   status?: OpportunityStatus;
   lostReasonId?: string;
+  expectedCloseDate?: string;
   version: number;
 }
 

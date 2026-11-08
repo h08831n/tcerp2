@@ -8,14 +8,18 @@ import { assertActiveCompanyMember } from '../common/utils/company-member';
 import { moneyString } from '../common/utils/money';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
+import { TimelineService } from '../parties/timeline.service';
+import { crmActivitySummary, CrmActivitySummary } from './crm-activity-summary';
 import { CreateOpportunityDto, OpportunityQueryDto, UpdateOpportunityDto } from './crm.dto';
 
 /**
- * Opportunities (REQUIREMENTS §8): a (returning) customer gets a NEW
- * Opportunity per buying intent. The customer party MUST hold the CUSTOMER
- * role; the salesperson must be an active company member. Status chain
- * OPEN → QUALIFIED → QUOTED → WON/LOST; `lostReasonId` is REQUIRED when a
- * quotation is marked LOST.
+ * Opportunities (REQUIREMENTS §8 + CR-001): an Opportunity is created per
+ * buying intent and is attached to a STABLE Party — which may be a plain
+ * lead (NO CUSTOMER role required: the role is granted exclusively when a
+ * Sales Order is activated, sales-documents.service.activate). Multiple
+ * opportunities per party are allowed. Status chain OPEN → QUALIFIED →
+ * QUOTED → WON/LOST is backend-enforced; `lostReasonId` is REQUIRED when
+ * an opportunity is marked LOST.
  */
 
 const OPPORTUNITY_TRANSITIONS: Record<OpportunityStatus, OpportunityStatus[]> = {
@@ -26,25 +30,17 @@ const OPPORTUNITY_TRANSITIONS: Record<OpportunityStatus, OpportunityStatus[]> = 
   LOST: [],
 };
 
-export const NOT_A_CUSTOMER = 'NOT_A_CUSTOMER';
+export interface OpportunityWithSummary extends Opportunity {
+  activity: CrmActivitySummary;
+}
 
 @Injectable()
 export class OpportunitiesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly timeline: TimelineService,
   ) {}
-
-  /** The party must hold the CUSTOMER role (p4-03). */
-  async assertCustomerRole(companyId: string, partyId: string): Promise<void> {
-    const party = await this.prisma.party.findFirst({
-      where: { id: partyId, companyId },
-      select: { id: true, roles: { where: { role: 'CUSTOMER' }, select: { id: true } } },
-    });
-    if (!party || party.roles.length === 0) {
-      throw new ValidationError(NOT_A_CUSTOMER, { companyId, partyId });
-    }
-  }
 
   private assertTransition(from: OpportunityStatus, to: OpportunityStatus): void {
     if (from !== to && !OPPORTUNITY_TRANSITIONS[from].includes(to)) {
@@ -68,13 +64,20 @@ export class OpportunitiesService {
     if (!reason) throw new NotFoundError('Lost reason not found', { lostReasonId });
   }
 
+  private toCloseDate(expectedCloseDate: string | undefined): Date | undefined {
+    // DATE column: anchor at UTC midnight — no timezone day-shift (R5-P1).
+    return expectedCloseDate ? new Date(`${expectedCloseDate.slice(0, 10)}T00:00:00Z`) : undefined;
+  }
+
   async create(
     companyId: string,
     dto: CreateOpportunityDto,
     actor: { id: string; username: string },
     ctx: RequestContext,
-  ): Promise<Opportunity> {
-    await this.assertCustomerRole(companyId, dto.customerPartyId);
+  ): Promise<OpportunityWithSummary> {
+    // CR-001: NO customer-role requirement — an opportunity may exist for a
+    // lead whose party is not (yet) a customer. Customer-hood is granted ONLY
+    // by a valid Sales Order activation.
     await assertActiveCompanyMember(
       this.prisma,
       companyId,
@@ -90,10 +93,21 @@ export class OpportunitiesService {
           salespersonUserId: dto.salespersonUserId,
           title: dto.title,
           description: dto.description,
+          expectedCloseDate: this.toCloseDate(dto.expectedCloseDate),
           estimatedAmount: dto.estimatedAmount !== undefined ? moneyString(dto.estimatedAmount) : undefined,
           estimatedTonnage: dto.estimatedTonnage !== undefined ? moneyString(dto.estimatedTonnage) : undefined,
           source: dto.source,
         },
+      });
+      await this.timeline.record(tx, {
+        companyId,
+        entityType: 'OPPORTUNITY',
+        entityId: opportunity.id,
+        type: 'OPPORTUNITY_CREATED',
+        title: 'فرصت فروش ایجاد شد',
+        description: `فرصت «${opportunity.title}» ثبت شد`,
+        data: { opportunityId: opportunity.id, partyId: opportunity.customerPartyId },
+        actorUserId: actor.id,
       });
       await this.auditService.recordTx(tx, {
         entityType: 'opportunity',
@@ -105,7 +119,10 @@ export class OpportunitiesService {
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });
-      return opportunity;
+      return {
+        ...opportunity,
+        activity: await crmActivitySummary(this.prisma, companyId, 'opportunity', opportunity.id),
+      };
     });
   }
 
@@ -115,13 +132,10 @@ export class OpportunitiesService {
     dto: UpdateOpportunityDto,
     actor: { id: string; username: string },
     ctx: RequestContext,
-  ): Promise<Opportunity> {
+  ): Promise<OpportunityWithSummary> {
     const existing = await this.prisma.opportunity.findFirst({ where: { id, companyId } });
     if (!existing) throw new NotFoundError('Opportunity not found', { id });
 
-    if (dto.customerPartyId && dto.customerPartyId !== existing.customerPartyId) {
-      await this.assertCustomerRole(companyId, dto.customerPartyId);
-    }
     if (dto.salespersonUserId) {
       await assertActiveCompanyMember(
         this.prisma,
@@ -138,14 +152,15 @@ export class OpportunitiesService {
       await this.assertLostReasonExists(companyId, dto.lostReasonId);
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const row = await tx.opportunity.update({
+    const row = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.opportunity.update({
         where: { id: existing.id, version: dto.version },
         data: {
           customerPartyId: dto.customerPartyId,
           salespersonUserId: dto.salespersonUserId,
           title: dto.title,
           description: dto.description,
+          expectedCloseDate: this.toCloseDate(dto.expectedCloseDate),
           estimatedAmount: dto.estimatedAmount !== undefined ? moneyString(dto.estimatedAmount) : undefined,
           estimatedTonnage: dto.estimatedTonnage !== undefined ? moneyString(dto.estimatedTonnage) : undefined,
           status: dto.status,
@@ -154,37 +169,54 @@ export class OpportunitiesService {
           version: { increment: 1 },
         },
       });
+      if (updated.status !== existing.status) {
+        await this.timeline.record(tx, {
+          companyId,
+          entityType: 'OPPORTUNITY',
+          entityId: updated.id,
+          type: 'OPPORTUNITY_STAGE_CHANGED',
+          title: 'مرحله فرصت تغییر کرد',
+          description: `${existing.status} → ${updated.status}`,
+          data: { opportunityId: updated.id, from: existing.status, to: updated.status },
+          actorUserId: actor.id,
+        });
+      }
       await this.auditService.recordTx(tx, {
         entityType: 'opportunity',
-        entityId: row.id,
+        entityId: updated.id,
         action: AuditAction.UPDATE,
         companyId,
         actor,
         oldValues: { status: existing.status, title: existing.title },
-        newValues: { status: row.status, title: row.title },
+        newValues: { status: updated.status, title: updated.title },
         ip: ctx.ip,
         userAgent: ctx.userAgent,
       });
-      return row;
+      return updated;
     }).catch((error) => {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
         throw new ConflictError('VERSION_CONFLICT', { id });
       }
       throw error;
     });
+    return { ...row, activity: await crmActivitySummary(this.prisma, companyId, 'opportunity', id) };
   }
 
-  async getById(companyId: string, id: string): Promise<Opportunity> {
+  async getById(companyId: string, id: string): Promise<OpportunityWithSummary> {
     const opportunity = await this.prisma.opportunity.findFirst({
       where: { id, companyId },
       include: {
-        customer: { select: { id: true, nameFa: true } },
+        customer: { select: { id: true, nameFa: true, type: true } },
         salesperson: { select: { id: true, username: true, firstName: true, lastName: true } },
         lostReason: { select: { id: true, nameFa: true, code: true } },
+        lead: { select: { id: true, name: true } },
       },
     });
     if (!opportunity) throw new NotFoundError('Opportunity not found', { id });
-    return opportunity;
+    return {
+      ...opportunity,
+      activity: await crmActivitySummary(this.prisma, companyId, 'opportunity', id),
+    };
   }
 
   async list(companyId: string, query: OpportunityQueryDto): Promise<Paginated<Opportunity>> {
@@ -209,5 +241,19 @@ export class OpportunitiesService {
       this.prisma.opportunity.count({ where }),
     ]);
     return { items, total, page: query.page, pageSize: query.pageSize };
+  }
+
+  /** Timeline (Chatter) for the opportunity — same machinery as parties. */
+  async timelineFor(
+    companyId: string,
+    id: string,
+    options: { limit?: number } = {},
+  ): Promise<ReturnType<TimelineService['listForEntity']>> {
+    const opportunity = await this.prisma.opportunity.findFirst({
+      where: { id, companyId },
+      select: { id: true },
+    });
+    if (!opportunity) throw new NotFoundError('Opportunity not found', { id });
+    return this.timeline.listForEntity(companyId, 'OPPORTUNITY', id, options);
   }
 }

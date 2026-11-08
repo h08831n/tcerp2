@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Input } from "@/components/ui/input";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
 import { Modal } from "@/components/ui/modal";
 import { faDigits, jalaliDateTime } from "@/lib/format";
 import { apiJson } from "@/lib/api";
@@ -169,7 +170,7 @@ export default function ApprovalsPage() {
           entityId: newEntityId.trim(),
           approvalType: newType.trim(),
           ...(newReason.trim() ? { reason: newReason.trim() } : {}),
-          ...(newDueAt ? { dueAt: new Date(newDueAt).toISOString() } : {}),
+          ...(newDueAt ? { dueAt: newDueAt } : {}), // DateTimePicker already emits a UTC ISO instant
         }),
       });
       setCreateOpen(false);
@@ -406,7 +407,7 @@ export default function ApprovalsPage() {
             </label>
             <label className="text-xs text-slate-600">
               مهلت تصمیم (اختیاری)
-              <Input type="datetime-local" value={newDueAt} onChange={(e) => setNewDueAt(e.target.value)} />
+              <DateTimePicker value={newDueAt || null} onChange={(iso) => setNewDueAt(iso ?? "")} />
             </label>
           </div>
           <label className="block text-xs text-slate-600">

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { Modal } from "@/components/ui/modal";
 import { faDigits, jalali, jalaliDateTime } from "@/lib/format";
 import {
@@ -511,7 +512,7 @@ export default function TreasuryPage() {
           </label>
           <label className="block text-xs text-slate-600">
             تاریخ (اختیاری — پیش‌فرض امروز)
-            <Input type="date" value={opsDate} onChange={(e) => setOpsDate(e.target.value)} />
+            <DatePicker value={opsDate || null} onChange={(iso) => setOpsDate(iso ?? "")} />
           </label>
           <label className="block text-xs text-slate-600">
             شرح
@@ -551,11 +552,11 @@ export default function TreasuryPage() {
           <div className="grid grid-cols-2 gap-2">
             <label className="text-xs text-slate-600">
               سررسید
-              <Input type="date" value={chkDue} onChange={(e) => setChkDue(e.target.value)} />
+              <DatePicker value={chkDue || null} onChange={(iso) => setChkDue(iso ?? "")} />
             </label>
             <label className="text-xs text-slate-600">
               تاریخ صدور (اختیاری)
-              <Input type="date" value={chkIssue} onChange={(e) => setChkIssue(e.target.value)} />
+              <DatePicker value={chkIssue || null} onChange={(iso) => setChkIssue(iso ?? "")} />
             </label>
           </div>
           <label className="block text-xs text-slate-600">

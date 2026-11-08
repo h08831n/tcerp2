@@ -19,6 +19,7 @@ import { ScoreTab } from "@/components/parties/score-tab";
 import { FinancialTab } from "@/components/parties/financial-tab";
 import { PartyTimelineSidebar } from "@/components/parties/party-timeline-sidebar";
 import { RoleBadge, ScoreBadge, StatusBadge, TypeBadge } from "@/components/parties/badges";
+import { PartyCrmChips } from "@/components/parties/party-crm-chips";
 import { faDigits, jalali } from "@/lib/format";
 import {
   archiveParty,
@@ -171,6 +172,8 @@ export default function PartyDetailPage() {
                   <RoleBadge key={entry.role} role={entry.role} />
                 ))}
               </div>
+              {/* CR-001 §8: Lead / فعال opportunity / Customer status chips */}
+              <PartyCrmChips partyId={party.id} roles={party.roles} refreshToken={party.version} />
             </div>
             <div className="flex items-center gap-2">
               <Link href="/parties" tabIndex={-1}>

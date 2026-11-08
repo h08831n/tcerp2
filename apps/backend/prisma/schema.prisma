@@ -45,70 +45,70 @@ model Company {
   createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  users              UserCompany[]
-  companyRoles       UserCompanyRole[]
-  teams              Team[]
-  settings           Setting[]
-  sequences          Sequence[]
-  integrationConfigs IntegrationConfig[]
-  notificationRules  NotificationRule[]
-  notifications      Notification[]
-  smsTemplates       SmsTemplate[]
-  smsMessages        SmsMessage[]
-  importJobs         ImportJob[]
-  queueJobs          QueueJob[]
-  bankAccounts       BankAccount[]
-  chartOfAccounts    ChartOfAccount[]
-  journalEntries     JournalEntry[]
-  receipts           Receipt[]
-  payments           Payment[]
-  bankTransfers      BankTransfer[]
-  checks             Check[]
-  taxDefinitions     TaxDefinition[]
-  salesTaxInvoices   SalesTaxInvoice[]
-  purchaseTaxInvoices PurchaseTaxInvoice[]
-  moadianDiagnosticRuns MoadianDiagnosticRun[]
-  claims             OperationalSettlementClaim[]
-  loadings           Loading[]
-  workflowDefinitions WorkflowDefinition[]
-  portalAccounts     PortalAccount[]
-  defaultUsers       User[]
-  userRoleOverrides  UserPermissionOverride[]
-  fileAttachments    FileAttachment[]
-  parties            Party[]
-  timelineEvents     TimelineEvent[]
-  activities         Activity[]
-  activityTypes      ActivityType[]
-  productCategories  ProductCategory[]
-  brands             Brand[]
-  uomCategories      UomCategory[]
-  uoms               Uom[]
-  attributes         Attribute[]
-  productTemplates   ProductTemplate[]
-  productVariants    ProductVariant[]
-  supplierProducts   SupplierProduct[]
-  leads              Lead[]
-  opportunities      Opportunity[]
-  lostReasons        LostReason[]
-  paymentTerms       PaymentTerm[]
-  salesDocuments     SalesDocument[]
-  purchaseDocuments  PurchaseDocument[]
+  users                    UserCompany[]
+  companyRoles             UserCompanyRole[]
+  teams                    Team[]
+  settings                 Setting[]
+  sequences                Sequence[]
+  integrationConfigs       IntegrationConfig[]
+  notificationRules        NotificationRule[]
+  notifications            Notification[]
+  smsTemplates             SmsTemplate[]
+  smsMessages              SmsMessage[]
+  importJobs               ImportJob[]
+  queueJobs                QueueJob[]
+  bankAccounts             BankAccount[]
+  chartOfAccounts          ChartOfAccount[]
+  journalEntries           JournalEntry[]
+  receipts                 Receipt[]
+  payments                 Payment[]
+  bankTransfers            BankTransfer[]
+  checks                   Check[]
+  taxDefinitions           TaxDefinition[]
+  salesTaxInvoices         SalesTaxInvoice[]
+  purchaseTaxInvoices      PurchaseTaxInvoice[]
+  moadianDiagnosticRuns    MoadianDiagnosticRun[]
+  claims                   OperationalSettlementClaim[]
+  loadings                 Loading[]
+  workflowDefinitions      WorkflowDefinition[]
+  portalAccounts           PortalAccount[]
+  defaultUsers             User[]
+  userRoleOverrides        UserPermissionOverride[]
+  fileAttachments          FileAttachment[]
+  parties                  Party[]
+  timelineEvents           TimelineEvent[]
+  activities               Activity[]
+  activityTypes            ActivityType[]
+  productCategories        ProductCategory[]
+  brands                   Brand[]
+  uomCategories            UomCategory[]
+  uoms                     Uom[]
+  attributes               Attribute[]
+  productTemplates         ProductTemplate[]
+  productVariants          ProductVariant[]
+  supplierProducts         SupplierProduct[]
+  leads                    Lead[]
+  opportunities            Opportunity[]
+  lostReasons              LostReason[]
+  paymentTerms             PaymentTerm[]
+  salesDocuments           SalesDocument[]
+  purchaseDocuments        PurchaseDocument[]
   salesPurchaseAllocations SalesPurchaseAllocation[]
-  priceRequests      PriceRequest[]
-  supplierOffers     SupplierOffer[]
-  documentRelations  DocumentRelation[]
-  dailyPrices        DailyPrice[]
-  publishBatches     PublishBatch[]
-  publishingTemplates PublishingTemplate[]
-  automationRules    AutomationRule[]
-  fiscalYears        FiscalYear[]
-  postingRules       PostingRule[]
-  openingBalanceEntries OpeningBalanceEntry[]
-  accountingEvents   AccountingEvent[]
-  warehouses         Warehouse[]
-  stockLocations     StockLocation[]
-  stockMovements     StockMovement[]
-  approvalRequests   ApprovalRequest[]
+  priceRequests            PriceRequest[]
+  supplierOffers           SupplierOffer[]
+  documentRelations        DocumentRelation[]
+  dailyPrices              DailyPrice[]
+  publishBatches           PublishBatch[]
+  publishingTemplates      PublishingTemplate[]
+  automationRules          AutomationRule[]
+  fiscalYears              FiscalYear[]
+  postingRules             PostingRule[]
+  openingBalanceEntries    OpeningBalanceEntry[]
+  accountingEvents         AccountingEvent[]
+  warehouses               Warehouse[]
+  stockLocations           StockLocation[]
+  stockMovements           StockMovement[]
+  approvalRequests         ApprovalRequest[]
 
   @@map("companies")
 }
@@ -139,12 +139,12 @@ enum PhoneKind {
 }
 
 model Party {
-  id            String    @id @default(uuid()) @db.Uuid
-  companyId     String    @map("company_id") @db.Uuid
-  type          PartyType
-  nameFa        String    @map("name_fa")
-  nameEn        String?   @map("name_en")
-  internalCode  String?   @map("internal_code")
+  id           String    @id @default(uuid()) @db.Uuid
+  companyId    String    @map("company_id") @db.Uuid
+  type         PartyType
+  nameFa       String    @map("name_fa")
+  nameEn       String?   @map("name_en")
+  internalCode String?   @map("internal_code")
 
   // COMPANY fields
   registrationNumber String? @map("registration_number")
@@ -155,51 +155,51 @@ model Party {
   email              String?
 
   // PERSON fields
-  firstName     String?   @map("first_name")
-  lastName      String?   @map("last_name")
-  gender        String?
-  birthDate     DateTime? @map("birth_date") @db.Date
-  nationalCode  String?   @map("national_code")
+  firstName    String?   @map("first_name")
+  lastName     String?   @map("last_name")
+  gender       String?
+  birthDate    DateTime? @map("birth_date") @db.Date
+  nationalCode String?   @map("national_code")
 
   // CRM ownership: Party owner (assigned salesperson). Independent from any
   // future sales-document salesperson (REQUIREMENTS §4).
-  ownerUserId   String?   @map("owner_user_id") @db.Uuid
-  notes         String?
+  ownerUserId String? @map("owner_user_id") @db.Uuid
+  notes       String?
 
   // Cached customer score (see CustomerScoreHistory); computed, not hand-edited.
-  score         Int?
-  scoreLevel    ScoreLevel? @map("score_level")
+  score      Int?
+  scoreLevel ScoreLevel? @map("score_level")
 
-  version       Int       @default(1) // optimistic locking
-  archivedAt    DateTime? @map("archived_at") @db.Timestamptz(6)
-  archivedBy    String?   @map("archived_by") @db.Uuid
-  createdBy     String?   @map("created_by") @db.Uuid
-  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version    Int       @default(1) // optimistic locking
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz(6)
+  archivedBy String?   @map("archived_by") @db.Uuid
+  createdBy  String?   @map("created_by") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company    Company                 @relation(fields: [companyId], references: [id])
-  owner      User?                   @relation("PartyOwner", fields: [ownerUserId], references: [id])
-  roles      PartyRole[]
-  salesTaxInvoices SalesTaxInvoice[] @relation("TaxInvoiceCustomer")
-  purchaseTaxInvoices PurchaseTaxInvoice[] @relation("PurchaseTaxInvoiceSupplier")
-  phones     PartyPhone[]
-  contacts   Contact[]
-  addresses  Address[]
-  scores     CustomerScoreHistory[]
-  responsibleFor    FinancialResponsibility[] @relation("ResponsibleParty")
-  membershipOf      FinancialResponsibility[] @relation("MemberParty")
-  supplierMappings  SupplierProduct[]
-  leads             Lead[]
-  opportunityCustomers Opportunity[] @relation("OpportunityCustomer")
-  salesDocuments    SalesDocument[] @relation("SalesCustomer")
-  purchaseDocuments PurchaseDocument[] @relation("PurchaseSupplier")
-  priceRequests     PriceRequest[] @relation("PriceRequestCustomer")
-  supplierOffers    SupplierOffer[] @relation("OfferSupplier")
-  pricedAsSupplier  DailyPrice[] @relation("PricedAsSupplier")
-  loadingAsCustomer Loading[]    @relation("LoadingCustomer")
-  loadingAsDriver   Loading[]    @relation("LoadingDriver")
-  loadingAsCarrier  Loading[]    @relation("LoadingCarrier")
-  stockLocations    StockLocation[] @relation("LocationParty")
+  company              Company                   @relation(fields: [companyId], references: [id])
+  owner                User?                     @relation("PartyOwner", fields: [ownerUserId], references: [id])
+  roles                PartyRole[]
+  salesTaxInvoices     SalesTaxInvoice[]         @relation("TaxInvoiceCustomer")
+  purchaseTaxInvoices  PurchaseTaxInvoice[]      @relation("PurchaseTaxInvoiceSupplier")
+  phones               PartyPhone[]
+  contacts             Contact[]
+  addresses            Address[]
+  scores               CustomerScoreHistory[]
+  responsibleFor       FinancialResponsibility[] @relation("ResponsibleParty")
+  membershipOf         FinancialResponsibility[] @relation("MemberParty")
+  supplierMappings     SupplierProduct[]
+  leads                Lead[]
+  opportunityCustomers Opportunity[]             @relation("OpportunityCustomer")
+  salesDocuments       SalesDocument[]           @relation("SalesCustomer")
+  purchaseDocuments    PurchaseDocument[]        @relation("PurchaseSupplier")
+  priceRequests        PriceRequest[]            @relation("PriceRequestCustomer")
+  supplierOffers       SupplierOffer[]           @relation("OfferSupplier")
+  pricedAsSupplier     DailyPrice[]              @relation("PricedAsSupplier")
+  loadingAsCustomer    Loading[]                 @relation("LoadingCustomer")
+  loadingAsDriver      Loading[]                 @relation("LoadingDriver")
+  loadingAsCarrier     Loading[]                 @relation("LoadingCarrier")
+  stockLocations       StockLocation[]           @relation("LocationParty")
 
   @@unique([companyId, internalCode])
   @@unique([companyId, nationalId])
@@ -212,11 +212,11 @@ model Party {
 
 // One Party may hold several roles simultaneously (unique per pair).
 model PartyRole {
-  id       String        @id @default(uuid()) @db.Uuid
-  partyId  String        @map("party_id") @db.Uuid
-  role     PartyRoleType
-  since    DateTime      @default(now()) @db.Timestamptz(6)
-  notes    String?
+  id      String        @id @default(uuid()) @db.Uuid
+  partyId String        @map("party_id") @db.Uuid
+  role    PartyRoleType
+  since   DateTime      @default(now()) @db.Timestamptz(6)
+  notes   String?
 
   party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
 
@@ -301,7 +301,7 @@ model Address {
   isPrimary  Boolean     @default(false) @map("is_primary")
   createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  party         Party           @relation(fields: [partyId], references: [id], onDelete: Cascade)
   salesShipping SalesDocument[]
 
   @@index([partyId])
@@ -319,15 +319,15 @@ enum ScoreLevel {
 // Append-only score computation history. Weights/thresholds live in company
 // Settings (crm.score_rules), never hard-coded (REQUIREMENTS §4).
 model CustomerScoreHistory {
-  id             String     @id @default(uuid()) @db.Uuid
-  companyId      String     @map("company_id") @db.Uuid
-  partyId        String     @map("party_id") @db.Uuid
-  score          Int
-  level          ScoreLevel
-  metrics        Json // { operationalProfit, tonnage, purchaseCount, paidAmount, recencyDays, frequency }
-  computedAt     DateTime   @map("computed_at") @db.Timestamptz(6)
-  computedBy     String?    @map("computed_by") @db.Uuid
-  note           String?
+  id         String     @id @default(uuid()) @db.Uuid
+  companyId  String     @map("company_id") @db.Uuid
+  partyId    String     @map("party_id") @db.Uuid
+  score      Int
+  level      ScoreLevel
+  metrics    Json // { operationalProfit, tonnage, purchaseCount, paidAmount, recencyDays, frequency }
+  computedAt DateTime   @map("computed_at") @db.Timestamptz(6)
+  computedBy String?    @map("computed_by") @db.Uuid
+  note       String?
 
   party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
 
@@ -339,12 +339,12 @@ model CustomerScoreHistory {
 // merging their identities (REQUIREMENTS §38/§100). A member belongs to at
 // most one group per company.
 model FinancialResponsibility {
-  id                  String   @id @default(uuid()) @db.Uuid
-  companyId           String   @map("company_id") @db.Uuid
-  responsiblePartyId  String   @map("responsible_party_id") @db.Uuid
-  memberPartyId       String   @map("member_party_id") @db.Uuid
-  note                String?
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id                 String   @id @default(uuid()) @db.Uuid
+  companyId          String   @map("company_id") @db.Uuid
+  responsiblePartyId String   @map("responsible_party_id") @db.Uuid
+  memberPartyId      String   @map("member_party_id") @db.Uuid
+  note               String?
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   responsibleParty Party @relation("ResponsibleParty", fields: [responsiblePartyId], references: [id], onDelete: Cascade)
   memberParty      Party @relation("MemberParty", fields: [memberPartyId], references: [id], onDelete: Cascade)
@@ -417,42 +417,42 @@ model ActivityType {
 }
 
 model Activity {
-  id                String           @id @default(uuid()) @db.Uuid
-  companyId         String           @map("company_id") @db.Uuid
-  typeId            String           @map("type_id") @db.Uuid
-  title             String
-  description       String?
-  relatedEntityType String           @map("related_entity_type")
-  relatedEntityId   String           @map("related_entity_id") @db.Uuid
+  id                 String           @id @default(uuid()) @db.Uuid
+  companyId          String           @map("company_id") @db.Uuid
+  typeId             String           @map("type_id") @db.Uuid
+  title              String
+  description        String?
+  relatedEntityType  String           @map("related_entity_type")
+  relatedEntityId    String           @map("related_entity_id") @db.Uuid
   // creator: USER (with id) or SYSTEM (Workflow/Automation — no fake user)
-  createdByType     String           @default("USER") @map("created_by_type")
-  createdById       String?          @map("created_by_id") @db.Uuid
-  assignedToId      String?          @map("assigned_to_id") @db.Uuid
-  priority          ActivityPriority @default(NORMAL)
-  scheduledDate     DateTime?        @map("scheduled_date") @db.Timestamptz(6)
-  dueDate           DateTime?        @map("due_date") @db.Timestamptz(6)
-  status            ActivityStatus   @default(PENDING)
-  completedAt       DateTime?        @map("completed_at") @db.Timestamptz(6)
-  completedById     String?          @map("completed_by_id") @db.Uuid
+  createdByType      String           @default("USER") @map("created_by_type")
+  createdById        String?          @map("created_by_id") @db.Uuid
+  assignedToId       String?          @map("assigned_to_id") @db.Uuid
+  priority           ActivityPriority @default(NORMAL)
+  scheduledDate      DateTime?        @map("scheduled_date") @db.Timestamptz(6)
+  dueDate            DateTime?        @map("due_date") @db.Timestamptz(6)
+  status             ActivityStatus   @default(PENDING)
+  completedAt        DateTime?        @map("completed_at") @db.Timestamptz(6)
+  completedById      String?          @map("completed_by_id") @db.Uuid
   // manager override bookkeeping: who unlocked/edited a completed activity
-  lastOverrideById  String?          @map("last_override_by_id") @db.Uuid
-  lastOverrideReason String?         @map("last_override_reason")
+  lastOverrideById   String?          @map("last_override_by_id") @db.Uuid
+  lastOverrideReason String?          @map("last_override_reason")
   // SYSTEM idempotency: (companyId, idempotencyKey) unique — a repeated
   // automation/trigger key can never create a second activity, even
   // concurrently (DB-enforced). NULL for USER-created activities.
-  idempotencyKey    String?          @map("idempotency_key")
-  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  idempotencyKey     String?          @map("idempotency_key")
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company     Company      @relation(fields: [companyId], references: [id])
   type        ActivityType @relation(fields: [typeId], references: [id])
   assignedTo  User?        @relation("ActivityAssignee", fields: [assignedToId], references: [id])
   completedBy User?        @relation("ActivityCompleter", fields: [completedById], references: [id])
 
+  @@unique([companyId, idempotencyKey])
   @@index([companyId, assignedToId, status, dueDate])
   @@index([companyId, relatedEntityType, relatedEntityId])
   @@index([companyId, dueDate])
-  @@unique([companyId, idempotencyKey])
   @@map("activities")
 }
 
@@ -485,20 +485,20 @@ model User {
   updatedAt          DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   createdBy          String?    @map("created_by") @db.Uuid
 
-  defaultCompany  Company?                 @relation(fields: [defaultCompanyId], references: [id])
-  companies       UserCompany[]
-  companyRoles    UserCompanyRole[]
-  overrides       UserPermissionOverride[]
-  refreshTokens   RefreshToken[]
-  teamMemberships TeamMember[]
-  ownedParties    Party[] @relation("PartyOwner")
-  leadsAssigned   Lead[] @relation("LeadSalesperson")
-  opportunities   Opportunity[] @relation("OpportunitySalesperson")
-  salesDocuments  SalesDocument[] @relation("SalesSalesperson")
-  purchaseDocuments PurchaseDocument[] @relation("PurchaseBuyer")
-  priceRequests   PriceRequest[] @relation("PriceRequester")
-  activitiesAssigned Activity[] @relation("ActivityAssignee")
-  activitiesCompleted Activity[] @relation("ActivityCompleter")
+  defaultCompany      Company?                 @relation(fields: [defaultCompanyId], references: [id])
+  companies           UserCompany[]
+  companyRoles        UserCompanyRole[]
+  overrides           UserPermissionOverride[]
+  refreshTokens       RefreshToken[]
+  teamMemberships     TeamMember[]
+  ownedParties        Party[]                  @relation("PartyOwner")
+  leadsAssigned       Lead[]                   @relation("LeadSalesperson")
+  opportunities       Opportunity[]            @relation("OpportunitySalesperson")
+  salesDocuments      SalesDocument[]          @relation("SalesSalesperson")
+  purchaseDocuments   PurchaseDocument[]       @relation("PurchaseBuyer")
+  priceRequests       PriceRequest[]           @relation("PriceRequester")
+  activitiesAssigned  Activity[]               @relation("ActivityAssignee")
+  activitiesCompleted Activity[]               @relation("ActivityCompleter")
 
   @@index([status])
   @@map("users")
@@ -567,8 +567,8 @@ model Role {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  users           UserCompanyRole[]
-  permissions     RolePermission[]
+  users       UserCompanyRole[]
+  permissions RolePermission[]
 
   @@map("roles")
 }
@@ -653,18 +653,18 @@ model TeamMember {
 // ───────────────────────────── Audit ─────────────────────────────
 
 model AuditLog {
-  id         String  @id @default(uuid()) @db.Uuid
-  companyId  String? @map("company_id") @db.Uuid // null = platform-level event
-  entityType String  @map("entity_type")
-  entityId   String  @map("entity_id")
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String?  @map("company_id") @db.Uuid // null = platform-level event
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
   action     String
-  actorId    String? @map("actor_id") @db.Uuid
-  actorName  String? @map("actor_name") // snapshot, survives user deletion
-  oldValues  Json?   @map("old_values")
-  newValues  Json?   @map("new_values")
+  actorId    String?  @map("actor_id") @db.Uuid
+  actorName  String?  @map("actor_name") // snapshot, survives user deletion
+  oldValues  Json?    @map("old_values")
+  newValues  Json?    @map("new_values")
   reason     String?
   ip         String?
-  userAgent  String? @map("user_agent")
+  userAgent  String?  @map("user_agent")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([entityType, entityId])
@@ -754,12 +754,12 @@ model FileAttachment {
   category         String?
   // D-2 Phase 3 (final): DEFAULT DENY — the customer portal lists/downloads
   // an attachment ONLY when customer_visible is explicitly TRUE.
-  customerVisible  Boolean    @default(false) @map("customer_visible")
-  createdBy        String?    @map("created_by") @db.Uuid
+  customerVisible  Boolean  @default(false) @map("customer_visible")
+  createdBy        String?  @map("created_by") @db.Uuid
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  fileBlob FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)
-  company  Company  @relation(fields: [companyId], references: [id])
+  fileBlob   FileBlob @relation(fields: [fileBlobId], references: [id], onDelete: Cascade)
+  company    Company  @relation(fields: [companyId], references: [id])
   brandLogos Brand[]
 
   @@index([entityType, entityId])
@@ -807,12 +807,12 @@ model QueueJob {
   createdBy      String?        @map("created_by") @db.Uuid
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company   Company?       @relation(fields: [companyId], references: [id])
+  company    Company?       @relation(fields: [companyId], references: [id])
   executions JobExecution[]
 
+  @@unique([companyId, idempotencyKey])
   @@index([status, priority, scheduledAt])
   @@index([jobType, status])
-  @@unique([companyId, idempotencyKey])
   @@map("queue_jobs")
 }
 
@@ -976,16 +976,16 @@ model SmsMessage {
 // ─────────────────── Workflow (foundation for timers) ───────────────────
 
 model WorkflowDefinition {
-  id        String   @id @default(uuid()) @db.Uuid
-  companyId String   @map("company_id") @db.Uuid
-  code      String
-  name      String
-  entityType String  @map("entity_type") // SALES_DOCUMENT | PURCHASE | LOADING | ...
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id         String   @id @default(uuid()) @db.Uuid
+  companyId  String   @map("company_id") @db.Uuid
+  code       String
+  name       String
+  entityType String   @map("entity_type") // SALES_DOCUMENT | PURCHASE | LOADING | ...
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company     Company            @relation(fields: [companyId], references: [id])
+  company     Company              @relation(fields: [companyId], references: [id])
   states      WorkflowState[]
   transitions WorkflowTransition[]
   instances   WorkflowInstance[]
@@ -1003,7 +1003,7 @@ model WorkflowState {
   isFinal      Boolean @default(false) @map("is_final")
   slaHours     Int?    @map("sla_hours") // time-in-state budget for reminders/escalation
 
-  definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  definition WorkflowDefinition   @relation(fields: [definitionId], references: [id], onDelete: Cascade)
   instances  WorkflowInstance[]
   timers     WorkflowTimer[]
   outgoing   WorkflowTransition[] @relation("WorkflowTransitionFrom")
@@ -1027,9 +1027,9 @@ model WorkflowTransition {
   slaHours           Int?    @map("sla_hours") // approval budget → escalation timer
   actionsJson        Json?   @map("actions_json") // post-transition actions [{type:'notify',...}]
 
-  definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
-  fromState  WorkflowState      @relation("WorkflowTransitionFrom", fields: [fromStateId], references: [id])
-  toState    WorkflowState      @relation("WorkflowTransitionTo", fields: [toStateId], references: [id])
+  definition WorkflowDefinition     @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  fromState  WorkflowState          @relation("WorkflowTransitionFrom", fields: [fromStateId], references: [id])
+  toState    WorkflowState          @relation("WorkflowTransitionTo", fields: [toStateId], references: [id])
   logs       WorkflowExecutionLog[]
 
   @@unique([definitionId, code])
@@ -1050,11 +1050,11 @@ model WorkflowInstance {
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  definition WorkflowDefinition @relation(fields: [definitionId], references: [id])
-  currentState WorkflowState?   @relation(fields: [currentStateId], references: [id])
-  timers WorkflowTimer[]
-  logs   WorkflowExecutionLog[]
-  approvals ApprovalRequest[]
+  definition   WorkflowDefinition     @relation(fields: [definitionId], references: [id])
+  currentState WorkflowState?         @relation(fields: [currentStateId], references: [id])
+  timers       WorkflowTimer[]
+  logs         WorkflowExecutionLog[]
+  approvals    ApprovalRequest[]
 
   @@unique([definitionId, entityType, entityId])
   @@index([entityType, entityId])
@@ -1081,15 +1081,15 @@ model WorkflowExecutionLog {
 }
 
 model WorkflowTimer {
-  id                 String       @id @default(uuid()) @db.Uuid
-  workflowInstanceId String       @map("workflow_instance_id") @db.Uuid
-  stateId            String       @map("state_id") @db.Uuid
-  timerType          String       @map("timer_type") // ESCALATION | REMINDER | TIMEOUT
-  dueAt              DateTime     @map("due_at") @db.Timestamptz(6)
-  status             TimerStatus  @default(SCHEDULED)
-  actionConfig       Json         @map("action_config")
-  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  executedAt         DateTime?    @map("executed_at") @db.Timestamptz(6)
+  id                 String      @id @default(uuid()) @db.Uuid
+  workflowInstanceId String      @map("workflow_instance_id") @db.Uuid
+  stateId            String      @map("state_id") @db.Uuid
+  timerType          String      @map("timer_type") // ESCALATION | REMINDER | TIMEOUT
+  dueAt              DateTime    @map("due_at") @db.Timestamptz(6)
+  status             TimerStatus @default(SCHEDULED)
+  actionConfig       Json        @map("action_config")
+  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  executedAt         DateTime?   @map("executed_at") @db.Timestamptz(6)
 
   instance WorkflowInstance @relation(fields: [workflowInstanceId], references: [id], onDelete: Cascade)
   state    WorkflowState    @relation(fields: [stateId], references: [id])
@@ -1110,20 +1110,20 @@ enum TimerStatus {
 // Documents keep tax_rate_snapshot and never change retroactively.
 
 model TaxDefinition {
-  id        String   @id @default(uuid()) @db.Uuid
-  companyId String   @map("company_id") @db.Uuid
+  id        String    @id @default(uuid()) @db.Uuid
+  companyId String    @map("company_id") @db.Uuid
   code      String // e.g. VAT_9
   name      String // e.g. ارزش افزوده ۹٪
-  rate      Decimal  @db.Decimal(9, 4) // percent, e.g. 9.0000
-  isActive  Boolean  @default(true) @map("is_active")
+  rate      Decimal   @db.Decimal(9, 4) // percent, e.g. 9.0000
+  isActive  Boolean   @default(true) @map("is_active")
   // Mini-Gate #4: set on first use in a tax invoice line; afterwards code/rate
   // are immutable — a rate change means a NEW TaxDefinition row.
   lockedAt  DateTime? @map("locked_at") @db.Timestamptz(6)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company Company @relation(fields: [companyId], references: [id])
-  templates ProductTemplate[]
+  company    Company           @relation(fields: [companyId], references: [id])
+  templates  ProductTemplate[]
   salesLines SalesLine[]
 
   @@unique([companyId, code])
@@ -1147,22 +1147,22 @@ enum ClaimStatus {
 }
 
 model OperationalSettlementClaim {
-  id                  String        @id @default(uuid()) @db.Uuid
-  companyId           String        @map("company_id") @db.Uuid
-  direction           ClaimDirection
-  partyId             String        @map("party_id") @db.Uuid // Party FK lands in Phase 3
-  salesDocumentId     String?       @map("sales_document_id") @db.Uuid // Phase 4 FK
-  purchaseDocumentId  String?       @map("purchase_document_id") @db.Uuid // Phase 4 FK
-  amount              Decimal       @db.Decimal(20, 4)
-  currency            String        @default("IRR")
-  status              ClaimStatus   @default(UNMATCHED)
-  declaredAt          DateTime      @default(now()) @map("declared_at") @db.Timestamptz(6)
-  declaredBy          String?       @map("declared_by") @db.Uuid
-  matchedReceiptId    String?       @map("matched_receipt_id") @db.Uuid
-  matchedPaymentId    String?       @map("matched_payment_id") @db.Uuid
-  rejectionReason     String?       @map("rejection_reason")
-  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                 String         @id @default(uuid()) @db.Uuid
+  companyId          String         @map("company_id") @db.Uuid
+  direction          ClaimDirection
+  partyId            String         @map("party_id") @db.Uuid // Party FK lands in Phase 3
+  salesDocumentId    String?        @map("sales_document_id") @db.Uuid // Phase 4 FK
+  purchaseDocumentId String?        @map("purchase_document_id") @db.Uuid // Phase 4 FK
+  amount             Decimal        @db.Decimal(20, 4)
+  currency           String         @default("IRR")
+  status             ClaimStatus    @default(UNMATCHED)
+  declaredAt         DateTime       @default(now()) @map("declared_at") @db.Timestamptz(6)
+  declaredBy         String?        @map("declared_by") @db.Uuid
+  matchedReceiptId   String?        @map("matched_receipt_id") @db.Uuid
+  matchedPaymentId   String?        @map("matched_payment_id") @db.Uuid
+  rejectionReason    String?        @map("rejection_reason")
+  createdAt          DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -1216,11 +1216,11 @@ enum MoadianSubmissionStatus {
 }
 
 model SalesTaxInvoice {
-  id           String               @id @default(uuid()) @db.Uuid
-  companyId    String               @map("company_id") @db.Uuid
-  number       String // STI sequence (SALES_TAX_INVOICE, prefix STI)
-  status       SalesTaxInvoiceStatus @default(DRAFT) @map("status")
-  subject      TaxInvoiceSubject    @default(MAIN) @map("subject")
+  id                      String                @id @default(uuid()) @db.Uuid
+  companyId               String                @map("company_id") @db.Uuid
+  number                  String // STI sequence (SALES_TAX_INVOICE, prefix STI)
+  status                  SalesTaxInvoiceStatus @default(DRAFT) @map("status")
+  subject                 TaxInvoiceSubject     @default(MAIN) @map("subject")
   // official header inty (invoice TYPE — independent of the subject field):
   // 1=نوع اول, 2=نوع دوم, 3=نوع سوم (a distinct pattern — NOT implemented in
   // Phase 8, never a "purchase" invoice). Official RC_IITP.IS_V7.9 جدول ۲.
@@ -1228,35 +1228,35 @@ model SalesTaxInvoice {
   // CORRECTIVE/CANCEL/RETURN INHERIT the type of their reference invoice
   // (lookup by relatedTaxid) or fall back to buyer derivation when the
   // reference was issued outside this system.
-  inty         Int                  @default(1) @map("inty")
-  customerPartyId String            @map("customer_party_id") @db.Uuid
-  issueDate    DateTime             @map("issue_date") @db.Date
+  inty                    Int                   @default(1) @map("inty")
+  customerPartyId         String                @map("customer_party_id") @db.Uuid
+  issueDate               DateTime              @map("issue_date") @db.Date
   // Moadian header totals (Decimal-exact; names map to the official invoice
   // template fields: prdis/tadis/tvam/tbill)
-  subtotal     Decimal              @default(0) @db.Decimal(20, 4) // prdis
-  discountTotal Decimal             @default(0) @map("discount_total") @db.Decimal(20, 4) // tadis
-  taxTotal     Decimal              @default(0) @map("tax_total") @db.Decimal(20, 4) // tvam
-  grandTotal   Decimal              @default(0) @map("grand_total") @db.Decimal(20, 4) // tbill
+  subtotal                Decimal               @default(0) @db.Decimal(20, 4) // prdis
+  discountTotal           Decimal               @default(0) @map("discount_total") @db.Decimal(20, 4) // tadis
+  taxTotal                Decimal               @default(0) @map("tax_total") @db.Decimal(20, 4) // tvam
+  grandTotal              Decimal               @default(0) @map("grand_total") @db.Decimal(20, 4) // tbill
   // Moadian submission bookkeeping (latest state; full history in submissions)
-  taxid        String?              @unique @map("taxid") // 22-char alphanumeric official tax id — generated with fiscal key material (documented gap; never fabricated)
-  referenceNumber String?           @map("reference_number") // server receipt of the latest enqueue
-  moadianStatus String?             @map("moadian_status") // PENDING | SUCCESS | FAILED (last inquiry)
-  moadianError String?              @map("moadian_error")
-  confirmationReferenceId String?   @map("confirmation_reference_id")
-  taxResult    String?              @map("tax_result")
+  taxid                   String?               @unique @map("taxid") // 22-char alphanumeric official tax id — generated with fiscal key material (documented gap; never fabricated)
+  referenceNumber         String?               @map("reference_number") // server receipt of the latest enqueue
+  moadianStatus           String?               @map("moadian_status") // PENDING | SUCCESS | FAILED (last inquiry)
+  moadianError            String?               @map("moadian_error")
+  confirmationReferenceId String?               @map("confirmation_reference_id")
+  taxResult               String?               @map("tax_result")
   // for CORRECTIVE/CANCEL/RETURN subjects — the original invoice's taxid
   // (official header field irtaxid). A confirmed SUCCESS on a CANCEL-subject
   // submission cancels the referenced original at the authority and frees
   // its issuance quantity here.
-  relatedTaxid String?              @map("related_taxid")
-  createdBy    String?              @map("created_by") @db.Uuid
-  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+  relatedTaxid            String?               @map("related_taxid")
+  createdBy               String?               @map("created_by") @db.Uuid
+  createdAt               DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company    Company                   @relation(fields: [companyId], references: [id])
-  customer   Party                     @relation("TaxInvoiceCustomer", fields: [customerPartyId], references: [id])
-  lines      SalesTaxInvoiceLine[]
-  submissions SalesTaxInvoiceSubmission[]
+  company          Company                          @relation(fields: [companyId], references: [id])
+  customer         Party                            @relation("TaxInvoiceCustomer", fields: [customerPartyId], references: [id])
+  lines            SalesTaxInvoiceLine[]
+  submissions      SalesTaxInvoiceSubmission[]
   salesAllocations SalesTaxInvoiceOrderAllocation[]
 
   @@unique([companyId, number])
@@ -1291,21 +1291,21 @@ model SalesTaxInvoiceLine {
 }
 
 model SalesTaxInvoiceSubmission {
-  id          String  @id @default(uuid()) @db.Uuid
-  companyId   String  @map("company_id") @db.Uuid
-  invoiceId   String  @map("invoice_id") @db.Uuid
-  uid         String  @unique // client-generated unique send id
-  attempt     Int     @default(1)
-  retry       Boolean @default(false) // official spec: retry=true on resubmission after FAILED
-  status      MoadianSubmissionStatus @default(PENDING) @map("status")
-  referenceNumber String? @map("reference_number")
-  errorCode   String? @map("error_code")
-  errorDetail String? @map("error_detail")
-  confirmationReferenceId String? @map("confirmation_reference_id")
-  taxResult   String? @map("tax_result")
-  payloadSnapshot Json @map("payload_snapshot") // exact packet body sent
-  sentAt      DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
-  inquiredAt  DateTime? @map("inquired_at") @db.Timestamptz(6)
+  id                      String                  @id @default(uuid()) @db.Uuid
+  companyId               String                  @map("company_id") @db.Uuid
+  invoiceId               String                  @map("invoice_id") @db.Uuid
+  uid                     String                  @unique // client-generated unique send id
+  attempt                 Int                     @default(1)
+  retry                   Boolean                 @default(false) // official spec: retry=true on resubmission after FAILED
+  status                  MoadianSubmissionStatus @default(PENDING) @map("status")
+  referenceNumber         String?                 @map("reference_number")
+  errorCode               String?                 @map("error_code")
+  errorDetail             String?                 @map("error_detail")
+  confirmationReferenceId String?                 @map("confirmation_reference_id")
+  taxResult               String?                 @map("tax_result")
+  payloadSnapshot         Json                    @map("payload_snapshot") // exact packet body sent
+  sentAt                  DateTime                @default(now()) @map("sent_at") @db.Timestamptz(6)
+  inquiredAt              DateTime?               @map("inquired_at") @db.Timestamptz(6)
 
   invoice SalesTaxInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
@@ -1322,21 +1322,21 @@ enum PurchaseTaxInvoiceStatus {
 }
 
 model PurchaseTaxInvoice {
-  id            String   @id @default(uuid()) @db.Uuid
-  companyId     String   @map("company_id") @db.Uuid
-  number        String // PTI sequence
-  status        PurchaseTaxInvoiceStatus @default(REGISTERED) @map("status")
-  supplierPartyId String  @map("supplier_party_id") @db.Uuid
-  supplierInvoiceNumber String @map("supplier_invoice_number")
-  invoiceDate   DateTime @map("invoice_date") @db.Date
-  total         Decimal  @default(0) @db.Decimal(20, 4)
-  taxTotal      Decimal  @default(0) @map("tax_total") @db.Decimal(20, 4)
-  registeredBy  String?  @map("registered_by") @db.Uuid
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                    String                   @id @default(uuid()) @db.Uuid
+  companyId             String                   @map("company_id") @db.Uuid
+  number                String // PTI sequence
+  status                PurchaseTaxInvoiceStatus @default(REGISTERED) @map("status")
+  supplierPartyId       String                   @map("supplier_party_id") @db.Uuid
+  supplierInvoiceNumber String                   @map("supplier_invoice_number")
+  invoiceDate           DateTime                 @map("invoice_date") @db.Date
+  total                 Decimal                  @default(0) @db.Decimal(20, 4)
+  taxTotal              Decimal                  @default(0) @map("tax_total") @db.Decimal(20, 4)
+  registeredBy          String?                  @map("registered_by") @db.Uuid
+  createdAt             DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company  Company @relation(fields: [companyId], references: [id])
-  supplier Party   @relation("PurchaseTaxInvoiceSupplier", fields: [supplierPartyId], references: [id])
+  company             Company                             @relation(fields: [companyId], references: [id])
+  supplier            Party                               @relation("PurchaseTaxInvoiceSupplier", fields: [supplierPartyId], references: [id])
   purchaseAllocations PurchaseTaxInvoiceOrderAllocation[]
 
   @@unique([companyId, number])
@@ -1359,17 +1359,17 @@ enum MoadianDiagnosticRunStatus {
 }
 
 model MoadianDiagnosticRun {
-  id            String   @id @default(uuid()) @db.Uuid
-  companyId     String   @map("company_id") @db.Uuid
-  runDay        String   @map("run_day") // UTC yyyy-mm-dd — idempotency day
+  id        String                     @id @default(uuid()) @db.Uuid
+  companyId String                     @map("company_id") @db.Uuid
+  runDay    String                     @map("run_day") // UTC yyyy-mm-dd — idempotency day
   // HEAD attempt pointer: status of the newest attempt for fast lookups.
-  status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
-  fiscalId      String   @map("fiscal_id")
-  createdBy     String?  @map("created_by") @db.Uuid
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  status    MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
+  fiscalId  String                     @map("fiscal_id")
+  createdBy String?                    @map("created_by") @db.Uuid
+  createdAt DateTime                   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company Company @relation(fields: [companyId], references: [id])
+  company  Company                    @relation(fields: [companyId], references: [id])
   attempts MoadianDiagnosticAttempt[]
 
   @@unique([companyId, runDay])
@@ -1381,23 +1381,23 @@ model MoadianDiagnosticRun {
 /// the official retry rules — a rejected packet is resubmitted as a new
 /// packet with retry=true), durable result, and the payload snapshot.
 model MoadianDiagnosticAttempt {
-  id            String   @id @default(uuid()) @db.Uuid
-  runId         String   @map("run_id") @db.Uuid
-  companyId     String   @map("company_id") @db.Uuid
-  attempt       Int            @default(1)
-  uid           String   @unique @map("uid")
-  retry         Boolean  @default(false) @map("retry")
-  status        MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
-  referenceNumber String? @map("reference_number")
-  errorCode     String?  @map("error_code")
-  errorDetail   String?  @map("error_detail")
-  confirmationReferenceId String? @map("confirmation_reference_id")
-  taxResult     String?  @map("tax_result")
-  payloadSnapshot Json  @map("payload_snapshot")
-  sentAt        DateTime? @map("sent_at") @db.Timestamptz(6)
-  inquiredAt    DateTime? @map("inquired_at") @db.Timestamptz(6)
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                      String                     @id @default(uuid()) @db.Uuid
+  runId                   String                     @map("run_id") @db.Uuid
+  companyId               String                     @map("company_id") @db.Uuid
+  attempt                 Int                        @default(1)
+  uid                     String                     @unique @map("uid")
+  retry                   Boolean                    @default(false) @map("retry")
+  status                  MoadianDiagnosticRunStatus @default(PREPARED) @map("status")
+  referenceNumber         String?                    @map("reference_number")
+  errorCode               String?                    @map("error_code")
+  errorDetail             String?                    @map("error_detail")
+  confirmationReferenceId String?                    @map("confirmation_reference_id")
+  taxResult               String?                    @map("tax_result")
+  payloadSnapshot         Json                       @map("payload_snapshot")
+  sentAt                  DateTime?                  @map("sent_at") @db.Timestamptz(6)
+  inquiredAt              DateTime?                  @map("inquired_at") @db.Timestamptz(6)
+  createdAt               DateTime                   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   run MoadianDiagnosticRun @relation(fields: [runId], references: [id], onDelete: Cascade)
 
@@ -1410,13 +1410,13 @@ model MoadianDiagnosticAttempt {
 // Two explicit tables; no generic polymorphic allocation.
 
 model SalesTaxInvoiceOrderAllocation {
-  id               String   @id @default(uuid()) @db.Uuid
-  companyId        String   @map("company_id") @db.Uuid
-  salesTaxInvoiceId String  @map("sales_tax_invoice_id") @db.Uuid // Phase 8 FK
-  salesDocumentId  String   @map("sales_document_id") @db.Uuid // Phase 4 FK
-  allocatedAmount  Decimal  @map("allocated_amount") @db.Decimal(20, 4)
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  salesTaxInvoiceId String   @map("sales_tax_invoice_id") @db.Uuid // Phase 8 FK
+  salesDocumentId   String   @map("sales_document_id") @db.Uuid // Phase 4 FK
+  allocatedAmount   Decimal  @map("allocated_amount") @db.Decimal(20, 4)
   allocatedQuantity Decimal? @map("allocated_quantity") @db.Decimal(18, 4)
-  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   salesTaxInvoice SalesTaxInvoice @relation(fields: [salesTaxInvoiceId], references: [id])
 
@@ -1426,13 +1426,13 @@ model SalesTaxInvoiceOrderAllocation {
 }
 
 model PurchaseTaxInvoiceOrderAllocation {
-  id                 String   @id @default(uuid()) @db.Uuid
-  companyId          String   @map("company_id") @db.Uuid
-  purchaseTaxInvoiceId String @map("purchase_tax_invoice_id") @db.Uuid // Phase 8 FK
-  purchaseDocumentId String   @map("purchase_document_id") @db.Uuid // Phase 4 FK
-  allocatedAmount    Decimal  @map("allocated_amount") @db.Decimal(20, 4)
-  allocatedQuantity  Decimal? @map("allocated_quantity") @db.Decimal(18, 4)
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id                   String   @id @default(uuid()) @db.Uuid
+  companyId            String   @map("company_id") @db.Uuid
+  purchaseTaxInvoiceId String   @map("purchase_tax_invoice_id") @db.Uuid // Phase 8 FK
+  purchaseDocumentId   String   @map("purchase_document_id") @db.Uuid // Phase 4 FK
+  allocatedAmount      Decimal  @map("allocated_amount") @db.Decimal(20, 4)
+  allocatedQuantity    Decimal? @map("allocated_quantity") @db.Decimal(18, 4)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   purchaseTaxInvoice PurchaseTaxInvoice @relation(fields: [purchaseTaxInvoiceId], references: [id])
 
@@ -1466,10 +1466,10 @@ model ProductCategory {
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)
 
-  company   Company           @relation(fields: [companyId], references: [id])
-  parent    ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
-  children  ProductCategory[] @relation("CategoryTree")
-  templates ProductTemplate[]
+  company          Company           @relation(fields: [companyId], references: [id])
+  parent           ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children         ProductCategory[] @relation("CategoryTree")
+  templates        ProductTemplate[]
   supplierMappings SupplierProduct[]
 
   @@unique([companyId, code])
@@ -1489,8 +1489,8 @@ model Brand {
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version          Int      @default(1)
 
-  company        Company         @relation(fields: [companyId], references: [id])
-  logoAttachment FileAttachment? @relation(fields: [logoAttachmentId], references: [id])
+  company        Company           @relation(fields: [companyId], references: [id])
+  logoAttachment FileAttachment?   @relation(fields: [logoAttachmentId], references: [id])
   templates      ProductTemplate[]
 
   @@unique([companyId, code])
@@ -1533,22 +1533,22 @@ model Uom {
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company           Company           @relation(fields: [companyId], references: [id])
-  category          UomCategory       @relation(fields: [categoryId], references: [id])
-  salesTemplates    ProductTemplate[] @relation("TemplateSalesUom")
-  purchaseTemplates ProductTemplate[] @relation("TemplatePurchaseUom")
-  weightVariants    ProductVariant[]  @relation("VariantWeightUom")
-  inventoryVariants ProductVariant[]  @relation("VariantInventoryUom")
-  variants          ProductVariant[]
-  movementSourceUoms    StockMovement[] @relation("MovementSourceUom")
-  movementInventoryUoms StockMovement[] @relation("MovementInventoryUom")
+  company               Company                   @relation(fields: [companyId], references: [id])
+  category              UomCategory               @relation(fields: [categoryId], references: [id])
+  salesTemplates        ProductTemplate[]         @relation("TemplateSalesUom")
+  purchaseTemplates     ProductTemplate[]         @relation("TemplatePurchaseUom")
+  weightVariants        ProductVariant[]          @relation("VariantWeightUom")
+  inventoryVariants     ProductVariant[]          @relation("VariantInventoryUom")
+  variants              ProductVariant[]
+  movementSourceUoms    StockMovement[]           @relation("MovementSourceUom")
+  movementInventoryUoms StockMovement[]           @relation("MovementInventoryUom")
   lineFulfillments      PurchaseLineFulfillment[]
-  goodsReceiptLines GoodsReceiptLine[]
-  salesLines        SalesLine[]
-  purchaseLines     PurchaseLine[]
-  priceRequestLines PriceRequestLine[]
-  supplierOffers    SupplierOffer[]
-  dailyPrices       DailyPrice[]
+  goodsReceiptLines     GoodsReceiptLine[]
+  salesLines            SalesLine[]
+  purchaseLines         PurchaseLine[]
+  priceRequestLines     PriceRequestLine[]
+  supplierOffers        SupplierOffer[]
+  dailyPrices           DailyPrice[]
 
   @@unique([companyId, symbol])
   @@index([companyId, categoryId])
@@ -1588,8 +1588,8 @@ model AttributeValue {
   displayOrder Int      @default(0) @map("display_order")
   active       Boolean  @default(true)
 
-  attribute     Attribute                       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
-  variantValues VariantAttributeValue[]
+  attribute          Attribute                       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variantValues      VariantAttributeValue[]
   templateSelections ProductTemplateAttributeValue[]
 
   @@unique([attributeId, code])
@@ -1598,35 +1598,35 @@ model AttributeValue {
 }
 
 model ProductTemplate {
-  id            String      @id @default(uuid()) @db.Uuid
-  companyId     String      @map("company_id") @db.Uuid
-  categoryId    String      @map("category_id") @db.Uuid
-  brandId       String?     @map("brand_id") @db.Uuid
-  nameFa        String      @map("name_fa")
-  nameEn        String?     @map("name_en")
-  internalCode  String?     @map("internal_code")
-  description   String?
-  productType   ProductType @default(STORABLE) @map("product_type")
-  isSellable    Boolean     @default(true) @map("is_sellable")
-  isPurchasable Boolean     @default(true) @map("is_purchasable")
-  defaultSalesUomId    String? @map("default_sales_uom_id") @db.Uuid
-  defaultPurchaseUomId String? @map("default_purchase_uom_id") @db.Uuid
-  defaultSalesPrice    Decimal @default(0) @map("default_sales_price") @db.Decimal(20, 4)
-  defaultTaxDefinitionId String? @map("default_tax_definition_id") @db.Uuid
-  active        Boolean     @default(true)
-  createdBy     String?     @map("created_by") @db.Uuid
-  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
-  version       Int         @default(1)
+  id                     String      @id @default(uuid()) @db.Uuid
+  companyId              String      @map("company_id") @db.Uuid
+  categoryId             String      @map("category_id") @db.Uuid
+  brandId                String?     @map("brand_id") @db.Uuid
+  nameFa                 String      @map("name_fa")
+  nameEn                 String?     @map("name_en")
+  internalCode           String?     @map("internal_code")
+  description            String?
+  productType            ProductType @default(STORABLE) @map("product_type")
+  isSellable             Boolean     @default(true) @map("is_sellable")
+  isPurchasable          Boolean     @default(true) @map("is_purchasable")
+  defaultSalesUomId      String?     @map("default_sales_uom_id") @db.Uuid
+  defaultPurchaseUomId   String?     @map("default_purchase_uom_id") @db.Uuid
+  defaultSalesPrice      Decimal     @default(0) @map("default_sales_price") @db.Decimal(20, 4)
+  defaultTaxDefinitionId String?     @map("default_tax_definition_id") @db.Uuid
+  active                 Boolean     @default(true)
+  createdBy              String?     @map("created_by") @db.Uuid
+  createdAt              DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version                Int         @default(1)
 
-  company        Company         @relation(fields: [companyId], references: [id])
-  category       ProductCategory @relation(fields: [categoryId], references: [id])
-  brand          Brand?          @relation(fields: [brandId], references: [id])
-  salesUom       Uom?            @relation("TemplateSalesUom", fields: [defaultSalesUomId], references: [id])
-  purchaseUom    Uom?            @relation("TemplatePurchaseUom", fields: [defaultPurchaseUomId], references: [id])
-  taxDefinition  TaxDefinition?  @relation(fields: [defaultTaxDefinitionId], references: [id])
-  attributes     ProductTemplateAttribute[]
-  variants       ProductVariant[]
+  company          Company                    @relation(fields: [companyId], references: [id])
+  category         ProductCategory            @relation(fields: [categoryId], references: [id])
+  brand            Brand?                     @relation(fields: [brandId], references: [id])
+  salesUom         Uom?                       @relation("TemplateSalesUom", fields: [defaultSalesUomId], references: [id])
+  purchaseUom      Uom?                       @relation("TemplatePurchaseUom", fields: [defaultPurchaseUomId], references: [id])
+  taxDefinition    TaxDefinition?             @relation(fields: [defaultTaxDefinitionId], references: [id])
+  attributes       ProductTemplateAttribute[]
+  variants         ProductVariant[]
   supplierMappings SupplierProduct[]
 
   @@unique([companyId, internalCode])
@@ -1647,8 +1647,8 @@ model ProductTemplateAttribute {
   createsVariants Boolean @default(true) @map("creates_variants")
   isRequired      Boolean @default(false) @map("is_required")
 
-  template  ProductTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  attribute Attribute       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  template       ProductTemplate                 @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  attribute      Attribute                       @relation(fields: [attributeId], references: [id], onDelete: Cascade)
   selectedValues ProductTemplateAttributeValue[]
 
   @@unique([templateId, attributeId])
@@ -1657,43 +1657,43 @@ model ProductTemplateAttribute {
 }
 
 model ProductVariant {
-  id            String   @id @default(uuid()) @db.Uuid
-  companyId     String   @map("company_id") @db.Uuid
-  templateId    String   @map("template_id") @db.Uuid
-  sku           String
-  nameFa        String   @map("name_fa")
-  nameEn        String?  @map("name_en")
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @map("company_id") @db.Uuid
+  templateId     String   @map("template_id") @db.Uuid
+  sku            String
+  nameFa         String   @map("name_fa")
+  nameEn         String?  @map("name_en")
   // Canonical sorted "attribute_id=attribute_value_id|..." key — DB-unique per
   // template so concurrent generation can never create a duplicate combination.
-  combinationKey String  @map("combination_key")
-  weightPerUnit Decimal? @map("weight_per_unit") @db.Decimal(18, 4)
+  combinationKey String   @map("combination_key")
+  weightPerUnit  Decimal? @map("weight_per_unit") @db.Decimal(18, 4)
   // Explicit unit for weightPerUnit (required when weightPerUnit is set);
   // must belong to the company's Weight category (service-validated).
-  weightUomId   String?  @map("weight_uom_id") @db.Uuid
-  defaultUomId  String?  @map("default_uom_id") @db.Uuid
+  weightUomId    String?  @map("weight_uom_id") @db.Uuid
+  defaultUomId   String?  @map("default_uom_id") @db.Uuid
   // Authoritative UOM for inventory aggregation; all normalizedQuantity
   // values are expressed in it. Same-company; controlled after movements
   // exist (service-blocked) — Integrity Gate #2.
-  inventoryUomId String? @map("inventory_uom_id") @db.Uuid
-  isPublic      Boolean  @default(true) @map("is_public") // website price API visibility (Phase 5 review)
-  active        Boolean  @default(true)
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
-  version       Int      @default(1)
+  inventoryUomId String?  @map("inventory_uom_id") @db.Uuid
+  isPublic       Boolean  @default(true) @map("is_public") // website price API visibility (Phase 5 review)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int      @default(1)
 
-  company    Company         @relation(fields: [companyId], references: [id])
-  template   ProductTemplate @relation(fields: [templateId], references: [id])
-  defaultUom Uom?            @relation(fields: [defaultUomId], references: [id])
-  weightUom  Uom?            @relation("VariantWeightUom", fields: [weightUomId], references: [id])
-  inventoryUom Uom?          @relation("VariantInventoryUom", fields: [inventoryUomId], references: [id])
-  values     VariantAttributeValue[]
-  supplierMappings SupplierProduct[]
+  company               Company                 @relation(fields: [companyId], references: [id])
+  template              ProductTemplate         @relation(fields: [templateId], references: [id])
+  defaultUom            Uom?                    @relation(fields: [defaultUomId], references: [id])
+  weightUom             Uom?                    @relation("VariantWeightUom", fields: [weightUomId], references: [id])
+  inventoryUom          Uom?                    @relation("VariantInventoryUom", fields: [inventoryUomId], references: [id])
+  values                VariantAttributeValue[]
+  supplierMappings      SupplierProduct[]
   openingBalanceEntries OpeningBalanceEntry[]
-  salesLines SalesLine[]
-  purchaseLines PurchaseLine[]
-  priceRequestLines PriceRequestLine[]
-  dailyPrices       DailyPrice[]
-  stockMovements    StockMovement[]
+  salesLines            SalesLine[]
+  purchaseLines         PurchaseLine[]
+  priceRequestLines     PriceRequestLine[]
+  dailyPrices           DailyPrice[]
+  stockMovements        StockMovement[]
 
   @@unique([companyId, sku])
   @@unique([templateId, combinationKey])
@@ -1705,12 +1705,12 @@ model ProductVariant {
 // the template/matrix/variant generator uses THESE, not every global value.
 
 model ProductTemplateAttributeValue {
-  id                String  @id @default(uuid()) @db.Uuid
-  templateAttributeId String @map("template_attribute_id") @db.Uuid
-  attributeValueId  String  @map("attribute_value_id") @db.Uuid
-  displayOrder      Int     @default(0) @map("display_order")
-  active            Boolean @default(true)
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id                  String   @id @default(uuid()) @db.Uuid
+  templateAttributeId String   @map("template_attribute_id") @db.Uuid
+  attributeValueId    String   @map("attribute_value_id") @db.Uuid
+  displayOrder        Int      @default(0) @map("display_order")
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   templateAttribute ProductTemplateAttribute @relation(fields: [templateAttributeId], references: [id], onDelete: Cascade)
   attributeValue    AttributeValue           @relation(fields: [attributeValueId], references: [id])
@@ -1750,19 +1750,19 @@ enum SupplierMappingLevel {
 }
 
 model SupplierProduct {
-  id                String              @id @default(uuid()) @db.Uuid
-  companyId         String              @map("company_id") @db.Uuid
-  supplierPartyId   String              @map("supplier_party_id") @db.Uuid
-  mappingLevel      SupplierMappingLevel @map("mapping_level")
-  productVariantId  String?             @map("product_variant_id") @db.Uuid
-  productTemplateId String?             @map("product_template_id") @db.Uuid
-  categoryId        String?             @map("category_id") @db.Uuid
-  supplierProductCode String?           @map("supplier_product_code")
-  supplierProductName String?           @map("supplier_product_name")
-  notes             String?
-  isActive          Boolean             @default(true) @map("is_active")
-  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                  String               @id @default(uuid()) @db.Uuid
+  companyId           String               @map("company_id") @db.Uuid
+  supplierPartyId     String               @map("supplier_party_id") @db.Uuid
+  mappingLevel        SupplierMappingLevel @map("mapping_level")
+  productVariantId    String?              @map("product_variant_id") @db.Uuid
+  productTemplateId   String?              @map("product_template_id") @db.Uuid
+  categoryId          String?              @map("category_id") @db.Uuid
+  supplierProductCode String?              @map("supplier_product_code")
+  supplierProductName String?              @map("supplier_product_name")
+  notes               String?
+  isActive            Boolean              @default(true) @map("is_active")
+  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company         Company          @relation(fields: [companyId], references: [id])
   supplierParty   Party            @relation(fields: [supplierPartyId], references: [id])
@@ -1786,29 +1786,36 @@ enum LeadStatus {
   CONTACTED
   QUALIFIED
   LOST
+  // CR-001: terminal state set ONLY by the explicit convert-to-opportunity
+  // operation (never by a plain status PATCH). Traceability lives on
+  // Opportunity.leadId — the party row itself is never duplicated.
+  CONVERTED
 }
 
 model Lead {
-  id            String     @id @default(uuid()) @db.Uuid
-  companyId     String     @map("company_id") @db.Uuid
-  partyId       String?    @map("party_id") @db.Uuid
-  name          String
-  phone         String?
-  source        String?
-  campaign      String?
-  media         String?
-  referrer      String?
-  assignedSalespersonId String? @map("assigned_salesperson_id") @db.Uuid
-  status        LeadStatus @default(NEW)
-  notes         String?
-  createdBy     String?    @map("created_by") @db.Uuid
-  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
-  version       Int        @default(1)
+  id                    String     @id @default(uuid()) @db.Uuid
+  companyId             String     @map("company_id") @db.Uuid
+  partyId               String?    @map("party_id") @db.Uuid
+  name                  String
+  phone                 String?
+  source                String?
+  campaign              String?
+  media                 String?
+  referrer              String?
+  assignedSalespersonId String?    @map("assigned_salesperson_id") @db.Uuid
+  status                LeadStatus @default(NEW)
+  notes                 String?
+  createdBy             String?    @map("created_by") @db.Uuid
+  createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version               Int        @default(1)
 
-  company Company @relation(fields: [companyId], references: [id])
-  party   Party?  @relation(fields: [partyId], references: [id])
-  salesperson User? @relation("LeadSalesperson", fields: [assignedSalespersonId], references: [id])
+  company       Company       @relation(fields: [companyId], references: [id])
+  party         Party?        @relation(fields: [partyId], references: [id])
+  salesperson   User?         @relation("LeadSalesperson", fields: [assignedSalespersonId], references: [id])
+  // CR-001: the opportunities this lead produced (at most one — see the
+  // unique leadId on Opportunity). Party is NEVER duplicated on conversion.
+  opportunities Opportunity[]
 
   @@index([companyId, status])
   @@index([companyId, assignedSalespersonId])
@@ -1824,26 +1831,33 @@ enum OpportunityStatus {
 }
 
 model Opportunity {
-  id               String            @id @default(uuid()) @db.Uuid
-  companyId        String            @map("company_id") @db.Uuid
-  customerPartyId  String            @map("customer_party_id") @db.Uuid
-  salespersonUserId String           @map("salesperson_user_id") @db.Uuid
-  title            String
-  description      String?
-  estimatedAmount  Decimal?          @map("estimated_amount") @db.Decimal(20, 4)
-  estimatedTonnage Decimal?          @map("estimated_tonnage") @db.Decimal(18, 4)
-  status           OpportunityStatus @default(OPEN)
-  source           String?
-  lostReasonId     String?           @map("lost_reason_id") @db.Uuid
-  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
-  version          Int               @default(1)
+  id                String            @id @default(uuid()) @db.Uuid
+  companyId         String            @map("company_id") @db.Uuid
+  customerPartyId   String            @map("customer_party_id") @db.Uuid
+  salespersonUserId String            @map("salesperson_user_id") @db.Uuid
+  title             String
+  description       String?
+  estimatedAmount   Decimal?          @map("estimated_amount") @db.Decimal(20, 4)
+  estimatedTonnage  Decimal?          @map("estimated_tonnage") @db.Decimal(18, 4)
+  // CR-001: «تاریخ احتمالی نهایی شدن» — DATE-ONLY (no time, no TZ shift).
+  expectedCloseDate DateTime?         @map("expected_close_date") @db.Date
+  status            OpportunityStatus @default(OPEN)
+  source            String?
+  lostReasonId      String?           @map("lost_reason_id") @db.Uuid
+  // CR-001: the lead this opportunity was converted from. UNIQUE+nullable:
+  // the idempotency key of the convert operation (a lead can never produce
+  // two opportunities, even concurrently); NULL for hand-created ones.
+  leadId            String?           @unique @map("lead_id") @db.Uuid
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version           Int               @default(1)
 
-  company    Company     @relation(fields: [companyId], references: [id])
-  customer   Party       @relation("OpportunityCustomer", fields: [customerPartyId], references: [id])
-  salesperson User       @relation("OpportunitySalesperson", fields: [salespersonUserId], references: [id])
-  lostReason LostReason? @relation(fields: [lostReasonId], references: [id])
-  priceRequests PriceRequest[]
+  company        Company         @relation(fields: [companyId], references: [id])
+  customer       Party           @relation("OpportunityCustomer", fields: [customerPartyId], references: [id])
+  salesperson    User            @relation("OpportunitySalesperson", fields: [salespersonUserId], references: [id])
+  lostReason     LostReason?     @relation(fields: [lostReasonId], references: [id])
+  lead           Lead?           @relation(fields: [leadId], references: [id])
+  priceRequests  PriceRequest[]
   salesDocuments SalesDocument[]
 
   @@index([companyId, customerPartyId, status])
@@ -1862,8 +1876,8 @@ model LostReason {
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company       Company       @relation(fields: [companyId], references: [id])
-  opportunities Opportunity[]
+  company        Company         @relation(fields: [companyId], references: [id])
+  opportunities  Opportunity[]
   salesDocuments SalesDocument[]
 
   @@unique([companyId, code])
@@ -1882,8 +1896,8 @@ model PaymentTerm {
   active      Boolean  @default(true)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company          Company          @relation(fields: [companyId], references: [id])
-  salesDocuments   SalesDocument[]
+  company           Company            @relation(fields: [companyId], references: [id])
+  salesDocuments    SalesDocument[]
   purchaseDocuments PurchaseDocument[]
 
   @@unique([companyId, code])
@@ -1907,43 +1921,43 @@ enum SalesDocumentStatus {
 }
 
 model SalesDocument {
-  id             String             @id @default(uuid()) @db.Uuid
-  companyId      String             @map("company_id") @db.Uuid
-  documentNumber String             @map("document_number")
-  opportunityId  String?            @map("opportunity_id") @db.Uuid
-  customerPartyId String            @map("customer_party_id") @db.Uuid
-  salespersonUserId String         @map("salesperson_user_id") @db.Uuid
-  documentDate   DateTime           @map("document_date") @db.Timestamptz(6)
-  expirationDate DateTime?          @map("expiration_date") @db.Timestamptz(6)
-  currency       String             @default("IRR")
-  paymentTermId  String?            @map("payment_term_id") @db.Uuid
-  shippingAddressId String?         @map("shipping_address_id") @db.Uuid
-  language       String             @default("fa")
-  quotationTemplateCode String?     @map("quotation_template_code")
-  priceRequestId String?            @map("price_request_id") @db.Uuid // reference only, not required
-  status         SalesDocumentStatus @default(DRAFT)
-  subtotal       Decimal            @default(0) @db.Decimal(20, 4)
-  discountTotal  Decimal            @default(0) @map("discount_total") @db.Decimal(20, 4)
-  taxTotal       Decimal            @default(0) @map("tax_total") @db.Decimal(20, 4)
-  total          Decimal            @default(0) @db.Decimal(20, 4)
-  operationalOrderedAmount Decimal?  @map("operational_ordered_amount") @db.Decimal(20, 4)
-  operationalLoadedAmount  Decimal?  @map("operational_loaded_amount") @db.Decimal(20, 4)
-  notes          String?
-  lostReasonId   String?            @map("lost_reason_id") @db.Uuid
-  version        Int                @default(1)
-  createdBy      String?            @map("created_by") @db.Uuid
-  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                       String              @id @default(uuid()) @db.Uuid
+  companyId                String              @map("company_id") @db.Uuid
+  documentNumber           String              @map("document_number")
+  opportunityId            String?             @map("opportunity_id") @db.Uuid
+  customerPartyId          String              @map("customer_party_id") @db.Uuid
+  salespersonUserId        String              @map("salesperson_user_id") @db.Uuid
+  documentDate             DateTime            @map("document_date") @db.Timestamptz(6)
+  expirationDate           DateTime?           @map("expiration_date") @db.Timestamptz(6)
+  currency                 String              @default("IRR")
+  paymentTermId            String?             @map("payment_term_id") @db.Uuid
+  shippingAddressId        String?             @map("shipping_address_id") @db.Uuid
+  language                 String              @default("fa")
+  quotationTemplateCode    String?             @map("quotation_template_code")
+  priceRequestId           String?             @map("price_request_id") @db.Uuid // reference only, not required
+  status                   SalesDocumentStatus @default(DRAFT)
+  subtotal                 Decimal             @default(0) @db.Decimal(20, 4)
+  discountTotal            Decimal             @default(0) @map("discount_total") @db.Decimal(20, 4)
+  taxTotal                 Decimal             @default(0) @map("tax_total") @db.Decimal(20, 4)
+  total                    Decimal             @default(0) @db.Decimal(20, 4)
+  operationalOrderedAmount Decimal?            @map("operational_ordered_amount") @db.Decimal(20, 4)
+  operationalLoadedAmount  Decimal?            @map("operational_loaded_amount") @db.Decimal(20, 4)
+  notes                    String?
+  lostReasonId             String?             @map("lost_reason_id") @db.Uuid
+  version                  Int                 @default(1)
+  createdBy                String?             @map("created_by") @db.Uuid
+  createdAt                DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company      Company      @relation(fields: [companyId], references: [id])
-  opportunity  Opportunity? @relation(fields: [opportunityId], references: [id])
-  customer     Party        @relation("SalesCustomer", fields: [customerPartyId], references: [id])
-  salesperson  User         @relation("SalesSalesperson", fields: [salespersonUserId], references: [id])
-  paymentTerm  PaymentTerm? @relation(fields: [paymentTermId], references: [id])
-  shippingAddress Address?  @relation(fields: [shippingAddressId], references: [id])
-  lostReason   LostReason?  @relation(fields: [lostReasonId], references: [id])
-  priceRequest PriceRequest? @relation(fields: [priceRequestId], references: [id])
-  lines        SalesLine[]
+  company         Company       @relation(fields: [companyId], references: [id])
+  opportunity     Opportunity?  @relation(fields: [opportunityId], references: [id])
+  customer        Party         @relation("SalesCustomer", fields: [customerPartyId], references: [id])
+  salesperson     User          @relation("SalesSalesperson", fields: [salespersonUserId], references: [id])
+  paymentTerm     PaymentTerm?  @relation(fields: [paymentTermId], references: [id])
+  shippingAddress Address?      @relation(fields: [shippingAddressId], references: [id])
+  lostReason      LostReason?   @relation(fields: [lostReasonId], references: [id])
+  priceRequest    PriceRequest? @relation(fields: [priceRequestId], references: [id])
+  lines           SalesLine[]
 
   @@unique([companyId, documentNumber])
   @@index([companyId, status, documentDate])
@@ -1953,32 +1967,32 @@ model SalesDocument {
 }
 
 model SalesLine {
-  id                   String   @id @default(uuid()) @db.Uuid
-  companyId            String   @map("company_id") @db.Uuid
-  salesDocumentId      String   @map("sales_document_id") @db.Uuid
-  productVariantId     String   @map("product_variant_id") @db.Uuid
-  printableDescription String?  @map("printable_description")
-  orderedQuantity      Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
-  uomId                String   @map("uom_id") @db.Uuid
-  unitPrice            Decimal  @map("unit_price") @db.Decimal(20, 4) // snapshot at document time — DailyPrice changes never touch it
-  priceSource          String?  @map("price_source") // MANUAL | DAILY_PRICE | TEMPLATE_DEFAULT
+  id                   String    @id @default(uuid()) @db.Uuid
+  companyId            String    @map("company_id") @db.Uuid
+  salesDocumentId      String    @map("sales_document_id") @db.Uuid
+  productVariantId     String    @map("product_variant_id") @db.Uuid
+  printableDescription String?   @map("printable_description")
+  orderedQuantity      Decimal   @map("ordered_quantity") @db.Decimal(18, 4)
+  uomId                String    @map("uom_id") @db.Uuid
+  unitPrice            Decimal   @map("unit_price") @db.Decimal(20, 4) // snapshot at document time — DailyPrice changes never touch it
+  priceSource          String?   @map("price_source") // MANUAL | DAILY_PRICE | TEMPLATE_DEFAULT
   priceDate            DateTime? @map("price_date") @db.Date // reference to the DailyPrice day when applicable
-  discountAmount       Decimal  @default(0) @map("discount_amount") @db.Decimal(20, 4)
-  taxDefinitionId      String?  @map("tax_definition_id") @db.Uuid
-  taxRateSnapshot      Decimal? @map("tax_rate_snapshot") @db.Decimal(9, 4)
-  subtotal             Decimal  @db.Decimal(20, 4)
-  taxAmount            Decimal  @default(0) @map("tax_amount") @db.Decimal(20, 4)
-  lineTotal            Decimal  @map("line_total") @db.Decimal(20, 4)
+  discountAmount       Decimal   @default(0) @map("discount_amount") @db.Decimal(20, 4)
+  taxDefinitionId      String?   @map("tax_definition_id") @db.Uuid
+  taxRateSnapshot      Decimal?  @map("tax_rate_snapshot") @db.Decimal(9, 4)
+  subtotal             Decimal   @db.Decimal(20, 4)
+  taxAmount            Decimal   @default(0) @map("tax_amount") @db.Decimal(20, 4)
+  lineTotal            Decimal   @map("line_total") @db.Decimal(20, 4)
   notes                String?
-  lineOrder            Int      @default(0) @map("line_order")
-  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  lineOrder            Int       @default(0) @map("line_order")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  document      SalesDocument  @relation(fields: [salesDocumentId], references: [id], onDelete: Cascade)
-  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
-  uom           Uom            @relation(fields: [uomId], references: [id])
-  taxDefinition TaxDefinition? @relation(fields: [taxDefinitionId], references: [id])
-  salesAllocations SalesPurchaseAllocation[]
+  document           SalesDocument             @relation(fields: [salesDocumentId], references: [id], onDelete: Cascade)
+  productVariant     ProductVariant            @relation(fields: [productVariantId], references: [id])
+  uom                Uom                       @relation(fields: [uomId], references: [id])
+  taxDefinition      TaxDefinition?            @relation(fields: [taxDefinitionId], references: [id])
+  salesAllocations   SalesPurchaseAllocation[]
   loadingAllocations LoadingAllocation[]
 
   @@index([salesDocumentId])
@@ -1997,34 +2011,34 @@ enum PurchaseDocumentStatus {
 }
 
 model PurchaseDocument {
-  id             String                @id @default(uuid()) @db.Uuid
-  companyId      String                @map("company_id") @db.Uuid
-  documentNumber String                @map("document_number")
-  supplierPartyId String               @map("supplier_party_id") @db.Uuid
-  buyerUserId    String                @map("buyer_user_id") @db.Uuid
-  documentDate   DateTime              @map("document_date") @db.Timestamptz(6)
-  currency       String                @default("IRR")
-  paymentTermId  String?               @map("payment_term_id") @db.Uuid
-  priceRequestId String?               @map("price_request_id") @db.Uuid // reference only
-  status         PurchaseDocumentStatus @default(DRAFT)
-  subtotal       Decimal               @default(0) @db.Decimal(20, 4)
-  discountTotal  Decimal               @default(0) @map("discount_total") @db.Decimal(20, 4)
-  taxTotal       Decimal               @default(0) @map("tax_total") @db.Decimal(20, 4)
-  total          Decimal               @default(0) @db.Decimal(20, 4)
-  operationalOrderedAmount Decimal?    @map("operational_ordered_amount") @db.Decimal(20, 4)
-  operationalLoadedAmount  Decimal?    @map("operational_loaded_amount") @db.Decimal(20, 4)
-  notes          String?
-  version        Int                   @default(1)
-  createdBy      String?               @map("created_by") @db.Uuid
-  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                       String                 @id @default(uuid()) @db.Uuid
+  companyId                String                 @map("company_id") @db.Uuid
+  documentNumber           String                 @map("document_number")
+  supplierPartyId          String                 @map("supplier_party_id") @db.Uuid
+  buyerUserId              String                 @map("buyer_user_id") @db.Uuid
+  documentDate             DateTime               @map("document_date") @db.Timestamptz(6)
+  currency                 String                 @default("IRR")
+  paymentTermId            String?                @map("payment_term_id") @db.Uuid
+  priceRequestId           String?                @map("price_request_id") @db.Uuid // reference only
+  status                   PurchaseDocumentStatus @default(DRAFT)
+  subtotal                 Decimal                @default(0) @db.Decimal(20, 4)
+  discountTotal            Decimal                @default(0) @map("discount_total") @db.Decimal(20, 4)
+  taxTotal                 Decimal                @default(0) @map("tax_total") @db.Decimal(20, 4)
+  total                    Decimal                @default(0) @db.Decimal(20, 4)
+  operationalOrderedAmount Decimal?               @map("operational_ordered_amount") @db.Decimal(20, 4)
+  operationalLoadedAmount  Decimal?               @map("operational_loaded_amount") @db.Decimal(20, 4)
+  notes                    String?
+  version                  Int                    @default(1)
+  createdBy                String?                @map("created_by") @db.Uuid
+  createdAt                DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company      Company      @relation(fields: [companyId], references: [id])
-  supplier     Party        @relation("PurchaseSupplier", fields: [supplierPartyId], references: [id])
-  buyer        User         @relation("PurchaseBuyer", fields: [buyerUserId], references: [id])
-  paymentTerm  PaymentTerm? @relation(fields: [paymentTermId], references: [id])
-  priceRequest PriceRequest? @relation(fields: [priceRequestId], references: [id])
-  lines        PurchaseLine[]
+  company       Company        @relation(fields: [companyId], references: [id])
+  supplier      Party          @relation("PurchaseSupplier", fields: [supplierPartyId], references: [id])
+  buyer         User           @relation("PurchaseBuyer", fields: [buyerUserId], references: [id])
+  paymentTerm   PaymentTerm?   @relation(fields: [paymentTermId], references: [id])
+  priceRequest  PriceRequest?  @relation(fields: [priceRequestId], references: [id])
+  lines         PurchaseLine[]
   goodsReceipts GoodsReceipt[]
 
   @@unique([companyId, documentNumber])
@@ -2034,28 +2048,28 @@ model PurchaseDocument {
 }
 
 model PurchaseLine {
-  id                 String   @id @default(uuid()) @db.Uuid
-  companyId          String   @map("company_id") @db.Uuid
-  purchaseDocumentId String   @map("purchase_document_id") @db.Uuid
-  productVariantId   String   @map("product_variant_id") @db.Uuid
-  orderedQuantity    Decimal  @map("ordered_quantity") @db.Decimal(18, 4)
-  uomId              String   @map("uom_id") @db.Uuid
-  unitPrice          Decimal  @map("unit_price") @db.Decimal(20, 4) // snapshot at document time
-  priceSource        String?  @map("price_source") // MANUAL | TEMPLATE_DEFAULT (purchase daily prices optional)
+  id                 String    @id @default(uuid()) @db.Uuid
+  companyId          String    @map("company_id") @db.Uuid
+  purchaseDocumentId String    @map("purchase_document_id") @db.Uuid
+  productVariantId   String    @map("product_variant_id") @db.Uuid
+  orderedQuantity    Decimal   @map("ordered_quantity") @db.Decimal(18, 4)
+  uomId              String    @map("uom_id") @db.Uuid
+  unitPrice          Decimal   @map("unit_price") @db.Decimal(20, 4) // snapshot at document time
+  priceSource        String?   @map("price_source") // MANUAL | TEMPLATE_DEFAULT (purchase daily prices optional)
   priceDate          DateTime? @map("price_date") @db.Date
-  lineTotal          Decimal  @map("line_total") @db.Decimal(20, 4)
+  lineTotal          Decimal   @map("line_total") @db.Decimal(20, 4)
   notes              String?
-  lineOrder          Int      @default(0) @map("line_order")
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  lineOrder          Int       @default(0) @map("line_order")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  document      PurchaseDocument @relation(fields: [purchaseDocumentId], references: [id], onDelete: Cascade)
-  productVariant ProductVariant  @relation(fields: [productVariantId], references: [id])
-  uom           Uom              @relation(fields: [uomId], references: [id])
+  document            PurchaseDocument          @relation(fields: [purchaseDocumentId], references: [id], onDelete: Cascade)
+  productVariant      ProductVariant            @relation(fields: [productVariantId], references: [id])
+  uom                 Uom                       @relation(fields: [uomId], references: [id])
   purchaseAllocations SalesPurchaseAllocation[]
-  loadingAllocations LoadingAllocation[]
-  goodsReceiptLines GoodsReceiptLine[]
-  fulfillments      PurchaseLineFulfillment[]
+  loadingAllocations  LoadingAllocation[]
+  goodsReceiptLines   GoodsReceiptLine[]
+  fulfillments        PurchaseLineFulfillment[]
 
   @@index([purchaseDocumentId])
   @@index([productVariantId])
@@ -2074,16 +2088,16 @@ enum PurchaseFulfillmentType {
 }
 
 model PurchaseLineFulfillment {
-  id            String                 @id @default(uuid()) @db.Uuid
-  companyId     String                 @map("company_id") @db.Uuid
-  purchaseLineId String                @map("purchase_line_id") @db.Uuid
-  type          PurchaseFulfillmentType
-  sourceId      String                 @map("source_id") @db.Uuid // goodsReceiptId | loadingId
-  quantity      Decimal                @db.Decimal(18, 4) // in purchaseLine.uomId
-  uomId         String                 @map("uom_id") @db.Uuid // purchaseLine uom
-  amount        Decimal?               @db.Decimal(20, 4) // quantity × line.unitPrice snapshot
-  reversedAt    DateTime?              @map("reversed_at") @db.Timestamptz(6)
-  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  id             String                  @id @default(uuid()) @db.Uuid
+  companyId      String                  @map("company_id") @db.Uuid
+  purchaseLineId String                  @map("purchase_line_id") @db.Uuid
+  type           PurchaseFulfillmentType
+  sourceId       String                  @map("source_id") @db.Uuid // goodsReceiptId | loadingId
+  quantity       Decimal                 @db.Decimal(18, 4) // in purchaseLine.uomId
+  uomId          String                  @map("uom_id") @db.Uuid // purchaseLine uom
+  amount         Decimal?                @db.Decimal(20, 4) // quantity × line.unitPrice snapshot
+  reversedAt     DateTime?               @map("reversed_at") @db.Timestamptz(6)
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
 
   purchaseLine PurchaseLine @relation(fields: [purchaseLineId], references: [id], onDelete: Cascade)
   uom          Uom          @relation(fields: [uomId], references: [id])
@@ -2122,25 +2136,25 @@ enum PriceRequestStatus {
 }
 
 model PriceRequest {
-  id               String             @id @default(uuid()) @db.Uuid
-  companyId        String             @map("company_id") @db.Uuid
-  requestNumber    String             @map("request_number")
-  requesterUserId  String             @map("requester_user_id") @db.Uuid
-  customerPartyId  String?            @map("customer_party_id") @db.Uuid
-  opportunityId    String?            @map("opportunity_id") @db.Uuid
-  requestDate      DateTime           @map("request_date") @db.Timestamptz(6)
-  status           PriceRequestStatus @default(OPEN)
-  notes            String?
-  version          Int                @default(1)
-  createdAt        DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String             @id @default(uuid()) @db.Uuid
+  companyId       String             @map("company_id") @db.Uuid
+  requestNumber   String             @map("request_number")
+  requesterUserId String             @map("requester_user_id") @db.Uuid
+  customerPartyId String?            @map("customer_party_id") @db.Uuid
+  opportunityId   String?            @map("opportunity_id") @db.Uuid
+  requestDate     DateTime           @map("request_date") @db.Timestamptz(6)
+  status          PriceRequestStatus @default(OPEN)
+  notes           String?
+  version         Int                @default(1)
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company        Company             @relation(fields: [companyId], references: [id])
-  requester      User                @relation("PriceRequester", fields: [requesterUserId], references: [id])
-  customer       Party?              @relation("PriceRequestCustomer", fields: [customerPartyId], references: [id])
-  opportunity    Opportunity?        @relation(fields: [opportunityId], references: [id])
-  lines          PriceRequestLine[]
-  salesDocuments SalesDocument[]
+  company           Company            @relation(fields: [companyId], references: [id])
+  requester         User               @relation("PriceRequester", fields: [requesterUserId], references: [id])
+  customer          Party?             @relation("PriceRequestCustomer", fields: [customerPartyId], references: [id])
+  opportunity       Opportunity?       @relation(fields: [opportunityId], references: [id])
+  lines             PriceRequestLine[]
+  salesDocuments    SalesDocument[]
   purchaseDocuments PurchaseDocument[]
 
   @@unique([companyId, requestNumber])
@@ -2159,10 +2173,10 @@ model PriceRequestLine {
   lineOrder         Int      @default(0) @map("line_order")
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  priceRequest PriceRequest    @relation(fields: [priceRequestId], references: [id], onDelete: Cascade)
-  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
-  uom          Uom             @relation(fields: [uomId], references: [id])
-  offers       SupplierOffer[]
+  priceRequest   PriceRequest    @relation(fields: [priceRequestId], references: [id], onDelete: Cascade)
+  productVariant ProductVariant  @relation(fields: [productVariantId], references: [id])
+  uom            Uom             @relation(fields: [uomId], references: [id])
+  offers         SupplierOffer[]
 
   @@index([priceRequestId])
   @@index([productVariantId])
@@ -2170,23 +2184,23 @@ model PriceRequestLine {
 }
 
 model SupplierOffer {
-  id                String        @id @default(uuid()) @db.Uuid
-  companyId         String        @map("company_id") @db.Uuid
-  priceRequestLineId String       @map("price_request_line_id") @db.Uuid
-  supplierPartyId   String        @map("supplier_party_id") @db.Uuid
-  offeredPrice      Decimal       @map("offered_price") @db.Decimal(20, 4)
-  uomId             String        @map("uom_id") @db.Uuid
-  paymentTerms      String?
-  deliveryTime      String?       @map("delivery_time")
-  notes             String?
-  offeredAt         DateTime      @default(now()) @map("offered_at") @db.Timestamptz(6)
+  id                 String        @id @default(uuid()) @db.Uuid
+  companyId          String        @map("company_id") @db.Uuid
+  priceRequestLineId String        @map("price_request_line_id") @db.Uuid
+  supplierPartyId    String        @map("supplier_party_id") @db.Uuid
+  offeredPrice       Decimal       @map("offered_price") @db.Decimal(20, 4)
+  uomId              String        @map("uom_id") @db.Uuid
+  paymentTerms       String?
+  deliveryTime       String?       @map("delivery_time")
+  notes              String?
+  offeredAt          DateTime      @default(now()) @map("offered_at") @db.Timestamptz(6)
   // Phase 10: explicit win/loss decision (reported verbatim — never inferred
   // from purchases, which the handover forbids for this report).
-  outcome           OfferOutcome?
-  outcomeDecidedAt  DateTime?     @map("outcome_decided_at") @db.Timestamptz(6)
-  outcomeDecidedBy  String?       @map("outcome_decided_by") @db.Uuid
-  createdBy         String?       @map("created_by") @db.Uuid
-  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  outcome            OfferOutcome?
+  outcomeDecidedAt   DateTime?     @map("outcome_decided_at") @db.Timestamptz(6)
+  outcomeDecidedBy   String?       @map("outcome_decided_by") @db.Uuid
+  createdBy          String?       @map("created_by") @db.Uuid
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company          Company          @relation(fields: [companyId], references: [id])
   priceRequestLine PriceRequestLine @relation(fields: [priceRequestLineId], references: [id], onDelete: Cascade)
@@ -2253,10 +2267,10 @@ model DailyPrice {
   createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company   Company        @relation(fields: [companyId], references: [id])
+  company        Company        @relation(fields: [companyId], references: [id])
   productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
-  uom       Uom            @relation(fields: [uomId], references: [id])
-  supplier  Party?         @relation("PricedAsSupplier", fields: [supplierPartyId], references: [id])
+  uom            Uom            @relation(fields: [uomId], references: [id])
+  supplier       Party?         @relation("PricedAsSupplier", fields: [supplierPartyId], references: [id])
 
   @@unique([companyId, productVariantId, date, uomId])
   @@index([companyId, date])
@@ -2298,17 +2312,17 @@ enum PublishItemStatus {
 }
 
 model PublishBatch {
-  id         String            @id @default(uuid()) @db.Uuid
-  companyId  String            @map("company_id") @db.Uuid
-  batchNumber String           @map("batch_number")
-  priceDate  DateTime          @map("price_date") @db.Date
-  status     PublishBatchStatus @default(PENDING)
-  notes      String?
-  createdBy  String?           @map("created_by") @db.Uuid
-  createdAt  DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  finishedAt DateTime?         @map("finished_at") @db.Timestamptz(6)
+  id          String             @id @default(uuid()) @db.Uuid
+  companyId   String             @map("company_id") @db.Uuid
+  batchNumber String             @map("batch_number")
+  priceDate   DateTime           @map("price_date") @db.Date
+  status      PublishBatchStatus @default(PENDING)
+  notes       String?
+  createdBy   String?            @map("created_by") @db.Uuid
+  createdAt   DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt  DateTime?          @map("finished_at") @db.Timestamptz(6)
 
-  company Company           @relation(fields: [companyId], references: [id])
+  company Company            @relation(fields: [companyId], references: [id])
   items   PublishBatchItem[]
 
   @@unique([companyId, batchNumber])
@@ -2335,7 +2349,7 @@ model PublishBatchItem {
   startedAt        DateTime?         @map("started_at") @db.Timestamptz(6)
   finishedAt       DateTime?         @map("finished_at") @db.Timestamptz(6)
 
-  batch   PublishBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  batch    PublishBatch        @relation(fields: [batchId], references: [id], onDelete: Cascade)
   template PublishingTemplate? @relation(fields: [templateId], references: [id])
 
   @@unique([batchId, channel, destination])
@@ -2348,15 +2362,15 @@ model PublishBatchItem {
 // ({product} {size} {brand} {price} {date} {uom}).
 
 model PublishingTemplate {
-  id          String   @id @default(uuid()) @db.Uuid
-  companyId   String   @map("company_id") @db.Uuid
-  channel     PublishChannel
-  code        String
-  nameFa      String   @map("name_fa")
-  bodyTemplate String  @map("body_template")
-  isActive    Boolean  @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id           String         @id @default(uuid()) @db.Uuid
+  companyId    String         @map("company_id") @db.Uuid
+  channel      PublishChannel
+  code         String
+  nameFa       String         @map("name_fa")
+  bodyTemplate String         @map("body_template")
+  isActive     Boolean        @default(true) @map("is_active")
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company            @relation(fields: [companyId], references: [id])
   items   PublishBatchItem[]
@@ -2384,19 +2398,19 @@ enum AutomationActionType {
 }
 
 model AutomationRule {
-  id             String                @id @default(uuid()) @db.Uuid
-  companyId      String                @map("company_id") @db.Uuid
-  code           String
-  nameFa         String                @map("name_fa")
-  triggerType    AutomationTriggerType @map("trigger_type")
-  triggerConfig  Json                  @map("trigger_config") // {channels:[...], days:N, ...}
-  conditionConfig Json?                @map("condition_config") // reuse notification-conditions evaluator
-  actionType     AutomationActionType  @map("action_type")
-  actionConfig   Json                  @map("action_config")
-  enabled        Boolean               @default(true)
-  version        Int                   @default(1)
-  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String                @id @default(uuid()) @db.Uuid
+  companyId       String                @map("company_id") @db.Uuid
+  code            String
+  nameFa          String                @map("name_fa")
+  triggerType     AutomationTriggerType @map("trigger_type")
+  triggerConfig   Json                  @map("trigger_config") // {channels:[...], days:N, ...}
+  conditionConfig Json?                 @map("condition_config") // reuse notification-conditions evaluator
+  actionType      AutomationActionType  @map("action_type")
+  actionConfig    Json                  @map("action_config")
+  enabled         Boolean               @default(true)
+  version         Int                   @default(1)
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company         @relation(fields: [companyId], references: [id])
   runs    AutomationRun[]
@@ -2407,17 +2421,17 @@ model AutomationRule {
 }
 
 model AutomationRun {
-  id             String   @id @default(uuid()) @db.Uuid
-  ruleId         String   @map("rule_id") @db.Uuid
-  ruleVersion    Int      @map("rule_version")
-  triggerPayload Json?    @map("trigger_payload")
-  status         String // SUCCESS | FAILED | SKIPPED
-  attempts       Int      @default(0) // Phase 9C: bounded durable retry budget counter
-  conditionsResult Json?  @map("conditions_result")
-  error          String?
-  idempotencyKey String?  @unique @map("idempotency_key")
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+  id               String    @id @default(uuid()) @db.Uuid
+  ruleId           String    @map("rule_id") @db.Uuid
+  ruleVersion      Int       @map("rule_version")
+  triggerPayload   Json?     @map("trigger_payload")
+  status           String // SUCCESS | FAILED | SKIPPED
+  attempts         Int       @default(0) // Phase 9C: bounded durable retry budget counter
+  conditionsResult Json?     @map("conditions_result")
+  error            String?
+  idempotencyKey   String?   @unique @map("idempotency_key")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt       DateTime? @map("finished_at") @db.Timestamptz(6)
 
   rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
 
@@ -2443,7 +2457,7 @@ model Warehouse {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company   Company        @relation(fields: [companyId], references: [id])
+  company   Company         @relation(fields: [companyId], references: [id])
   movements StockMovement[]
   loadings  Loading[]
   locations StockLocation[]
@@ -2463,19 +2477,19 @@ enum StockLocationType {
 // location TO a location. Warehouses own one or more INTERNAL locations.
 // Company physical stock = INTERNAL locations only (#7).
 model StockLocation {
-  id          String           @id @default(uuid()) @db.Uuid
-  companyId   String           @map("company_id") @db.Uuid
+  id          String            @id @default(uuid()) @db.Uuid
+  companyId   String            @map("company_id") @db.Uuid
   type        StockLocationType
-  warehouseId String?          @map("warehouse_id") @db.Uuid // INTERNAL: owning warehouse
-  partyId     String?          @map("party_id") @db.Uuid // SUPPLIER/CUSTOMER party when external
+  warehouseId String?           @map("warehouse_id") @db.Uuid // INTERNAL: owning warehouse
+  partyId     String?           @map("party_id") @db.Uuid // SUPPLIER/CUSTOMER party when external
   code        String
-  nameFa      String           @map("name_fa")
-  active      Boolean          @default(true)
-  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  nameFa      String            @map("name_fa")
+  active      Boolean           @default(true)
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company   Company        @relation(fields: [companyId], references: [id])
-  warehouse Warehouse?     @relation(fields: [warehouseId], references: [id])
-  party     Party?         @relation("LocationParty", fields: [partyId], references: [id])
+  company       Company         @relation(fields: [companyId], references: [id])
+  warehouse     Warehouse?      @relation(fields: [warehouseId], references: [id])
+  party         Party?          @relation("LocationParty", fields: [partyId], references: [id])
   movementsFrom StockMovement[] @relation("MovementFrom")
   movementsTo   StockMovement[] @relation("MovementTo")
   goodsReceipts GoodsReceipt[]
@@ -2491,42 +2505,42 @@ enum StockDirection {
 }
 
 model StockMovement {
-  id               String        @id @default(uuid()) @db.Uuid
-  companyId        String        @map("company_id") @db.Uuid
-  productVariantId String        @map("product_variant_id") @db.Uuid
+  id                    String         @id @default(uuid()) @db.Uuid
+  companyId             String         @map("company_id") @db.Uuid
+  productVariantId      String         @map("product_variant_id") @db.Uuid
   // Original source quantity/UOM — preserved verbatim for audit (#1).
-  sourceQuantity   Decimal       @map("source_quantity") @db.Decimal(18, 4)
-  sourceUomId      String        @map("source_uom_id") @db.Uuid
+  sourceQuantity        Decimal        @map("source_quantity") @db.Decimal(18, 4)
+  sourceUomId           String         @map("source_uom_id") @db.Uuid
   // Normalized to the variant's inventoryUom via the UOM engine (#1/#3) —
   // the ONLY column stock aggregation may ever SUM.
-  normalizedQuantity Decimal    @map("normalized_quantity") @db.Decimal(18, 4)
-  inventoryUomId   String       @map("inventory_uom_id") @db.Uuid
+  normalizedQuantity    Decimal        @map("normalized_quantity") @db.Decimal(18, 4)
+  inventoryUomId        String         @map("inventory_uom_id") @db.Uuid
   // Location-based flow (#6): warehouseId kept for INTERNAL convenience.
-  direction        StockDirection
-  sourceLocationId String        @map("source_location_id") @db.Uuid
-  destinationLocationId String   @map("destination_location_id") @db.Uuid
-  warehouseId      String?       @map("warehouse_id") @db.Uuid
-  movementDate     DateTime      @map("movement_date") @db.Timestamptz(6)
-  sourceEntityType String        @map("source_entity_type") // PURCHASE_RECEIPT | LOADING | LOADING_REVERSAL | RECEIPT_REVERSAL
-  sourceEntityId   String        @map("source_entity_id") @db.Uuid
-  idempotencyKey   String        @unique @map("idempotency_key")
-  reversalOfMovementId String?   @map("reversal_of_movement_id") @db.Uuid // compensating movement linkage
+  direction             StockDirection
+  sourceLocationId      String         @map("source_location_id") @db.Uuid
+  destinationLocationId String         @map("destination_location_id") @db.Uuid
+  warehouseId           String?        @map("warehouse_id") @db.Uuid
+  movementDate          DateTime       @map("movement_date") @db.Timestamptz(6)
+  sourceEntityType      String         @map("source_entity_type") // PURCHASE_RECEIPT | LOADING | LOADING_REVERSAL | RECEIPT_REVERSAL
+  sourceEntityId        String         @map("source_entity_id") @db.Uuid
+  idempotencyKey        String         @unique @map("idempotency_key")
+  reversalOfMovementId  String?        @map("reversal_of_movement_id") @db.Uuid // compensating movement linkage
   // Valuation foundation for Accounting (final correction #3): immutable cost
   // snapshot per movement, in the variant's inventoryUom context. Rows are
   // never updated — cost history stays append-only.
-  unitCostSnapshot  Decimal?      @map("unit_cost_snapshot") @db.Decimal(20, 6)
-  totalCostSnapshot Decimal?      @map("total_cost_snapshot") @db.Decimal(20, 4)
-  createdBy        String?       @map("created_by") @db.Uuid
-  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  unitCostSnapshot      Decimal?       @map("unit_cost_snapshot") @db.Decimal(20, 6)
+  totalCostSnapshot     Decimal?       @map("total_cost_snapshot") @db.Decimal(20, 4)
+  createdBy             String?        @map("created_by") @db.Uuid
+  createdAt             DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company        Company        @relation(fields: [companyId], references: [id])
-  productVariant ProductVariant @relation(fields: [productVariantId], references: [id])
-  sourceUom      Uom            @relation("MovementSourceUom", fields: [sourceUomId], references: [id])
-  inventoryUom   Uom            @relation("MovementInventoryUom", fields: [inventoryUomId], references: [id])
-  sourceLocation      StockLocation @relation("MovementFrom", fields: [sourceLocationId], references: [id])
-  destinationLocation StockLocation @relation("MovementTo", fields: [destinationLocationId], references: [id])
-  warehouse      Warehouse?     @relation(fields: [warehouseId], references: [id])
-  loading        Loading?       @relation(fields: [sourceEntityId], references: [id])
+  company             Company        @relation(fields: [companyId], references: [id])
+  productVariant      ProductVariant @relation(fields: [productVariantId], references: [id])
+  sourceUom           Uom            @relation("MovementSourceUom", fields: [sourceUomId], references: [id])
+  inventoryUom        Uom            @relation("MovementInventoryUom", fields: [inventoryUomId], references: [id])
+  sourceLocation      StockLocation  @relation("MovementFrom", fields: [sourceLocationId], references: [id])
+  destinationLocation StockLocation  @relation("MovementTo", fields: [destinationLocationId], references: [id])
+  warehouse           Warehouse?     @relation(fields: [warehouseId], references: [id])
+  loading             Loading?       @relation(fields: [sourceEntityId], references: [id])
 
   @@index([companyId, productVariantId, movementDate])
   @@index([destinationLocationId, productVariantId])
@@ -2534,7 +2548,6 @@ model StockMovement {
   @@index([sourceEntityType, sourceEntityId])
   @@map("stock_movements")
 }
-
 
 // Real partial warehouse receipts (Integrity Gate #9): actual physical
 // quantity drives stock, never the PO ordered quantity. Confirmed receipts
@@ -2548,23 +2561,23 @@ enum GoodsReceiptStatus {
 }
 
 model GoodsReceipt {
-  id                String           @id @default(uuid()) @db.Uuid
-  companyId         String           @map("company_id") @db.Uuid
-  receiptNumber     String           @map("receipt_number")
-  purchaseDocumentId String          @map("purchase_document_id") @db.Uuid
-  destinationLocationId String       @map("destination_location_id") @db.Uuid // INTERNAL location
-  receiptDate       DateTime         @map("receipt_date") @db.Timestamptz(6)
-  status            GoodsReceiptStatus @default(DRAFT)
-  notes             String?
-  reversalOfId      String?          @map("reversal_of_id") @db.Uuid
-  reversalReason    String?          @map("reversal_reason")
-  createdBy         String?          @map("created_by") @db.Uuid
-  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                    String             @id @default(uuid()) @db.Uuid
+  companyId             String             @map("company_id") @db.Uuid
+  receiptNumber         String             @map("receipt_number")
+  purchaseDocumentId    String             @map("purchase_document_id") @db.Uuid
+  destinationLocationId String             @map("destination_location_id") @db.Uuid // INTERNAL location
+  receiptDate           DateTime           @map("receipt_date") @db.Timestamptz(6)
+  status                GoodsReceiptStatus @default(DRAFT)
+  notes                 String?
+  reversalOfId          String?            @map("reversal_of_id") @db.Uuid
+  reversalReason        String?            @map("reversal_reason")
+  createdBy             String?            @map("created_by") @db.Uuid
+  createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  purchaseDocument PurchaseDocument @relation(fields: [purchaseDocumentId], references: [id])
-  destinationLocation StockLocation @relation(fields: [destinationLocationId], references: [id])
-  lines       GoodsReceiptLine[]
+  purchaseDocument    PurchaseDocument   @relation(fields: [purchaseDocumentId], references: [id])
+  destinationLocation StockLocation      @relation(fields: [destinationLocationId], references: [id])
+  lines               GoodsReceiptLine[]
 
   @@unique([companyId, receiptNumber])
   @@index([companyId, status, receiptDate])
@@ -2572,21 +2585,21 @@ model GoodsReceipt {
 }
 
 model GoodsReceiptLine {
-  id              String  @id @default(uuid()) @db.Uuid
-  goodsReceiptId  String  @map("goods_receipt_id") @db.Uuid
-  purchaseLineId  String  @map("purchase_line_id") @db.Uuid
-  actualQuantity  Decimal @map("actual_quantity") @db.Decimal(18, 4)
-  uomId           String  @map("uom_id") @db.Uuid
+  id                       String   @id @default(uuid()) @db.Uuid
+  goodsReceiptId           String   @map("goods_receipt_id") @db.Uuid
+  purchaseLineId           String   @map("purchase_line_id") @db.Uuid
+  actualQuantity           Decimal  @map("actual_quantity") @db.Decimal(18, 4)
+  uomId                    String   @map("uom_id") @db.Uuid
   // Over-receipt snapshot as of THIS receipt's confirmation (final #2):
   // ordered (line UOM), receivedBefore + this receipt, overReceived —
   // persistent, survives recalculation-free reporting.
   orderedQuantitySnapshot  Decimal? @map("ordered_quantity_snapshot") @db.Decimal(18, 4)
   receivedQuantitySnapshot Decimal? @map("received_quantity_snapshot") @db.Decimal(18, 4)
   overReceivedSnapshot     Decimal? @map("over_received_snapshot") @db.Decimal(18, 4)
-  notes           String?
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  notes                    String?
+  createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  receipt      GoodsReceipt  @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  receipt      GoodsReceipt @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
   purchaseLine PurchaseLine @relation(fields: [purchaseLineId], references: [id])
   uom          Uom          @relation(fields: [uomId], references: [id])
 
@@ -2616,15 +2629,15 @@ enum AccountingEventStatus {
 }
 
 model PostingRule {
-  id        String             @id @default(uuid()) @db.Uuid
-  companyId String             @map("company_id") @db.Uuid
+  id        String              @id @default(uuid()) @db.Uuid
+  companyId String              @map("company_id") @db.Uuid
   code      String
-  nameFa    String             @map("name_fa")
+  nameFa    String              @map("name_fa")
   eventType AccountingEventType @map("event_type")
-  enabled   Boolean            @default(true)
-  version   Int                @default(1)
-  createdAt DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  enabled   Boolean             @default(true)
+  version   Int                 @default(1)
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company           @relation(fields: [companyId], references: [id])
   lines   PostingRuleLine[]
@@ -2671,18 +2684,18 @@ enum JournalSide {
 // Immutable operational→accounting event log; one row per (companyId,
 // idempotencyKey). FAILED rows are retryable (POST /accounting/events/:id/post).
 model AccountingEvent {
-  id               String              @id @default(uuid()) @db.Uuid
-  companyId        String              @map("company_id") @db.Uuid
-  eventType        AccountingEventType @map("event_type")
-  sourceEntityType String              @map("source_entity_type")
-  sourceEntityId   String              @map("source_entity_id") @db.Uuid
+  id               String                @id @default(uuid()) @db.Uuid
+  companyId        String                @map("company_id") @db.Uuid
+  eventType        AccountingEventType   @map("event_type")
+  sourceEntityType String                @map("source_entity_type")
+  sourceEntityId   String                @map("source_entity_id") @db.Uuid
   payload          Json?
   status           AccountingEventStatus @default(FAILED) // set to POSTED on success; FAILED also covers "awaiting retry"
-  journalEntryId   String?             @map("journal_entry_id") @db.Uuid
+  journalEntryId   String?               @map("journal_entry_id") @db.Uuid
   error            String?
-  idempotencyKey   String              @unique @map("idempotency_key")
-  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  postedAt         DateTime?           @map("posted_at") @db.Timestamptz(6)
+  idempotencyKey   String                @unique @map("idempotency_key")
+  createdAt        DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  postedAt         DateTime?             @map("posted_at") @db.Timestamptz(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -2701,22 +2714,22 @@ enum OpeningBalanceStatus {
 }
 
 model OpeningBalanceEntry {
-  id           String              @id @default(uuid()) @db.Uuid
-  companyId    String              @map("company_id") @db.Uuid
-  fiscalYearId String?             @map("fiscal_year_id") @db.Uuid
-  accountCode  String              @map("account_code")
-  partyId      String?             @map("party_id") @db.Uuid // analytic for AR/AP
-  partyName    String?             @map("party_name") // legacy import label
-  productVariantId String?         @map("product_variant_id") @db.Uuid // inventory rows
-  quantity     Decimal?            @db.Decimal(18, 4)
-  unitCost     Decimal?            @map("unit_cost") @db.Decimal(20, 6)
-  debit        Decimal             @default(0) @db.Decimal(20, 4)
-  credit       Decimal             @default(0) @db.Decimal(20, 4)
-  status       OpeningBalanceStatus @default(STAGED)
-  journalEntryId String?           @map("journal_entry_id") @db.Uuid
-  note         String?
-  createdBy    String?             @map("created_by") @db.Uuid
-  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  id               String               @id @default(uuid()) @db.Uuid
+  companyId        String               @map("company_id") @db.Uuid
+  fiscalYearId     String?              @map("fiscal_year_id") @db.Uuid
+  accountCode      String               @map("account_code")
+  partyId          String?              @map("party_id") @db.Uuid // analytic for AR/AP
+  partyName        String?              @map("party_name") // legacy import label
+  productVariantId String?              @map("product_variant_id") @db.Uuid // inventory rows
+  quantity         Decimal?             @db.Decimal(18, 4)
+  unitCost         Decimal?             @map("unit_cost") @db.Decimal(20, 6)
+  debit            Decimal              @default(0) @db.Decimal(20, 4)
+  credit           Decimal              @default(0) @db.Decimal(20, 4)
+  status           OpeningBalanceStatus @default(STAGED)
+  journalEntryId   String?              @map("journal_entry_id") @db.Uuid
+  note             String?
+  createdBy        String?              @map("created_by") @db.Uuid
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 
   company        Company         @relation(fields: [companyId], references: [id])
   productVariant ProductVariant? @relation(fields: [productVariantId], references: [id])
@@ -2737,32 +2750,32 @@ enum ApprovalStatus {
 }
 
 model ApprovalRequest {
-  id          String         @id @default(uuid()) @db.Uuid
-  companyId   String         @map("company_id") @db.Uuid
+  id                 String         @id @default(uuid()) @db.Uuid
+  companyId          String         @map("company_id") @db.Uuid
   // Fully generic entity reference (Integrity Gate #13): NO physical FK —
   // services validate existence. Loading queries by (entityType='loading').
-  entityType  String         @map("entity_type")
-  entityId    String         @map("entity_id") @db.Uuid
-  approvalType String         @map("approval_type") // RELEASE_DRIVER_INFO | ...
-  requestedBy String?        @map("requested_by") @db.Uuid
-  approverId  String?        @map("approver_id") @db.Uuid // resolved approver (manager)
-  status      ApprovalStatus @default(PENDING)
-  reason      String?
-  decisionNote String?       @map("decision_note")
-  decidedBy   String?        @map("decided_by") @db.Uuid
-  decidedAt   DateTime?      @map("decided_at") @db.Timestamptz(6)
+  entityType         String         @map("entity_type")
+  entityId           String         @map("entity_id") @db.Uuid
+  approvalType       String         @map("approval_type") // RELEASE_DRIVER_INFO | ...
+  requestedBy        String?        @map("requested_by") @db.Uuid
+  approverId         String?        @map("approver_id") @db.Uuid // resolved approver (manager)
+  status             ApprovalStatus @default(PENDING)
+  reason             String?
+  decisionNote       String?        @map("decision_note")
+  decidedBy          String?        @map("decided_by") @db.Uuid
+  decidedAt          DateTime?      @map("decided_at") @db.Timestamptz(6)
   // Phase 9B generalization: due date + escalation counter, provenance
   // (MANUAL = user-created via API, WORKFLOW = approval-gated transition),
   // and an optional back-reference to the driving workflow instance.
-  dueAt            DateTime? @map("due_at") @db.Timestamptz(6)
-  escalationLevel  Int       @default(0) @map("escalation_level")
-  source           String    @default("MANUAL") // MANUAL | WORKFLOW
-  workflowInstanceId String? @map("workflow_instance_id") @db.Uuid
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  dueAt              DateTime?      @map("due_at") @db.Timestamptz(6)
+  escalationLevel    Int            @default(0) @map("escalation_level")
+  source             String         @default("MANUAL") // MANUAL | WORKFLOW
+  workflowInstanceId String?        @map("workflow_instance_id") @db.Uuid
+  createdAt          DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company  Company  @relation(fields: [companyId], references: [id])
+  company          Company           @relation(fields: [companyId], references: [id])
   workflowInstance WorkflowInstance? @relation(fields: [workflowInstanceId], references: [id])
-  events   ApprovalEvent[]
+  events           ApprovalEvent[]
 
   @@index([companyId, status, createdAt])
   @@index([entityType, entityId])
@@ -2806,34 +2819,34 @@ enum LoadingRoute {
 }
 
 model Loading {
-  id             String       @id @default(uuid()) @db.Uuid
-  companyId      String       @map("company_id") @db.Uuid
-  loadingDate    DateTime     @map("loading_date") @db.Timestamptz(6)
-  status         LoadingStatus @default(DRAFT)
-  route          LoadingRoute @default(DIRECT_SUPPLIER_TO_CUSTOMER)
-  reversalOfId   String?      @map("reversal_of_id") @db.Uuid // this loading compensates that original
-  reversalReason String?      @map("reversal_reason")
+  id                   String        @id @default(uuid()) @db.Uuid
+  companyId            String        @map("company_id") @db.Uuid
+  loadingDate          DateTime      @map("loading_date") @db.Timestamptz(6)
+  status               LoadingStatus @default(DRAFT)
+  route                LoadingRoute  @default(DIRECT_SUPPLIER_TO_CUSTOMER)
+  reversalOfId         String?       @map("reversal_of_id") @db.Uuid // this loading compensates that original
+  reversalReason       String?       @map("reversal_reason")
   // Debt gate (REQUIREMENTS §20): driver/carrier info stays hidden from
   // customer-facing surfaces while driverInfoRestricted = true.
-  driverInfoRestricted Boolean @default(false) @map("driver_info_restricted")
-  warehouseId    String?      @map("warehouse_id") @db.Uuid // null = company default warehouse
-  customerPartyId String?     @map("customer_party_id") @db.Uuid // customer-facing side (debt gate + portal)
-  driverPartyId  String?      @map("driver_party_id") @db.Uuid
-  carrierPartyId String?      @map("carrier_party_id") @db.Uuid
-  notes          String?
-  createdBy      String?      @map("created_by") @db.Uuid
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  driverInfoRestricted Boolean       @default(false) @map("driver_info_restricted")
+  warehouseId          String?       @map("warehouse_id") @db.Uuid // null = company default warehouse
+  customerPartyId      String?       @map("customer_party_id") @db.Uuid // customer-facing side (debt gate + portal)
+  driverPartyId        String?       @map("driver_party_id") @db.Uuid
+  carrierPartyId       String?       @map("carrier_party_id") @db.Uuid
+  notes                String?
+  createdBy            String?       @map("created_by") @db.Uuid
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company Company       @relation(fields: [companyId], references: [id])
-  warehouse Warehouse?  @relation(fields: [warehouseId], references: [id])
-  reversalOf Loading?   @relation("LoadingReversalOf", fields: [reversalOfId], references: [id])
-  reversals  Loading[]  @relation("LoadingReversalOf")
-  customer Party?       @relation("LoadingCustomer", fields: [customerPartyId], references: [id])
-  driver  Party?        @relation("LoadingDriver", fields: [driverPartyId], references: [id])
-  carrier Party?        @relation("LoadingCarrier", fields: [carrierPartyId], references: [id])
-  lines   LoadingLine[]
-  movements StockMovement[]
+  company    Company         @relation(fields: [companyId], references: [id])
+  warehouse  Warehouse?      @relation(fields: [warehouseId], references: [id])
+  reversalOf Loading?        @relation("LoadingReversalOf", fields: [reversalOfId], references: [id])
+  reversals  Loading[]       @relation("LoadingReversalOf")
+  customer   Party?          @relation("LoadingCustomer", fields: [customerPartyId], references: [id])
+  driver     Party?          @relation("LoadingDriver", fields: [driverPartyId], references: [id])
+  carrier    Party?          @relation("LoadingCarrier", fields: [carrierPartyId], references: [id])
+  lines      LoadingLine[]
+  movements  StockMovement[]
 
   @@index([companyId, loadingDate])
   @@index([companyId, status])
@@ -2842,14 +2855,14 @@ model Loading {
 }
 
 model LoadingLine {
-  id              String  @id @default(uuid()) @db.Uuid
-  loadingId       String  @map("loading_id") @db.Uuid
-  productVariantId String @map("product_variant_id") @db.Uuid // Phase 3 FK
-  actualQuantity  Decimal @map("actual_quantity") @db.Decimal(18, 4)
-  uomId           String? @map("uom_id") @db.Uuid // Phase 3 FK
-  notes           String?
+  id               String  @id @default(uuid()) @db.Uuid
+  loadingId        String  @map("loading_id") @db.Uuid
+  productVariantId String  @map("product_variant_id") @db.Uuid // Phase 3 FK
+  actualQuantity   Decimal @map("actual_quantity") @db.Decimal(18, 4)
+  uomId            String? @map("uom_id") @db.Uuid // Phase 3 FK
+  notes            String?
 
-  loading Loading           @relation(fields: [loadingId], references: [id], onDelete: Cascade)
+  loading     Loading             @relation(fields: [loadingId], references: [id], onDelete: Cascade)
   allocations LoadingAllocation[]
 
   @@index([loadingId])
@@ -2864,8 +2877,8 @@ model LoadingAllocation {
   purchaseLineId    String? @map("purchase_line_id") @db.Uuid
   allocatedQuantity Decimal @map("allocated_quantity") @db.Decimal(18, 4)
 
-  loadingLine LoadingLine @relation(fields: [loadingLineId], references: [id], onDelete: Cascade)
-  salesLine   SalesLine?   @relation(fields: [salesLineId], references: [id])
+  loadingLine  LoadingLine   @relation(fields: [loadingLineId], references: [id], onDelete: Cascade)
+  salesLine    SalesLine?    @relation(fields: [salesLineId], references: [id])
   purchaseLine PurchaseLine? @relation(fields: [purchaseLineId], references: [id])
 
   @@index([loadingLineId])
@@ -2877,12 +2890,12 @@ model LoadingAllocation {
 // ───────────────────── Accounting foundation ─────────────────────
 
 model ChartOfAccount {
-  id        String  @id @default(uuid()) @db.Uuid
-  companyId String  @map("company_id") @db.Uuid
+  id        String      @id @default(uuid()) @db.Uuid
+  companyId String      @map("company_id") @db.Uuid
   code      String
   name      String
   type      AccountType
-  parentId  String? @map("parent_id") @db.Uuid
+  parentId  String?     @map("parent_id") @db.Uuid
 
   company  Company          @relation(fields: [companyId], references: [id])
   parent   ChartOfAccount?  @relation("AccountTree", fields: [parentId], references: [id])
@@ -2909,27 +2922,27 @@ enum JournalEntryStatus {
 }
 
 model JournalEntry {
-  id             String             @id @default(uuid()) @db.Uuid
-  companyId      String             @map("company_id") @db.Uuid
-  entryNumber    String             @map("entry_number")
+  id                String             @id @default(uuid()) @db.Uuid
+  companyId         String             @map("company_id") @db.Uuid
+  entryNumber       String             @map("entry_number")
   // Durable posting idempotency key (Phase 7B stabilization): set when a
   // journal is created FROM an accounting event — one event can never produce
   // two journals (DB-enforced). NULL for manual/opening/reversal journals.
-  sourceEventId  String?            @unique @map("source_event_id") @db.Uuid
-  entryDate      DateTime           @map("entry_date") @db.Timestamptz(6)
-  journalCode    String             @default("GENERAL") @map("journal_code")
-  documentType   String?            @map("document_type") // BANK_TRANSFER | RECEIPT | PAYMENT | CHECK_CLEAR ...
-  description    String?
-  status         JournalEntryStatus @default(DRAFT)
-  postedAt       DateTime?          @map("posted_at") @db.Timestamptz(6)
-  reversedByEntryId String?         @map("reversed_by_entry_id") @db.Uuid
-  version        Int                @default(1)
-  createdBy      String?            @map("created_by") @db.Uuid
-  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  sourceEventId     String?            @unique @map("source_event_id") @db.Uuid
+  entryDate         DateTime           @map("entry_date") @db.Timestamptz(6)
+  journalCode       String             @default("GENERAL") @map("journal_code")
+  documentType      String?            @map("document_type") // BANK_TRANSFER | RECEIPT | PAYMENT | CHECK_CLEAR ...
+  description       String?
+  status            JournalEntryStatus @default(DRAFT)
+  postedAt          DateTime?          @map("posted_at") @db.Timestamptz(6)
+  reversedByEntryId String?            @map("reversed_by_entry_id") @db.Uuid
+  version           Int                @default(1)
+  createdBy         String?            @map("created_by") @db.Uuid
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company    Company       @relation(fields: [companyId], references: [id])
-  lines      JournalLine[]
+  company        Company             @relation(fields: [companyId], references: [id])
+  lines          JournalLine[]
   statementLines BankStatementLine[]
 
   @@unique([companyId, entryNumber])
@@ -2942,16 +2955,16 @@ model JournalEntry {
 // period rows exist for the year, the FiscalYear status alone decides.
 
 model FiscalYear {
-  id             String   @id @default(uuid()) @db.Uuid
-  companyId      String   @map("company_id") @db.Uuid
+  id             String           @id @default(uuid()) @db.Uuid
+  companyId      String           @map("company_id") @db.Uuid
   code           String // e.g. 1405 (Jalali year)
-  nameFa         String   @map("name_fa")
-  startDate      DateTime @map("start_date") @db.Date
-  endDate        DateTime @map("end_date") @db.Date
+  nameFa         String           @map("name_fa")
+  startDate      DateTime         @map("start_date") @db.Date
+  endDate        DateTime         @map("end_date") @db.Date
   status         FiscalYearStatus @default(OPEN)
-  closingEntryId String?  @map("closing_entry_id") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  closingEntryId String?          @map("closing_entry_id") @db.Uuid
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company Company        @relation(fields: [companyId], references: [id])
   periods FiscalPeriod[]
@@ -2968,14 +2981,14 @@ enum FiscalYearStatus {
 // Monthly sub-periods; when a year defines periods, each posting date must
 // fall in an OPEN one.
 model FiscalPeriod {
-  id           String   @id @default(uuid()) @db.Uuid
-  fiscalYearId String   @map("fiscal_year_id") @db.Uuid
+  id           String           @id @default(uuid()) @db.Uuid
+  fiscalYearId String           @map("fiscal_year_id") @db.Uuid
   code         String // 1405-01 … 1405-12 (Jalali months)
-  nameFa       String   @map("name_fa")
-  startDate    DateTime @map("start_date") @db.Date
-  endDate      DateTime @map("end_date") @db.Date
+  nameFa       String           @map("name_fa")
+  startDate    DateTime         @map("start_date") @db.Date
+  endDate      DateTime         @map("end_date") @db.Date
   status       FiscalYearStatus @default(OPEN)
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
 
   fiscalYear FiscalYear @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
 
@@ -2999,12 +3012,12 @@ enum AnalyticDimensionType {
 }
 
 model JournalLineAnalytic {
-  id             String               @id @default(uuid()) @db.Uuid
-  journalLineId  String               @map("journal_line_id") @db.Uuid
-  dimensionType  AnalyticDimensionType @map("dimension_type")
-  dimensionId    String               @map("dimension_id") @db.Uuid
-  label          String?
-  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            String                @id @default(uuid()) @db.Uuid
+  journalLineId String                @map("journal_line_id") @db.Uuid
+  dimensionType AnalyticDimensionType @map("dimension_type")
+  dimensionId   String                @map("dimension_id") @db.Uuid
+  label         String?
+  createdAt     DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
 
   journalLine JournalLine @relation(fields: [journalLineId], references: [id], onDelete: Cascade)
 
@@ -3048,13 +3061,13 @@ model BankAccount {
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company        Company             @relation(fields: [companyId], references: [id])
-  statementLines BankStatementLine[]
-  receipts       Receipt[]
-  payments       Payment[]
-  sourceTransfers      BankTransfer[] @relation("TransferSource")
-  destinationTransfers BankTransfer[] @relation("TransferDestination")
-  checks         Check[]
+  company              Company             @relation(fields: [companyId], references: [id])
+  statementLines       BankStatementLine[]
+  receipts             Receipt[]
+  payments             Payment[]
+  sourceTransfers      BankTransfer[]      @relation("TransferSource")
+  destinationTransfers BankTransfer[]      @relation("TransferDestination")
+  checks               Check[]
 
   @@index([companyId])
   @@map("bank_accounts")
@@ -3069,23 +3082,23 @@ enum BankLineDirection {
 }
 
 model BankStatementLine {
-  id              String            @id @default(uuid()) @db.Uuid
-  companyId       String            @map("company_id") @db.Uuid
-  bankAccountId   String            @map("bank_account_id") @db.Uuid
-  entryDate       DateTime          @map("entry_date") @db.Date
-  sequenceNo      Int               @map("sequence_no")
-  direction       BankLineDirection
-  amount          Decimal           @db.Decimal(20, 4)
-  runningBalance  Decimal           @map("running_balance") @db.Decimal(20, 4)
-  referenceNumber String?           @map("reference_number")
-  description     String?
-  sourceEntityType String?          @map("source_entity_type") // RECEIPT | PAYMENT | BANK_TRANSFER | CHECK
-  sourceEntityId  String?           @map("source_entity_id") @db.Uuid
-  journalEntryId  String?           @map("journal_entry_id") @db.Uuid
-  isReconciled    Boolean           @default(false) @map("is_reconciled")
-  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  id               String            @id @default(uuid()) @db.Uuid
+  companyId        String            @map("company_id") @db.Uuid
+  bankAccountId    String            @map("bank_account_id") @db.Uuid
+  entryDate        DateTime          @map("entry_date") @db.Date
+  sequenceNo       Int               @map("sequence_no")
+  direction        BankLineDirection
+  amount           Decimal           @db.Decimal(20, 4)
+  runningBalance   Decimal           @map("running_balance") @db.Decimal(20, 4)
+  referenceNumber  String?           @map("reference_number")
+  description      String?
+  sourceEntityType String?           @map("source_entity_type") // RECEIPT | PAYMENT | BANK_TRANSFER | CHECK
+  sourceEntityId   String?           @map("source_entity_id") @db.Uuid
+  journalEntryId   String?           @map("journal_entry_id") @db.Uuid
+  isReconciled     Boolean           @default(false) @map("is_reconciled")
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  bankAccount BankAccount    @relation(fields: [bankAccountId], references: [id])
+  bankAccount  BankAccount   @relation(fields: [bankAccountId], references: [id])
   journalEntry JournalEntry? @relation(fields: [journalEntryId], references: [id])
 
   @@unique([companyId, bankAccountId, entryDate, sequenceNo])
@@ -3094,19 +3107,19 @@ model BankStatementLine {
 }
 
 model Receipt {
-  id             String   @id @default(uuid()) @db.Uuid
-  companyId      String   @map("company_id") @db.Uuid
-  receiptNumber  String   @map("receipt_number")
-  bankAccountId  String   @map("bank_account_id") @db.Uuid
-  partyId        String?  @map("party_id") @db.Uuid // Phase 3 FK
-  amount         Decimal  @db.Decimal(20, 4)
-  receiptDate    DateTime @map("receipt_date") @db.Timestamptz(6)
-  description    String?
-  journalEntryId String?  @map("journal_entry_id") @db.Uuid
-  settlementClaimId String? @map("settlement_claim_id") @db.Uuid
-  createdBy      String?  @map("created_by") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  receiptNumber     String   @map("receipt_number")
+  bankAccountId     String   @map("bank_account_id") @db.Uuid
+  partyId           String?  @map("party_id") @db.Uuid // Phase 3 FK
+  amount            Decimal  @db.Decimal(20, 4)
+  receiptDate       DateTime @map("receipt_date") @db.Timestamptz(6)
+  description       String?
+  journalEntryId    String?  @map("journal_entry_id") @db.Uuid
+  settlementClaimId String?  @map("settlement_claim_id") @db.Uuid
+  createdBy         String?  @map("created_by") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company     Company     @relation(fields: [companyId], references: [id])
   bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
@@ -3116,19 +3129,19 @@ model Receipt {
 }
 
 model Payment {
-  id             String   @id @default(uuid()) @db.Uuid
-  companyId      String   @map("company_id") @db.Uuid
-  paymentNumber  String   @map("payment_number")
-  bankAccountId  String   @map("bank_account_id") @db.Uuid
-  partyId        String?  @map("party_id") @db.Uuid // Phase 3 FK
-  amount         Decimal  @db.Decimal(20, 4)
-  paymentDate    DateTime @map("payment_date") @db.Timestamptz(6)
-  description    String?
-  journalEntryId String?  @map("journal_entry_id") @db.Uuid
-  settlementClaimId String? @map("settlement_claim_id") @db.Uuid
-  createdBy      String?  @map("created_by") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                String   @id @default(uuid()) @db.Uuid
+  companyId         String   @map("company_id") @db.Uuid
+  paymentNumber     String   @map("payment_number")
+  bankAccountId     String   @map("bank_account_id") @db.Uuid
+  partyId           String?  @map("party_id") @db.Uuid // Phase 3 FK
+  amount            Decimal  @db.Decimal(20, 4)
+  paymentDate       DateTime @map("payment_date") @db.Timestamptz(6)
+  description       String?
+  journalEntryId    String?  @map("journal_entry_id") @db.Uuid
+  settlementClaimId String?  @map("settlement_claim_id") @db.Uuid
+  createdBy         String?  @map("created_by") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company     Company     @relation(fields: [companyId], references: [id])
   bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
@@ -3141,19 +3154,19 @@ model Payment {
 //   Dr Destination Bank X, Dr Bank Fee Expense F, Cr Source Bank X+F
 //   Statement lines: source WITHDRAWAL X+F, destination DEPOSIT X.
 model BankTransfer {
-  id                      String   @id @default(uuid()) @db.Uuid
-  companyId               String   @map("company_id") @db.Uuid
-  transferNumber          String   @map("transfer_number")
-  sourceBankAccountId     String   @map("source_bank_account_id") @db.Uuid
-  destinationBankAccountId String  @map("destination_bank_account_id") @db.Uuid
-  amount                  Decimal  @db.Decimal(20, 4)
-  fee                     Decimal  @default(0) @db.Decimal(20, 4)
-  transferDate            DateTime @map("transfer_date") @db.Timestamptz(6)
-  description             String?
-  journalEntryId          String?  @map("journal_entry_id") @db.Uuid
-  createdBy               String?  @map("created_by") @db.Uuid
-  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                       String   @id @default(uuid()) @db.Uuid
+  companyId                String   @map("company_id") @db.Uuid
+  transferNumber           String   @map("transfer_number")
+  sourceBankAccountId      String   @map("source_bank_account_id") @db.Uuid
+  destinationBankAccountId String   @map("destination_bank_account_id") @db.Uuid
+  amount                   Decimal  @db.Decimal(20, 4)
+  fee                      Decimal  @default(0) @db.Decimal(20, 4)
+  transferDate             DateTime @map("transfer_date") @db.Timestamptz(6)
+  description              String?
+  journalEntryId           String?  @map("journal_entry_id") @db.Uuid
+  createdBy                String?  @map("created_by") @db.Uuid
+  createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   sourceBankAccount      BankAccount @relation("TransferSource", fields: [sourceBankAccountId], references: [id])
   destinationBankAccount BankAccount @relation("TransferDestination", fields: [destinationBankAccountId], references: [id])
@@ -3187,22 +3200,22 @@ enum CheckStatus {
 }
 
 model Check {
-  id             String        @id @default(uuid()) @db.Uuid
-  companyId      String        @map("company_id") @db.Uuid
+  id             String         @id @default(uuid()) @db.Uuid
+  companyId      String         @map("company_id") @db.Uuid
   direction      CheckDirection
-  checkNumber    String        @map("check_number")
-  bankName       String?       @map("bank_name")
-  partyId        String?       @map("party_id") @db.Uuid // Phase 3 FK
-  amount         Decimal       @db.Decimal(20, 4)
-  issueDate      DateTime?     @map("issue_date") @db.Timestamptz(6)
-  dueDate        DateTime      @map("due_date") @db.Timestamptz(6)
-  status         CheckStatus   @default(REGISTERED)
-  bankAccountId  String?       @map("bank_account_id") @db.Uuid // required before CLEARED/PAID
-  journalEntryId String?       @map("journal_entry_id") @db.Uuid
+  checkNumber    String         @map("check_number")
+  bankName       String?        @map("bank_name")
+  partyId        String?        @map("party_id") @db.Uuid // Phase 3 FK
+  amount         Decimal        @db.Decimal(20, 4)
+  issueDate      DateTime?      @map("issue_date") @db.Timestamptz(6)
+  dueDate        DateTime       @map("due_date") @db.Timestamptz(6)
+  status         CheckStatus    @default(REGISTERED)
+  bankAccountId  String?        @map("bank_account_id") @db.Uuid // required before CLEARED/PAID
+  journalEntryId String?        @map("journal_entry_id") @db.Uuid
   description    String?
-  createdBy      String?       @map("created_by") @db.Uuid
-  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdBy      String?        @map("created_by") @db.Uuid
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   company     Company      @relation(fields: [companyId], references: [id])
   bankAccount BankAccount? @relation(fields: [bankAccountId], references: [id])
@@ -3261,7 +3274,7 @@ model ImportJob {
   startedAt      DateTime?        @map("started_at") @db.Timestamptz(6)
   finishedAt     DateTime?        @map("finished_at") @db.Timestamptz(6)
 
-  company Company         @relation(fields: [companyId], references: [id])
+  company Company        @relation(fields: [companyId], references: [id])
   rows    ImportJobRow[]
 
   @@index([companyId, createdAt])
@@ -3295,16 +3308,16 @@ enum PortalAccountStatus {
 }
 
 model PortalAccount {
-  id             String             @id @default(uuid()) @db.Uuid
-  companyId      String             @map("company_id") @db.Uuid
-  partyId        String             @map("party_id") @db.Uuid // Phase 3 FK
-  websiteUserId  String?            @map("website_user_id")
-  verifiedMobile String             @map("verified_mobile")
+  id             String              @id @default(uuid()) @db.Uuid
+  companyId      String              @map("company_id") @db.Uuid
+  partyId        String              @map("party_id") @db.Uuid // Phase 3 FK
+  websiteUserId  String?             @map("website_user_id")
+  verifiedMobile String              @map("verified_mobile")
   status         PortalAccountStatus @default(PENDING)
-  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  company           Company            @relation(fields: [companyId], references: [id])
-  sessions          PortalSession[]
+  company  Company         @relation(fields: [companyId], references: [id])
+  sessions PortalSession[]
 
   @@unique([companyId, verifiedMobile])
   // Mini-Gate #3: one website user may link to at most one Party per company.
@@ -3332,22 +3345,22 @@ model PortalOtpCode {
 }
 
 model PortalPendingSelection {
-  id                String   @id @default(uuid()) @db.Uuid
-  tokenHash         String   @unique @map("token_hash") @db.Char(64)
-  portalAccountIds  String[] @map("portal_account_ids")
-  consumed          Boolean  @default(false)
-  expiresAt         DateTime @map("expires_at") @db.Timestamptz(6)
-  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id               String   @id @default(uuid()) @db.Uuid
+  tokenHash        String   @unique @map("token_hash") @db.Char(64)
+  portalAccountIds String[] @map("portal_account_ids")
+  consumed         Boolean  @default(false)
+  expiresAt        DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@map("portal_pending_selections")
 }
 
 model PortalSession {
-  id              String        @id @default(uuid()) @db.Uuid
-  tokenHash       String        @unique @map("token_hash") @db.Char(64)
-  portalAccountId String        @map("portal_account_id") @db.Uuid
-  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  expiresAt       DateTime      @map("expires_at") @db.Timestamptz(6)
+  id              String   @id @default(uuid()) @db.Uuid
+  tokenHash       String   @unique @map("token_hash") @db.Char(64)
+  portalAccountId String   @map("portal_account_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt       DateTime @map("expires_at") @db.Timestamptz(6)
 
   portalAccount PortalAccount @relation(fields: [portalAccountId], references: [id], onDelete: Cascade)
 

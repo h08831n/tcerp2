@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { EntitySelector, type EntityOption } from "@/components/ui/entity-selector";
+import { OpportunityKanban } from "@/components/crm/opportunity-kanban";
+import { useAuth } from "@/lib/auth-context";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { OpportunityStatusBadge } from "@/components/documents/status-badges";
 import { faDigits, jalali, toNum, thousandSeparate } from "@/lib/format";
@@ -76,6 +78,10 @@ export default function OpportunitiesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  // CR-001: Kanban pipeline vs table view.
+  const [view, setView] = useState<"table" | "kanban">("kanban");
+  const { permissions } = useAuth();
+  const canManage = permissions.includes("crm.manage");
 
   // Detail drawer
   const [detail, setDetail] = useState<OpportunityDto | null>(null);
@@ -135,6 +141,22 @@ export default function OpportunitiesPage() {
   }, [query]);
 
   useEffect(() => load(), [load, reloadToken]);
+
+  // Kanban needs a wide, status-agnostic slice (page 1, 200) — separate from
+  // the paginated table query so filters/paging stay untouched.
+  const [kanbanItems, setKanbanItems] = useState<OpportunityDto[] | null>(null);
+  useEffect(() => {
+    if (view !== "kanban") return;
+    let cancelled = false;
+    fetchOpportunities({ page: 1, pageSize: 200 })
+      .then((res) => {
+        if (!cancelled) setKanbanItems(res.items);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [view, reloadToken]);
 
   const openDetail = useCallback(async (id: string) => {
     setDetailLoading(true);
@@ -311,6 +333,26 @@ export default function OpportunitiesPage() {
           فرصت جدید
         </Button>
       </div>
+      <div className="flex gap-1" role="tablist" aria-label="نمای Pipeline">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "kanban"}
+          onClick={() => setView("kanban")}
+          className={`rounded-md px-3 py-1 text-xs ${view === "kanban" ? "bg-primary-600 text-white" : "bg-white text-slate-600 shadow-sm"}`}
+        >
+          کانبان (Pipeline)
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "table"}
+          onClick={() => setView("table")}
+          className={`rounded-md px-3 py-1 text-xs ${view === "table" ? "bg-primary-600 text-white" : "bg-white text-slate-600 shadow-sm"}`}
+        >
+          فهرست
+        </button>
+      </div>
 
       <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="w-full sm:w-64">
@@ -358,6 +400,9 @@ export default function OpportunitiesPage() {
         </div>
       )}
 
+      {view === "kanban" ? (
+        <OpportunityKanban items={kanbanItems ?? []} canManage={canManage} onChanged={() => setReloadToken((t) => t + 1)} />
+      ) : (
       <DataTable<OpportunityDto>
         columns={columns}
         rows={data?.items ?? []}
@@ -371,6 +416,7 @@ export default function OpportunitiesPage() {
             : null
         }
       />
+      )}
 
       {/* Detail drawer */}
       {detail && (

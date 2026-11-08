@@ -138,6 +138,11 @@ export default function LeadsPage() {
       setFormError("نام سرنخ الزامی است.");
       return;
     }
+    if (!form.party) {
+      // CR-001: a lead is ALWAYS attached to a Party (backend-enforced too).
+      setFormError("انتخاب طرف‌حساب الزامی است — سرنخ بدون هویت ثابت قابل پیگیری و تبدیل نیست.");
+      return;
+    }
     setSaving(true);
     setFormError(null);
     try {
@@ -190,7 +195,9 @@ export default function LeadsPage() {
         header: "نام سرنخ",
         render: (row) => (
           <div>
-            <span className="font-medium text-slate-800">{row.name}</span>
+            <a href={`/crm/leads/${row.id}`} className="font-medium text-primary-700 hover:underline">
+              {row.name} ↗
+            </a>
             {row.phone && (
               <span dir="ltr" className="block text-[11px] text-slate-400">
                 {faDigits(row.phone)}
@@ -250,7 +257,7 @@ export default function LeadsPage() {
         <div>
           <h2 className="text-lg font-bold text-slate-800">سرنخ‌ها</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            مدیریت سرنخ‌های فروش؛ زنجیره وضعیت: جدید ← تماس گرفته‌شده ← واجد شرایط / باخته
+            مدیریت سرنخ‌های فروش؛ هر سرنخ به یک طرف‌حساب متصل است. با اعلام قصد خرید، «تبدیل به فرصت فروش» از صفحهٔ جزئیات انجام می‌شود.
           </p>
         </div>
         <Button onClick={() => setFormOpen(true)} aria-label="ثبت سرنخ جدید">
@@ -395,15 +402,25 @@ export default function LeadsPage() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">مشتری مرتبط (اختیاری)</label>
+              <label className="mb-1 block text-xs font-medium text-slate-600">
+                طرف‌حساب * <span className="text-[10px] font-normal text-slate-400">(هویت ثابت سرنخ — تکراری‌ها از قبل هشدار داده می‌شوند)</span>
+              </label>
               <EntitySelector
                 endpoint={(q) => `/parties?search=${encodeURIComponent(q)}&pageSize=10`}
                 mapItem={partyMapItem}
                 value={form.party}
                 onChange={(party) => setForm((f) => ({ ...f, party }))}
-                placeholder="جستجوی شخص…"
-                ariaLabel="انتخاب مشتری مرتبط"
+                placeholder="جستجوی شخص/شرکت…"
+                ariaLabel="انتخاب طرف‌حساب سرنخ"
               />
+              {form.party && (
+                <a
+                  href={`/parties/${form.party.id}`}
+                  className="mt-0.5 block text-[10px] text-primary-600 hover:underline"
+                >
+                  مشاهده پرونده طرف‌حساب ↗
+                </a>
+              )}
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">فروشنده (اختیاری)</label>

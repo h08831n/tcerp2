@@ -22,9 +22,10 @@ export class CreateLeadDto {
   @MaxLength(256)
   name: string;
 
-  @IsOptional()
+  // CR-001: a lead is ALWAYS attached to a Party — the party is the stable
+  // identity and conversion NEVER creates a second party row.
   @IsUUID()
-  partyId?: string;
+  partyId: string;
 
   @IsOptional()
   @IsString()
@@ -113,6 +114,33 @@ export class UpdateLeadDto {
   version: number;
 }
 
+/** CR-001: the explicit «تبدیل به فرصت فروش» operation payload. */
+export class ConvertLeadDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  title?: string;
+
+  // Defaults to the lead's assigned salesperson when omitted; the convert
+  // UI may reassign at conversion time (owner requirement).
+  @IsOptional()
+  @IsUUID()
+  salespersonUserId?: string;
+
+  @IsOptional()
+  @IsNumber()
+  estimatedAmount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  estimatedTonnage?: number;
+
+  /** Date-only ISO («تاریخ احتمالی نهایی شدن»). */
+  @IsOptional()
+  @IsDateString()
+  expectedCloseDate?: string;
+}
+
 export class LeadQueryDto extends PaginationDto {
   @IsOptional()
   @IsEnum(LeadStatus)
@@ -153,6 +181,11 @@ export class CreateOpportunityDto {
   @IsNumber()
   estimatedTonnage?: number;
 
+  /** CR-001: «تاریخ احتمالی نهایی شدن» — date-only ISO (Kanban card). */
+  @IsOptional()
+  @IsDateString()
+  expectedCloseDate?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(128)
@@ -185,6 +218,11 @@ export class UpdateOpportunityDto {
   @IsOptional()
   @IsNumber()
   estimatedTonnage?: number;
+
+  /** CR-001: «تاریخ احتمالی نهایی شدن» — date-only ISO. */
+  @IsOptional()
+  @IsDateString()
+  expectedCloseDate?: string;
 
   @IsOptional()
   @IsEnum(OpportunityStatus)
