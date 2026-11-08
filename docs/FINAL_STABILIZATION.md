@@ -9,12 +9,15 @@
 
 ## PRهای باز
 
+> PR #12 (feature/d2-portal-files → feature/d2-portal-business-api) **merge شده** —
+> شاخهٔ business-api اکنون Phase 3 (customer_visible + فایل‌ها) + مستندات پایدارسازی
+> را نیز حمل می‌کند؛ PR #7 همهٔ آن را به main می‌آورد.
+
 | PR | Branch | HEAD | Base | CI | Mergeable | Migration |
 |---|---|---|---|---|---|---|
-| #7 | feature/d2-portal-business-api | `80eaa91` | main | ⚠️ ۶ g7d flake (رفع در #10) | true/unstable | none |
+| #7 | feature/d2-portal-business-api | `ae34280` | main | ⚠️ g7d flake (رفع در #10؛ S3 NOT_TESTED) | true/unknown | `customer_visible` |
 | #10 | feature/backlog-security | `eb85307` | main | ✅ success | true/clean | `token_version` |
 | #11 | feature/ops-cli-hardening | `533605d` | feature/backlog-security | — (stacked) | true/clean | none |
-| #12 | feature/d2-portal-files | `80eaa91` | feature/d2-portal-business-api | ⚠️ MinIO DOWN | true/unknown | `customer_visible` |
 | #13 | feature/d4-imports-exports | `3d9d50e` | main | ✅ success | true/clean | none |
 | #14 | feature/d5-loading-completion | `52cb34d` | main | ✅ success (S3 NOT_TESTED) | true/clean | `loading_weighbridge` |
 | #15 | feature/d3-fiscal-closing-tests | `1d08291` | main | ✅ success | true/clean | none |
@@ -23,12 +26,11 @@
 
 ```
 ۱. #10 (backlog امنیتی — فیکس g7d flake را می‌آورد)
-۲. #7 (Phase 2 — پس از #10 سبز می‌شود)
+۲. #7 (Phase 2+3 — پس از #10 سبز می‌شود؛ همهٔ D-2 را یکجا به main می‌آورد)
 ۳. #11 (CLI — پس از #10 روی main CI می‌گیرد)
-۴. #12 (Phase 3 — پس از #7 و #10 سبز می‌شود)
-۵. #13 (D-4 — مستقل)
-۶. #15 (D-3 — مستقل)
-۷. #14 (D-5 — مستقل، با قید NOT_TESTED)
+۴. #13 (D-4 — مستقل)
+۵. #15 (D-3 — مستقل)
+۶. #14 (D-5 — مستقل، با قید NOT_TESTED)
 ```
 
 ## باگ‌های رفع‌شده

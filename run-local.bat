@@ -90,8 +90,10 @@ call npm run db:seed
 
 popd
 
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr :3001 ^| findstr LISTENING') do taskkill /f /pid %%p >nul 2>nul
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do taskkill /f /pid %%p >nul 2>nul
+rem Kill only OUR dev servers on 3000/3001 — never an arbitrary process that
+rem happens to hold the port: taskkill only fires when the image is node.exe.
+for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3001 " ^| findstr LISTENING') do call :killIfNode %%p
+for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3000 " ^| findstr LISTENING') do call :killIfNode %%p
 
 echo [..] starting Backend on http://localhost:3001/api ...
 start "TCERP Backend" cmd /k "cd /d %~dp0apps\backend && npm run start"
@@ -144,3 +146,11 @@ echo         docker compose stop
 echo ============================================
 echo.
 pause
+goto :eof
+
+rem --- subroutines (never fall through here from main flow) ---
+:killIfNode
+for /f "tokens=1" %%n in ('tasklist /fi "PID eq %1" /nh 2^>nul') do (
+  if /i "%%n"=="node.exe" taskkill /f /pid %1 >nul 2>nul
+)
+goto :eof

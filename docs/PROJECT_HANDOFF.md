@@ -24,15 +24,21 @@ cd ../frontend && npm ci && npm run dev  # frontend on :3000
 
 ## ورود ادمین
 
-`admin / change-me-strong-password` (در apps/backend/.env تنظیم شده)
+رمز ادمین در `apps/backend/.env` (متغیر `ADMIN_INITIAL_PASSWORD`) تنظیم می‌شود —
+**مقدار پیش‌فرض را قبل از هر استقرار واقعی عوض کنید** و آن را در این سند یا هر
+مستند متنی ذخیره نکنید. در صورت گم‌شدن، با Ops CLI زیر آن را بازنشانی کنید.
 
 ## Ops CLI
+
+> هر فرمان جهشی که وضعیت DB را تغییر می‌دهد، ابتدا مقصد را با
+> `--confirm-target "postgresql://<user>@<host>:<port>/<db>"` تأیید می‌کند
+> (نام‌محور کافی نیست — host:port/db کامل باید مطابقت داشته باشد).
 
 ```bash
 cd apps/backend
 npm run cli -- reset-password <username>          # تعاملی (پرامپت مخفی)
-npm run cli -- unlock <username> --yes
-npm run cli -- set-status <username> DISABLED --yes
+npm run cli -- unlock <username> --yes --confirm-target "postgresql://...@localhost:5433/tcerp"
+npm run cli -- set-status <username> DISABLED --yes --confirm-target "postgresql://...@localhost:5433/tcerp"
 npm run cli -- list-users
 ```
 
