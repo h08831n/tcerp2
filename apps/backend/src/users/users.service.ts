@@ -179,6 +179,16 @@ export class UsersService {
       mobile = dto.mobile === '' ? null : normalizeIranMobile(dto.mobile);
     }
 
+    // IAM-001 S15: disabling the LAST active admin is refused (backend law).
+    if (dto.status === 'DISABLED' && existing.status === 'ACTIVE') {
+      const primaryCompanyId =
+        existing.defaultCompanyId ??
+        (await this.prisma.userCompany.findFirst({ where: { userId: id }, select: { companyId: true } }))?.companyId;
+      if (primaryCompanyId) {
+        await this.assertNotLastAdmin(primaryCompanyId, id, 'DISABLE');
+      }
+    }
+
     const data: Prisma.UserUpdateInput = {
       email: dto.email !== undefined ? dto.email.toLowerCase() : undefined,
       firstName: dto.firstName,
@@ -222,6 +232,16 @@ export class UsersService {
   async remove(id: string, actor: { id: string; username: string }, ctx: RequestContext): Promise<void> {
     const existing = await this.prisma.user.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('User not found', { id });
+
+    // IAM-001 S15: the last active admin cannot be removed.
+    if (existing.status === 'ACTIVE') {
+      const primaryCompanyId =
+        existing.defaultCompanyId ??
+        (await this.prisma.userCompany.findFirst({ where: { userId: id }, select: { companyId: true } }))?.companyId;
+      if (primaryCompanyId) {
+        await this.assertNotLastAdmin(primaryCompanyId, id, 'DISABLE');
+      }
+    }
 
     await this.prisma.user.update({
       where: { id },
@@ -287,16 +307,14 @@ export class UsersService {
     });
     if (!existing) throw new NotFoundError('User not found', { id });
 
+    // IAM-001 §11: assigning a role to a user IN a company implies the
+    // membership — create it here (audited) instead of refusing, so the UI
+    // flow «ایجاد کاربر → تخصیص نقش» works without a separate step.
     const member = await this.prisma.userCompany.findUnique({
       where: { userId_companyId: { userId: id, companyId } },
       select: { userId: true },
     });
-    if (!member) {
-      throw new ValidationError('User is not a member of the company; create the membership first', {
-        userId: id,
-        companyId,
-      });
-    }
+    const isNewMembership = !member;
 
     const uniqueIds = [...new Set(dto.roleIds)];
     const count = await this.prisma.role.count({ where: { id: { in: uniqueIds } } });
@@ -310,13 +328,61 @@ export class UsersService {
       .sort();
     const newRoleIds = [...uniqueIds].sort();
 
+    // ── IAM-001 §4/§11 admin-role assignment law (backend-enforced) ──
+    const adminRole = await this.prisma.role.findUnique({ where: { code: 'admin' }, select: { id: true } });
+    if (adminRole) {
+      const actorHoldsAdmin = await this.prisma.userCompanyRole.findFirst({
+        where: { userId: actor.id, companyId, roleId: adminRole.id },
+        select: { userId: true },
+      });
+      const targetHoldsAdmin = oldRoleIds.includes(adminRole.id);
+      // (a) Granting the admin role requires the ACTOR to already hold it —
+      // a users.edit holder can never escalate themselves or anyone to admin.
+      if (!actorHoldsAdmin && newRoleIds.includes(adminRole.id)) {
+        throw new ValidationError('ADMIN_ROLE_ASSIGNMENT_FORBIDDEN', { userId: id, companyId });
+      }
+      // (b) Removing the admin role from the last active admin is refused;
+      // an admin removing their OWN admin role is also refused (self-lockout)
+      // unless another active admin exists.
+      if (targetHoldsAdmin && !newRoleIds.includes(adminRole.id)) {
+        await this.assertNotLastAdmin(companyId, id, 'REMOVE_ROLE');
+        if (actor.id === id) {
+          throw new ValidationError('SELF_ADMIN_ROLE_REMOVAL_FORBIDDEN', { userId: id, companyId });
+        }
+      }
+    }
+
+
     if (oldRoleIds.join(',') !== newRoleIds.join(',')) {
       await this.prisma.$transaction([
+        ...(isNewMembership
+          ? [
+              this.prisma.userCompany.create({ data: { userId: id, companyId } }),
+              // First membership becomes the default company (same contract
+              // as the companies module) — /auth/me resolves permissions
+              // against THIS company afterwards.
+              ...(existing.defaultCompanyId
+                ? []
+                : [this.prisma.user.update({ where: { id }, data: { defaultCompanyId: companyId } })]),
+            ]
+          : []),
         this.prisma.userCompanyRole.deleteMany({ where: { userId: id, companyId } }),
         this.prisma.userCompanyRole.createMany({
           data: uniqueIds.map((roleId) => ({ userId: id, companyId, roleId, assignedBy: actor.id })),
         }),
       ]);
+      if (isNewMembership) {
+        await this.auditService.record({
+          entityType: 'user',
+          entityId: id,
+          action: AuditAction.UPDATE,
+          actor,
+          companyId,
+          newValues: { membershipCreated: true, companyId },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        });
+      }
       const removed = oldRoleIds.filter((r) => !newRoleIds.includes(r));
       const added = newRoleIds.filter((r) => !oldRoleIds.includes(r));
       if (removed.length > 0) {
@@ -348,6 +414,36 @@ export class UsersService {
     }
 
     return this.getById(id);
+  }
+
+  /**
+   * IAM-001 S15 — last-admin protection (backend-enforced): the target user
+   * holds the platform `admin` role in `companyId` AND no OTHER ACTIVE user
+   * does → the requested action would leave the system without any admin.
+   * The role that matters is the SEED admin role (code 'admin'), which the
+   * seed grants ALL permissions.
+   */
+  private async assertNotLastAdmin(
+    companyId: string,
+    userId: string,
+    action: 'DISABLE' | 'REMOVE_ROLE',
+  ): Promise<void> {
+    const adminRole = await this.prisma.role.findUnique({ where: { code: 'admin' }, select: { id: true } });
+    if (!adminRole) return;
+    const holdsAdmin = await this.prisma.userCompanyRole.findFirst({
+      where: { userId, companyId, roleId: adminRole.id },
+      select: { userId: true },
+    });
+    if (!holdsAdmin) return;
+    const otherAdmins = await this.prisma.userCompanyRole.count({
+      where: { companyId, roleId: adminRole.id, userId: { not: userId }, user: { status: 'ACTIVE' } },
+    });
+    if (otherAdmins === 0) {
+      throw new ValidationError(
+        action === 'DISABLE' ? 'LAST_ADMIN_CANNOT_BE_DISABLED' : 'LAST_ADMIN_CANNOT_LOSE_ROLE',
+        { userId, companyId },
+      );
+    }
   }
 
   private async assertNoDuplicate(username?: string, email?: string): Promise<void> {

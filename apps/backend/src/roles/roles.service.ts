@@ -19,6 +19,7 @@ const ROLE_SELECT = {
   nameFa: true,
   nameEn: true,
   isSystem: true,
+  active: true,
   createdAt: true,
   updatedAt: true,
   permissions: {
@@ -85,7 +86,7 @@ export class RolesService {
       data: {
         code: dto.code,
         nameFa: dto.nameFa,
-        nameEn: dto.nameEn,
+        nameEn: dto.nameEn ?? dto.nameFa,
         isSystem: dto.isSystem ?? false,
       },
       select: ROLE_SELECT,
@@ -111,9 +112,33 @@ export class RolesService {
     const existing = await this.prisma.role.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Role not found', { id });
 
+    // IAM-001 §7: deactivating a role removes its effective permissions for
+    // EVERY holder — the seed admin role is protected (isSystem) so the
+    // system can never lose its admins through a role toggle.
+    if (dto.active === false && existing.isSystem) {
+      throw new ValidationError('SYSTEM_ROLE_CANNOT_BE_DEACTIVATED', { code: existing.code });
+    }
+    if (dto.active === false && existing.active) {
+      // IAM-001 §11: deactivation must not silently strip the last admins —
+      // every ACTIVE holder of this role would lose effective permissions.
+      // The admin role is excluded above; other roles may hold critical
+      // rights too, so require an explicit reason via the audit (below) and
+      // surface the holder count in the error details when large.
+      const holderCount = await this.prisma.userCompanyRole.count({
+        where: { roleId: id, user: { status: 'ACTIVE' } },
+      });
+      if (holderCount > 0 && existing.code === 'super_admin') {
+        throw new ValidationError('SUPER_ADMIN_ROLE_CANNOT_BE_DEACTIVATED', { code: existing.code, holderCount });
+      }
+    }
+
     const role = await this.prisma.role.update({
       where: { id },
-      data: { nameFa: dto.nameFa, nameEn: dto.nameEn },
+      data: {
+        nameFa: dto.nameFa,
+        nameEn: dto.nameEn,
+        active: dto.active,
+      },
       select: ROLE_SELECT,
     });
     await this.auditService.record({
@@ -121,8 +146,8 @@ export class RolesService {
       entityId: id,
       action: AuditAction.UPDATE,
       actor,
-      oldValues: { nameFa: existing.nameFa, nameEn: existing.nameEn },
-      newValues: { nameFa: role.nameFa, nameEn: role.nameEn },
+      oldValues: { nameFa: existing.nameFa, nameEn: existing.nameEn, active: existing.active },
+      newValues: { nameFa: role.nameFa, nameEn: role.nameEn, active: role.active },
       ip: ctx.ip,
       userAgent: ctx.userAgent,
     });

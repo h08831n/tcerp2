@@ -569,6 +569,10 @@ model Role {
   nameFa    String   @map("name_fa")
   nameEn    String   @map("name_en")
   isSystem  Boolean  @default(false) @map("is_system")
+  // IAM-001 §7/§11: an INACTIVE role grants no effective permissions
+  // (PermissionsService filters it out) — user/permission links stay intact
+  // so the role can be re-activated without re-assignment.
+  active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 

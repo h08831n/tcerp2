@@ -59,6 +59,10 @@ const NAV_ITEMS: NavItem[] = [
   { label: "گزارش‌ها", href: "/reports", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
   { label: "ورود اطلاعات", href: "/imports", icon: <NavIcon d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16" /> },
   { label: "تنظیمات", href: "/settings", icon: <NavIcon d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 00-2-1.2L14.5 2h-5L9 4.5a7.4 7.4 0 00-2 1.2l-2.5-1-2 3.5L4.6 9.8a7.4 7.4 0 000 2.4L2.5 13.8l2 3.5 2.5-1a7.4 7.4 0 002 1.2L9.5 20h5l.4-2.5a7.4 7.4 0 002-1.2l2.5 1 2-3.5-2.1-1.6c.1-.4.1-.8.1-1.2z" /> },
+  // IAM-001 §17 — کاربران و امنیت (each gated by its own view permission)
+  { label: "مدیریت کاربران", href: "/settings/users", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />, permission: "users.view" },
+  { label: "نقش‌ها و مجوزها", href: "/settings/roles", icon: <NavIcon d="M12 2l10 5v6c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V7l10-5zM9 12l2 2 4-4" />, permission: "roles.view" },
+  { label: "تاریخچه امنیتی", href: "/settings/security-log", icon: <NavIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M16 13H8M16 17H8M10 9H8" />, permission: "audit.view" },
 ];
 
 const TITLES: Record<string, string> = {
@@ -107,6 +111,9 @@ const TITLES: Record<string, string> = {
   "/reports": "گزارش‌های مدیریتی",
   "/imports": "ورود اطلاعات",
   "/settings": "تنظیمات",
+  "/settings/users": "مدیریت کاربران",
+  "/settings/roles": "نقش‌ها و مجوزها",
+  "/settings/security-log": "تاریخچه امنیتی",
   "/treasury": "خزانه",
 };
 
