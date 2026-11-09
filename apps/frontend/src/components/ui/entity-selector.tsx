@@ -86,6 +86,16 @@ export function EntitySelector({
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [open]);
 
+  // BUG-001 hardening (same class as the Modal fix): `endpoint`/`mapItem`
+  // are INLINE function props — a new identity on every parent render put
+  // them in this effect's deps, so any parent re-render (typing in a sibling
+  // field) restarted the debounce timer and refetched mid-search. Hold the
+  // latest functions in refs; the effect depends only on real state.
+  const endpointRef = useRef(endpoint);
+  endpointRef.current = endpoint;
+  const mapItemRef = useRef(mapItem);
+  mapItemRef.current = mapItem;
+
   // Debounced search.
   useEffect(() => {
     if (!open) return;
@@ -98,9 +108,10 @@ export function EntitySelector({
     }
     let cancelled = false;
     setLoading(true);
+    setError(null);
     const timer = setTimeout(async () => {
       try {
-        const response = await apiFetch(endpoint(term));
+        const response = await apiFetch(endpointRef.current(term));
         const data = (await response.json()) as unknown;
         if (cancelled) return;
         const items = Array.isArray(data)
@@ -110,7 +121,7 @@ export function EntitySelector({
             : [];
         setOptions(
           items
-            .map((item) => mapItem(item))
+            .map((item) => mapItemRef.current(item))
             .filter((option): option is EntityOption => option !== null),
         );
         setError(null);
@@ -127,7 +138,7 @@ export function EntitySelector({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query, open, endpoint, mapItem, debounceMs]);
+  }, [query, open, debounceMs]);
 
   useEffect(() => {
     setActiveIndex(options.length > 0 ? 0 : -1);
