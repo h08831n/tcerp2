@@ -73,8 +73,9 @@ test.describe("BUG-001 focus retention", () => {
 
     // Replace a selection mid-string.
     await name.evaluate((el) => {
-      el.focus();
-      el.setSelectionRange(0, 5);
+      const input = el as HTMLInputElement;
+      input.focus();
+      input.setSelectionRange(0, 5);
     });
     await typeCharByChar(page, name, "فولاد");
     const replaced = await name.inputValue();
