@@ -68,6 +68,14 @@ export class LeadsController {
     return this.leads.list(companyId, query);
   }
 
+  /** CORE-003 — lead-source options from company settings. */
+  @Get('source-options')
+  @RequirePermissions('crm.view')
+  async sourceOptions(@CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.leads.sourceOptions(companyId);
+  }
+
   @Get(':id')
   @RequirePermissions('crm.view')
   async getById(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {

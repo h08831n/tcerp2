@@ -254,3 +254,8 @@ export async function fetchPaymentTerms(active = true): Promise<PaymentTermDto[]
   const data = await apiJson<PaginatedResponse<PaymentTermDto>>(`/payment-terms?${params.toString()}`);
   return data.items;
 }
+
+/** CORE-003 — lead-source options from company settings. */
+export function fetchLeadSourceOptions(): Promise<{ options: string[] }> {
+  return apiJson<{ options: string[] }>("/leads/source-options");
+}

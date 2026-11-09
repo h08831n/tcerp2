@@ -21,6 +21,7 @@ import {
   type LeadStatus,
 } from "@/lib/crm";
 import { fetchUsers } from "@/lib/party";
+import { fetchLeadSourceOptions } from "@/lib/crm";
 
 const PAGE_SIZE = 20;
 
@@ -78,6 +79,13 @@ export default function LeadsPage() {
   // Create form
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<LeadFormState>(EMPTY_FORM);
+  // CORE-003: lead source options from company settings (real consumer).
+  const [sourceOptions, setSourceOptions] = useState<string[]>([]);
+  useEffect(() => {
+    fetchLeadSourceOptions()
+      .then((res) => setSourceOptions(res.options ?? []))
+      .catch(() => undefined);
+  }, []);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -402,14 +410,31 @@ export default function LeadsPage() {
             </div>
             <div>
               <label htmlFor="lead-source" className="mb-1 block text-xs font-medium text-slate-600">
-                منبع
+                منبع جذب
               </label>
-              <Input
-                id="lead-source"
-                value={form.source}
-                onChange={(event) => setForm((f) => ({ ...f, source: event.target.value }))}
-                aria-label="منبع سرنخ"
-              />
+              {sourceOptions.length > 0 ? (
+                <select
+                  id="lead-source"
+                  value={form.source}
+                  onChange={(event) => setForm((f) => ({ ...f, source: event.target.value }))}
+                  className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"
+                  aria-label="منبع جذب سرنخ"
+                >
+                  <option value="">— انتخاب منبع —</option>
+                  {sourceOptions.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  id="lead-source"
+                  value={form.source}
+                  onChange={(event) => setForm((f) => ({ ...f, source: event.target.value }))}
+                  aria-label="منبع سرنخ"
+                />
+              )}
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">

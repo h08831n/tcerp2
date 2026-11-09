@@ -346,6 +346,22 @@ export class LeadsService {
     return { items: summaries, total, page: query.page, pageSize: query.pageSize };
   }
 
+  /** CORE-003 — lead source options from the company settings (real consumer). */
+  async sourceOptions(companyId: string): Promise<{ options: string[] }> {
+    const row = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key: 'crm.lead_sources' } },
+      select: { value: true },
+    });
+    const raw = row?.value;
+    if (Array.isArray(raw)) {
+      return { options: raw.map(String).filter(Boolean) };
+    }
+    if (typeof raw === 'string' && raw.trim()) {
+      return { options: raw.split(',').map((x) => x.trim()).filter(Boolean) };
+    }
+    return { options: ['WEB_SITE', 'REFERRAL', 'EXHIBITION', 'GOOGLE_ADS', 'COLD_CALL'] };
+  }
+
   async archive(
     companyId: string,
     id: string,

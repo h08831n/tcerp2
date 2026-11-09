@@ -109,6 +109,23 @@ export class FilesService {
       throw new ValidationError('entityType and entityId are required');
     }
 
+    // CORE-003 — company-scoped upload-size setting (registry key
+    // files.max_upload_mb; infra hard cap 50MB stays in the multer layer).
+    const sizeSetting = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key: 'files.max_upload_mb' } },
+      select: { value: true },
+    });
+    const maxMbRaw = sizeSetting?.value;
+    const maxMb =
+      typeof maxMbRaw === 'number' && maxMbRaw > 0
+        ? maxMbRaw
+        : typeof maxMbRaw === 'string' && /^\d+$/.test(maxMbRaw)
+          ? parseInt(maxMbRaw, 10)
+          : 50;
+    if (file.buffer.byteLength > maxMb * 1024 * 1024) {
+      throw new ValidationError('FILE_TOO_LARGE', { maxMb, actualBytes: file.buffer.byteLength });
+    }
+
     const sha256 = createHash('sha256').update(file.buffer).digest('hex');
     let blob = await this.prisma.fileBlob.findUnique({ where: { sha256 } });
 

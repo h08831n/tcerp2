@@ -4,7 +4,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
 import { RequestContext } from '../auth/auth.service';
+import { ValidationError } from '../common/errors';
 import { SettingQueryDto, UpsertSettingDto } from './settings.dto';
+import {
+  SETTING_DEFINITIONS,
+  SETTING_DEFINITIONS_BY_KEY,
+  validateSettingValue,
+  type SettingDefinition,
+} from './settings-registry';
 import { Paginated } from '../common/dto/pagination.dto';
 
 export type Setting = Prisma.SettingGetPayload<object>;
@@ -87,5 +94,91 @@ export class SettingsService {
       userAgent: ctx.userAgent,
     });
     return setting;
+  }
+
+  /**
+   * CORE-003 — the settings CENTER feed: registry definitions merged with
+   * this company's current overrides. `inDefault` marks rows whose current
+   * value equals the registry default (FE shows the restore action only for
+   * overridden entries).
+   */
+  async catalog(companyId: string) {
+    const rows = await this.prisma.setting.findMany({ where: { companyId } });
+    const byKey = new Map(rows.map((r) => [r.key, r]));
+    return SETTING_DEFINITIONS.map((def) => {
+      const row = byKey.get(def.key);
+      const value = row ? row.value : def.defaultValue;
+      const overridden = !!row && JSON.stringify(row.value) !== JSON.stringify(def.defaultValue);
+      return {
+        key: def.key,
+        category: def.category,
+        type: def.type,
+        labelFa: def.labelFa,
+        descriptionFa: def.descriptionFa,
+        options: def.options ?? null,
+        consumer: def.consumer,
+        value: def.isSecret ? '••••••••' : value,
+        isSecret: def.isSecret ?? false,
+        isOverridden: overridden,
+        updatedAt: row?.updatedAt ?? null,
+        updatedByName: row?.updatedBy ?? null,
+        defaultValue: def.isSecret ? '••••••••' : def.defaultValue,
+      };
+    });
+  }
+
+  /** Typed upsert: the registry validates/coerces by definition type. */
+  async upsertRegistered(
+    companyId: string,
+    key: string,
+    rawValue: unknown,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<Setting> {
+    const def = SETTING_DEFINITIONS_BY_KEY.get(key);
+    if (!def) throw new ValidationError(`Unknown setting key: ${key}`);
+    const check = validateSettingValue(def, rawValue);
+    if (!check.ok) throw new ValidationError(check.error, { key });
+    return this.upsert(
+      companyId,
+      { key, value: check.value as object, category: def.category, description: def.descriptionFa },
+      actor,
+      ctx,
+    );
+  }
+
+  /** Restore a setting to its registry default = delete the override row. */
+  async restoreDefault(
+    companyId: string,
+    key: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<{ key: string; restored: boolean }> {
+    const def = SETTING_DEFINITIONS_BY_KEY.get(key);
+    if (!def) throw new ValidationError(`Unknown setting key: ${key}`);
+    const existing = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key } },
+    });
+    if (!existing) return { key, restored: false };
+    await this.prisma.$transaction([
+      this.prisma.setting.delete({ where: { companyId_key: { companyId, key } } }),
+    ]);
+    await this.auditService.record({
+      entityType: 'setting',
+      entityId: existing.id,
+      action: AuditAction.DELETE,
+      actor,
+      companyId,
+      oldValues: { key, value: existing.value },
+      newValues: { key, value: 'RESTORED_DEFAULT', defaultValue: def.defaultValue },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return { key, restored: true };
+  }
+
+  /** Registry (definitions only) — for the FE to know what exists. */
+  definitions(): SettingDefinition[] {
+    return SETTING_DEFINITIONS;
   }
 }

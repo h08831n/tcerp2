@@ -218,3 +218,38 @@ export function fetchSecurityAudit(
   params.set("pageSize", String(query.pageSize ?? 50));
   return apiJson<PaginatedResponse<SecurityAuditRow>>(`/audit?${params.toString()}`);
 }
+
+// ---------------------------------------------------------------------------
+// CORE-003 — settings center
+// ---------------------------------------------------------------------------
+
+export interface SettingCatalogEntry {
+  key: string;
+  category: string;
+  type: "number" | "string" | "boolean" | "select";
+  labelFa: string;
+  descriptionFa: string;
+  options: string[] | null;
+  consumer: string;
+  value: unknown;
+  isSecret: boolean;
+  isOverridden: boolean;
+  updatedAt: string | null;
+  updatedByName: string | null;
+  defaultValue: unknown;
+}
+
+export function fetchSettingsCatalog(): Promise<SettingCatalogEntry[]> {
+  return apiJson<SettingCatalogEntry[]>("/settings/catalog");
+}
+
+export function saveSetting(key: string, value: unknown): Promise<unknown> {
+  return apiJson(`/settings/catalog/${key}`, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  });
+}
+
+export function restoreSettingDefault(key: string): Promise<{ key: string; restored: boolean }> {
+  return apiJson(`/settings/catalog/${key}`, { method: "DELETE" });
+}

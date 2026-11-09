@@ -59,6 +59,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: "گزارش‌ها", href: "/reports", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
   { label: "ورود اطلاعات", href: "/imports", icon: <NavIcon d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16" /> },
   { label: "تنظیمات", href: "/settings", icon: <NavIcon d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 00-2-1.2L14.5 2h-5L9 4.5a7.4 7.4 0 00-2 1.2l-2.5-1-2 3.5L4.6 9.8a7.4 7.4 0 000 2.4L2.5 13.8l2 3.5 2.5-1a7.4 7.4 0 002 1.2L9.5 20h5l.4-2.5a7.4 7.4 0 002-1.2l2.5 1 2-3.5-2.1-1.6c.1-.4.1-.8.1-1.2z" /> },
+  // CORE-003 — مرکز جامع تنظیمات (typed registry; every entry has a real consumer)
+  { label: "مرکز تنظیمات", href: "/settings/center", icon: <NavIcon d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />, permission: "settings.view" },
   // IAM-001 §17 — کاربران و امنیت (each gated by its own view permission)
   { label: "مدیریت کاربران", href: "/settings/users", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />, permission: "users.view" },
   { label: "نقش‌ها و مجوزها", href: "/settings/roles", icon: <NavIcon d="M12 2l10 5v6c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V7l10-5zM9 12l2 2 4-4" />, permission: "roles.view" },
@@ -111,6 +113,7 @@ const TITLES: Record<string, string> = {
   "/reports": "گزارش‌های مدیریتی",
   "/imports": "ورود اطلاعات",
   "/settings": "تنظیمات",
+  "/settings/center": "مرکز تنظیمات",
   "/settings/users": "مدیریت کاربران",
   "/settings/roles": "نقش‌ها و مجوزها",
   "/settings/security-log": "تاریخچه امنیتی",
