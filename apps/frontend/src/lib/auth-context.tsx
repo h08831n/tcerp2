@@ -37,7 +37,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    setLoading(true);
+    // BUG (CORE-004): setLoading(true) here UNMOUNTED the entire app through
+    // the AuthGate spinner on EVERY refresh — the profile-save notice was
+    // lost on the remount. Loading gates ONLY the initial resolution; a
+    // re-fetch must update state in place without unmounting children.
     try {
       const response = await apiFetch("/auth/me");
       const data = (await response.json()) as {

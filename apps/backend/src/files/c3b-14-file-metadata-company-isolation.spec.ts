@@ -46,6 +46,9 @@ describe('c3b-14 file-metadata-company-isolation', () => {
     const blobs: Record<string, unknown>[] = [sharedBlob];
 
     const prisma = {
+      // CORE-003: upload() reads the company-scoped size setting;
+      // no override row → the 50MB infra default applies.
+      setting: { findUnique: jest.fn(async () => null) },
       fileBlob: {
         findUnique: jest.fn(async (args: { where: { id?: string; sha256?: string }; include?: unknown }) => {
           const blob = blobs.find(

@@ -37,6 +37,9 @@ describe('mini-08 file-blob-shared-filenames-isolated', () => {
   function makeMocks() {
     const attachments: Record<string, unknown>[] = [];
     const prisma = {
+      // CORE-003: upload() reads the company-scoped size setting;
+      // no override row → the 50MB infra default applies.
+      setting: { findUnique: jest.fn(async () => null) },
       fileBlob: {
         // The blob always "exists" — both companies uploaded identical bytes,
         // so the sha256 dedupe hits and no S3 call is ever made.

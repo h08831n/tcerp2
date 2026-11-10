@@ -118,6 +118,7 @@ const TITLES: Record<string, string> = {
   "/settings/users": "مدیریت کاربران",
   "/settings/roles": "نقش‌ها و مجوزها",
   "/settings/security-log": "تاریخچه امنیتی",
+  "/profile": "پروفایل من",
   "/settings/lost-reasons": "دلایل باخت",
   "/settings/payment-terms": "شرایط پرداخت",
   "/treasury": "خزانه",
@@ -359,9 +360,14 @@ function AppShell({ children }: { children: ReactNode }) {
                     aria-haspopup="menu"
                     aria-expanded={userMenuOpen}
                   >
-                    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-100 text-sm font-bold text-primary-700">
-                      {fullName.slice(0, 1) || "؟"}
-                    </span>
+                    {user.avatarUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={String(user.avatarUrl)} alt={fullName} className="h-8 w-8 rounded-full object-cover" />
+                    ) : (
+                      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-100 text-sm font-bold text-primary-700">
+                        {fullName.slice(0, 1) || "؟"}
+                      </span>
+                    )}
                     <span className="hidden text-right sm:block">
                       <span className="block max-w-40 truncate text-xs font-semibold text-slate-700">
                         {fullName}
@@ -403,6 +409,22 @@ function AppShell({ children }: { children: ReactNode }) {
                             {user.username}
                           </p>
                         </div>
+                        {/* CORE-004 §5 — account menu: profile, password, logout */}
+                        <Link
+                          href="/profile"
+                          role="menuitem"
+                          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                        >
+                          پروفایل من
+                        </Link>
+                        <Link
+                          href="/profile"
+                          role="menuitem"
+                          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                        >
+                          تنظیمات شخصی
+                        </Link>
+                        <div className="border-t border-slate-100" />
                         <button
                           type="button"
                           role="menuitem"

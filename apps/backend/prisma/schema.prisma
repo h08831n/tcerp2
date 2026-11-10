@@ -477,6 +477,8 @@ model User {
   firstName          String?    @map("first_name")
   lastName           String?    @map("last_name")
   mobile             String?
+  // CORE-004: self-service avatar (URL to an uploaded file or external image).
+  avatarUrl          String?    @map("avatar_url")
   status             UserStatus @default(ACTIVE)
   language           String     @default("fa")
   timezone           String     @default("Asia/Tehran")

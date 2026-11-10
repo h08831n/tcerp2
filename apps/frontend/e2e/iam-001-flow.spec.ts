@@ -86,7 +86,7 @@ test.describe.serial("IAM-001 owner flow", () => {
 
   test("S9-S12: the NEW user logs in, sees limited menus, gets 403 on forbidden APIs", async ({ page: p }) => {
     // Fresh context-less page in the same browser: log OUT first.
-    await page.getByRole("button", { name: /admin/ }).click();
+    await page.locator('header button[aria-haspopup="menu"]').click();
     await page.getByRole("menuitem", { name: "خروج" }).click();
     await page.waitForURL("**/login");
     await page.getByRole("textbox", { name: "نام کاربری" }).fill(newUsername);
@@ -153,7 +153,7 @@ test.describe.serial("IAM-001 owner flow", () => {
     await expect(page.getByRole("dialog", { name: /غیرفعال‌سازی کاربر/ })).toHaveCount(0);
 
     // Log the admin out, then try to log in as the DISABLED user → 403.
-    await page.getByRole("button", { name: /admin/ }).click();
+    await page.locator('header button[aria-haspopup="menu"]').click();
     await page.getByRole("menuitem", { name: "خروج" }).click();
     await page.waitForURL("**/login");
     await page.getByRole("textbox", { name: "نام کاربری" }).fill(newUsername);

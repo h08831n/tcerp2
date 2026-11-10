@@ -9,11 +9,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PermissionsService } from '../permissions/permissions.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
+import { BCRYPT_ROUNDS } from '../common/constants';
+import { normalizeIranMobile } from '../common/utils/phone';
 import { CompanyContextService } from '../companies/company-context.service';
 import {
   ForbiddenError,
   NotFoundError,
   UnauthorizedError,
+  ValidationError,
 } from '../common/errors';
 import { computeLockout, isLocked } from './lockout';
 
@@ -25,6 +28,7 @@ export interface RequestContext {
 export interface UserProfile {
   id: string;
   username: string;
+  avatarUrl?: string | null;
   email: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -309,11 +313,136 @@ export class AuthService {
       firstName: user.firstName,
       lastName: user.lastName,
       mobile: user.mobile,
+      avatarUrl: user.avatarUrl,
       status: user.status,
       language: user.language,
       timezone: user.timezone,
       mustChangePassword: user.mustChangePassword,
       lastLoginAt: user.lastLoginAt,
     };
+  }
+
+  // ── CORE-004: self-service profile & password ────────────────────────────
+
+  /**
+   * Self-profile update: ONLY the whitelisted self-service fields. Status,
+   * roles, company memberships and permissions are structurally unreachable
+   * here — privilege escalation by shape is impossible (no such columns in
+   * the update payload).
+   */
+  async updateOwnProfile(
+    userId: string,
+    dto: {
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+      mobile?: string;
+      language?: string;
+      timezone?: string;
+      avatarUrl?: string;
+    },
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    const data: Record<string, unknown> = {};
+    if (dto.firstName !== undefined) data.firstName = dto.firstName.trim() || null;
+    if (dto.lastName !== undefined) data.lastName = dto.lastName.trim() || null;
+    if (dto.email !== undefined) {
+      const email = dto.email.trim().toLowerCase() || null;
+      if (email && email !== user.email) {
+        const taken = await this.prisma.user.findFirst({
+          where: { email, id: { not: userId } },
+          select: { id: true },
+        });
+        if (taken) throw new ValidationError('Email already exists');
+      }
+      data.email = email;
+    }
+    if (dto.mobile !== undefined) {
+      data.mobile = dto.mobile === '' ? null : normalizeIranMobile(dto.mobile);
+    }
+    if (dto.language !== undefined) data.language = dto.language;
+    if (dto.timezone !== undefined) data.timezone = dto.timezone;
+    if (dto.avatarUrl !== undefined) data.avatarUrl = dto.avatarUrl.trim() || null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: userId }, data });
+      await this.auditService.recordTx(tx, {
+        entityType: 'user',
+        entityId: userId,
+        action: AuditAction.UPDATE,
+        actor,
+        oldValues: {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          mobile: user.mobile,
+          language: user.language,
+          timezone: user.timezone,
+          avatarUrl: user.avatarUrl,
+        },
+        newValues: data,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+    });
+  }
+
+  /**
+   * CORE-004 — self-service password change: requires the CURRENT password
+   * (re-authentication), applies the same hash policy as user creation, and
+   * audits WITHOUT ever storing the raw password. The current session stays
+   * alive; other refresh tokens are revoked (other devices must re-login).
+   */
+  async changeOwnPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+    currentRefreshHash?: string,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) {
+      throw new ValidationError('CURRENT_PASSWORD_INCORRECT');
+    }
+    if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      throw new ValidationError('NEW_PASSWORD_SAME_AS_CURRENT');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: { passwordHash, mustChangePassword: false },
+      });
+      // SECURITY: every OTHER active device is force-logged-out. The CURRENT
+      // browser session survives (the caller's access token + refresh cookie
+      // are untouched here) so the flow completes without re-login.
+      await tx.refreshToken.updateMany({
+        where: {
+          userId,
+          revokedAt: null,
+          ...(currentRefreshHash ? { tokenHash: { not: currentRefreshHash } } : {}),
+        },
+        data: { revokedAt: new Date() },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'user',
+        entityId: userId,
+        action: 'PASSWORD_CHANGED',
+        actor,
+        oldValues: undefined, // NEVER store password hashes in the audit
+        newValues: { passwordChanged: true },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+    });
   }
 }
