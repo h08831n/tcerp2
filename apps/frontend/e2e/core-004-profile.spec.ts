@@ -6,8 +6,10 @@ import { expect, test, type Page } from "@playwright/test";
  * NEVER changed by this suite. The test user is created via the users API
  * at the start and DELETED in cleanup; cleanup runs even when tests fail.
  *
- * 7 scenarios across 8 tests (S2+S3 share one test — see the report):
- *  S1  test user logs in (admin logs out)
+ * 8 scenarios = 8 serial tests (S1-S8). In the FIRST delivery the report
+ * listed 7 scenarios in 6 tests because the profile-edit + header-update
+ * scenario (S2+S3 there) was one test block; the avatar round added its
+ * own scenarios and every scenario now owns exactly one test.
  *  S2  /profile: identity header, read-only roles, NO escalation surface
  *  S3  profile edit → save → header updates WITHOUT re-login
  *  S4  avatar upload (real file → MinIO) → header shows the image IMMEDIATELY
