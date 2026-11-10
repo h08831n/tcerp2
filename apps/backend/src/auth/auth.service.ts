@@ -19,6 +19,8 @@ import {
   ValidationError,
 } from '../common/errors';
 import { computeLockout, isLocked } from './lockout';
+import { FilesService, UploadedFilePayload } from '../files/files.service';
+import { Readable } from 'node:stream';
 
 export interface RequestContext {
   ip?: string;
@@ -57,6 +59,7 @@ export class AuthService {
     private readonly permissionsService: PermissionsService,
     private readonly auditService: AuditService,
     private readonly companyContext: CompanyContextService,
+    private readonly filesService: FilesService,
     @Inject(CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -396,6 +399,11 @@ export class AuthService {
    * (re-authentication), applies the same hash policy as user creation, and
    * audits WITHOUT ever storing the raw password. The current session stays
    * alive; other refresh tokens are revoked (other devices must re-login).
+   *
+   * Rate limiting: wrong CURRENT-password attempts share the LOGIN lockout
+   * counter (failedLoginCount/lockedUntil, LOGIN_MAX_ATTEMPTS /
+   * LOGIN_LOCK_MINUTES) — brute-forcing the re-authentication prompt locks
+   * the account for login too, closing both vectors with one policy.
    */
   async changeOwnPassword(
     userId: string,
@@ -405,11 +413,29 @@ export class AuthService {
     ctx: RequestContext,
     currentRefreshHash?: string,
   ): Promise<void> {
+    const now = new Date();
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundError('User not found');
 
+    if (isLocked(user, now)) {
+      throw new ForbiddenError('Account is temporarily locked', {
+        lockedUntil: user.lockedUntil,
+      });
+    }
+
     const ok = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!ok) {
+      const failedLoginCount = user.failedLoginCount + 1;
+      const lockedUntil = computeLockout(
+        failedLoginCount,
+        this.config.LOGIN_MAX_ATTEMPTS,
+        this.config.LOGIN_LOCK_MINUTES,
+        now,
+      );
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { failedLoginCount, lockedUntil },
+      });
       throw new ValidationError('CURRENT_PASSWORD_INCORRECT');
     }
     if (await bcrypt.compare(newPassword, user.passwordHash)) {
@@ -420,7 +446,13 @@ export class AuthService {
     await this.prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: userId },
-        data: { passwordHash, mustChangePassword: false },
+        data: {
+          passwordHash,
+          mustChangePassword: false,
+          // Successful re-authentication clears the shared attempt counter.
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
       });
       // SECURITY: every OTHER active device is force-logged-out. The CURRENT
       // browser session survives (the caller's access token + refresh cookie
@@ -444,5 +476,120 @@ export class AuthService {
         userAgent: ctx.userAgent,
       });
     });
+  }
+
+  // ── CORE-004: avatar — real upload through the Files/MinIO infrastructure ─
+
+  /** The stable internal URL stored on the user row for an uploaded avatar. */
+  private avatarUrlFor(userId: string): string {
+    return `/api/auth/avatar/${userId}`;
+  }
+
+  /**
+   * Replace the user's avatar with an uploaded image. The bytes go through
+   * the SAME secure file infrastructure as every other upload (FilesService:
+   * sha256-deduped blob in MinIO + company-scoped attachment row); the user
+   * row stores only the stable /api/auth/avatar/:id URL — never a raw
+   * external URL the user could aim at arbitrary content. Image type and
+   * 2MB size are enforced here, on top of the Files module's own controls.
+   */
+  async setOwnAvatar(
+    userId: string,
+    file: UploadedFilePayload,
+    companyId: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<UserProfile> {
+    const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!ALLOWED_MIME.includes(file.mimetype)) {
+      throw new ValidationError('AVATAR_INVALID_TYPE', { allowed: ALLOWED_MIME });
+    }
+    const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+    if (file.buffer.byteLength > MAX_AVATAR_BYTES) {
+      throw new ValidationError('AVATAR_TOO_LARGE', { maxBytes: MAX_AVATAR_BYTES });
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    const { attachment } = await this.filesService.upload(
+      file,
+      { entityType: 'user_avatar', entityId: userId, displayName: 'avatar', category: 'avatar' },
+      companyId,
+      actor,
+      ctx,
+    );
+    // A replaced avatar must stop being served immediately: drop older
+    // avatar attachments (the blob itself stays — content-addressed/shared).
+    await this.filesService.deleteAvatarAttachments(userId, attachment.id);
+
+    const oldUrl = user.avatarUrl;
+    const avatarUrl = this.avatarUrlFor(userId);
+    await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl } });
+    await this.auditService.record({
+      entityType: 'user',
+      entityId: userId,
+      action: AuditAction.UPDATE,
+      actor,
+      oldValues: { avatarUrl: oldUrl },
+      newValues: { avatarUrl },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return this.me(userId);
+  }
+
+  /** Remove the avatar entirely (attachment rows deleted; user URL cleared). */
+  async clearOwnAvatar(
+    userId: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<UserProfile> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    await this.filesService.deleteAvatarAttachments(userId);
+    await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl: null } });
+    await this.auditService.record({
+      entityType: 'user',
+      entityId: userId,
+      action: AuditAction.UPDATE,
+      actor,
+      oldValues: { avatarUrl: user.avatarUrl },
+      newValues: { avatarUrl: null },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return this.me(userId);
+  }
+
+  /**
+   * Resolve the avatar bytes for the authenticated avatar-serving route.
+   * Returns null when the user has no INTERNAL avatar (external URL or
+   * none) — the route 404s and the FE falls back to the external URL or the
+   * initial-letter block. The lookup is pinned to entityType='user_avatar'.
+   */
+  async resolveAvatar(
+    userId: string,
+  ): Promise<{ stream: Readable; contentType: string; size: number; etag: string } | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { avatarUrl: true },
+    });
+    if (!user || !user.avatarUrl || !user.avatarUrl.startsWith('/api/auth/avatar/')) {
+      return null;
+    }
+    const attachment = await this.prisma.fileAttachment.findFirst({
+      where: { entityType: 'user_avatar', entityId: userId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, fileBlob: { select: { sha256: true } } },
+    });
+    if (!attachment) return null;
+    const res = await this.filesService.streamUserAvatar(attachment.id);
+    return {
+      stream: res.stream,
+      contentType: res.contentType,
+      size: res.size,
+      etag: attachment.fileBlob.sha256,
+    };
   }
 }

@@ -9,11 +9,11 @@
  * separate secure form (current password re-authentication).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { apiJson, apiFetch } from "@/lib/api";
+import { apiJson, apiFetch, apiOriginUrl } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { faDigits } from "@/lib/format";
 
@@ -45,6 +45,70 @@ export default function ProfilePage() {
   const [pwError, setPwError] = useState<string | null>(null);
   const [pwNotice, setPwNotice] = useState<string | null>(null);
   const [pwSaving, setPwSaving] = useState(false);
+
+  // avatar upload/replace/remove (real Files/MinIO backend: POST /auth/avatar)
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [avatarV, setAvatarV] = useState(0); // preview cache-buster
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+
+  // Internal avatar paths (/api/auth/avatar/:id) must hit the API origin;
+  // external http(s) URLs render as-is.
+  const avatarSrc = form.avatarUrl
+    ? form.avatarUrl.startsWith("/")
+      ? `${apiOriginUrl(form.avatarUrl)}?v=${avatarV}`
+      : form.avatarUrl
+    : null;
+
+  function avatarErrorMessage(msg: string): string {
+    if (msg.includes("AVATAR_TOO_LARGE")) return "حجم تصویر حداکثر ۲ مگابایت است.";
+    if (msg.includes("AVATAR_INVALID_TYPE")) return "فقط تصویر PNG، JPEG یا WebP مجاز است.";
+    return msg;
+  }
+
+  async function handleAvatarFile(file: File) {
+    setAvatarError(null);
+    setProfileNotice(null);
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setAvatarError("فقط تصویر PNG، JPEG یا WebP مجاز است.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setAvatarError("حجم تصویر حداکثر ۲ مگابایت است.");
+      return;
+    }
+    setAvatarBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await apiFetch("/auth/avatar", { method: "POST", body: fd });
+      const data = (await res.json()) as { avatarUrl?: string };
+      setForm((f) => ({ ...f, avatarUrl: data.avatarUrl ?? "" }));
+      setAvatarV((v) => v + 1);
+      await refresh(); // Header updates IMMEDIATELY (no re-login)
+      setProfileNotice("تصویر پروفایل به‌روزرسانی شد و در Header نمایش داده شد.");
+    } catch (err) {
+      setAvatarError(avatarErrorMessage(err instanceof Error ? err.message : "خطا در بارگذاری تصویر"));
+    } finally {
+      setAvatarBusy(false);
+    }
+  }
+
+  async function handleAvatarRemove() {
+    setAvatarError(null);
+    setProfileNotice(null);
+    setAvatarBusy(true);
+    try {
+      await apiFetch("/auth/avatar", { method: "DELETE" });
+      setForm((f) => ({ ...f, avatarUrl: "" }));
+      await refresh();
+      setProfileNotice("تصویر پروفایل حذف شد.");
+    } catch (err) {
+      setAvatarError(avatarErrorMessage(err instanceof Error ? err.message : "خطا در حذف تصویر"));
+    } finally {
+      setAvatarBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -158,13 +222,62 @@ export default function ProfilePage() {
 
   if (loading) return <p className="text-sm text-slate-400">در حال بارگذاری…</p>;
 
-  const avatarBlock = form.avatarUrl ? (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src={form.avatarUrl} alt="آواتار" className="h-16 w-16 rounded-full object-cover" />
-  ) : (
-    <span className="flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 text-xl font-bold text-primary-700">
-      {(user?.username ?? "?").slice(0, 1).toUpperCase()}
-    </span>
+  const avatarBlock = (
+    <div className="flex flex-col items-center gap-2">
+      <div className="relative">
+        {avatarSrc ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={avatarSrc} alt="آواتار" className="h-16 w-16 rounded-full object-cover" />
+        ) : (
+          <span className="flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 text-xl font-bold text-primary-700">
+            {(user?.username ?? "?").slice(0, 1).toUpperCase()}
+          </span>
+        )}
+        {avatarBusy && (
+          <span className="absolute inset-0 flex items-center justify-center rounded-full bg-white/70 text-[10px] text-slate-600">
+            …
+          </span>
+        )}
+      </div>
+      <div className="flex gap-1">
+        <button
+          type="button"
+          data-testid="avatar-change"
+          disabled={avatarBusy}
+          onClick={() => avatarInputRef.current?.click()}
+          className="rounded border border-slate-300 px-2 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+        >
+          {form.avatarUrl ? "تعویض تصویر" : "بارگذاری تصویر"}
+        </button>
+        {form.avatarUrl && (
+          <button
+            type="button"
+            data-testid="avatar-remove"
+            disabled={avatarBusy}
+            onClick={() => void handleAvatarRemove()}
+            className="rounded border border-red-200 px-2 py-0.5 text-[10px] text-red-600 hover:bg-red-50 disabled:opacity-50"
+          >
+            حذف
+          </button>
+        )}
+      </div>
+      <input
+        ref={avatarInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = ""; // allow re-picking the same file
+          if (file) void handleAvatarFile(file);
+        }}
+      />
+      {avatarError && (
+        <div role="alert" data-testid="avatar-error" className="max-w-48 text-center text-[10px] text-red-600">
+          {avatarError}
+        </div>
+      )}
+    </div>
   );
 
   return (

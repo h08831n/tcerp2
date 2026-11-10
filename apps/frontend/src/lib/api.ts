@@ -1,6 +1,15 @@
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api";
 
+/**
+ * Absolute URL for a backend-served path (e.g. `/api/auth/avatar/:id`).
+ * Avatar/img tags hit the API origin directly — cookies ride along
+ * (same-site), so the authenticated avatar route works from <img>.
+ */
+export function apiOriginUrl(path: string): string {
+  return `${new URL(API_BASE_URL).origin}${path}`;
+}
+
 export class ApiError extends Error {
   status: number;
 

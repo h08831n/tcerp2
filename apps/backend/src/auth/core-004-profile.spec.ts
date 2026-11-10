@@ -174,6 +174,41 @@ describeIntegration('core-004 profile & password (real AppModule over HTTP)', ()
     }
   });
 
+  it('escalation: the FULL non-whitelisted payload (roleIds/status/companyId/permissions/version) → 400 and the DB is untouched', async () => {
+    const before = await prisma.user.findUniqueOrThrow({ where: { id: tracked.users[0] } });
+    const beforeRoles = await prisma.userCompanyRole.count({ where: { userId: before.id } });
+
+    // main.ts wires forbidNonWhitelisted: true globally — the production
+    // contract for ANY unknown key is an explicit 400, not a silent drop.
+    const res = await api('PATCH', '/api/auth/profile', state.adminToken, {
+      status: 'DISABLED',
+      roleIds: ['admin'],
+      companyId: '00000000-0000-4000-8000-000000000009',
+      permissions: ['*'],
+      version: 999999,
+      passwordHash: 'attacker-hash',
+    });
+    expect(res.status).toBe(400);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: tracked.users[0] } });
+    expect(after.status).toBe(before.status);
+    expect(after.version).toBe(before.version);
+    expect(after.passwordHash).toBe(before.passwordHash);
+    expect(await prisma.userCompanyRole.count({ where: { userId: before.id } })).toBe(beforeRoles);
+  });
+
+  it('profile validation: malformed mobile → 422; malformed email → 400', async () => {
+    const badMobile = await api('PATCH', '/api/auth/profile', state.adminToken, {
+      mobile: '12345',
+    });
+    expect(badMobile.status).toBe(422); // normalizeIranMobile ValidationError
+
+    const badEmail = await api('PATCH', '/api/auth/profile', state.adminToken, {
+      email: 'not-an-email',
+    });
+    expect(badEmail.status).toBe(400); // @IsEmail on the DTO
+  });
+
   it('email uniqueness: another user is refused on duplicate email', async () => {
     const other = await prisma.user.create({
       data: {
@@ -247,5 +282,136 @@ describeIntegration('core-004 profile & password (real AppModule over HTTP)', ()
     });
     expect(audits.length).toBe(1);
     expect(JSON.stringify(audits[0].newValues)).not.toMatch(/passwordHash|Brand-New/i);
+  });
+
+  it('access tokens: a pre-change access token stays valid until its 15m expiry (DOCUMENTED stateless window)', async () => {
+    // state.adminToken was minted at login, BEFORE the password change above.
+    // Access JWTs are stateless and the guard re-checks STATUS (not token
+    // version), so the previous token keeps working for at most 15 minutes;
+    // the dead refresh token prevents any renewal beyond that. This test
+    // PINS that policy so a future hardening (tokenVersion) flips it loudly.
+    const res = await api('GET', '/api/auth/me', state.adminToken);
+    expect(res.status).toBe(200);
+  });
+
+  // ── CORE-004 avatar: real upload through the Files/MinIO infrastructure ──
+
+  const PNG_1 = Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082',
+    'hex',
+  );
+  const PNG_2 = Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6260000000020001b9fda9270000000049454e44ae426082',
+    'hex',
+  );
+
+  async function uploadAvatar(token: string, bytes: Buffer, mime = 'image/png') {
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: mime }), 'avatar.png');
+    return fetch(`${baseUrl}/api/auth/avatar`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'x-company-id': state.companyId },
+      body: form,
+    });
+  }
+
+  it('avatar: upload → served from MinIO through the authenticated route', async () => {
+    const res = await uploadAvatar(state.adminToken, PNG_1);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { avatarUrl?: string };
+    expect(body.avatarUrl).toBe(`/api/auth/avatar/${tracked.users[0]}`);
+
+    const served = await fetch(`${baseUrl}/api/auth/avatar/${tracked.users[0]}`, {
+      headers: { Authorization: `Bearer ${state.adminToken}` },
+    });
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-type')).toBe('image/png');
+    const bytes = Buffer.from(await served.arrayBuffer());
+    expect(bytes.equals(PNG_1)).toBe(true);
+
+    // Unauthenticated byte access is refused.
+    const anon = await fetch(`${baseUrl}/api/auth/avatar/${tracked.users[0]}`);
+    expect(anon.status).toBe(401);
+  });
+
+  it('avatar: replace drops the OLD image; remove stops serving', async () => {
+    const replace = await uploadAvatar(state.adminToken, PNG_2);
+    expect(replace.status).toBe(200);
+
+    const served = await fetch(`${baseUrl}/api/auth/avatar/${tracked.users[0]}`, {
+      headers: { Authorization: `Bearer ${state.adminToken}` },
+    });
+    const bytes = Buffer.from(await served.arrayBuffer());
+    expect(bytes.equals(PNG_2)).toBe(true);
+    expect(bytes.equals(PNG_1)).toBe(false);
+    // Exactly ONE avatar attachment remains (old one deleted, blob deduped).
+    expect(
+      await prisma.fileAttachment.count({
+        where: { entityType: 'user_avatar', entityId: tracked.users[0] },
+      }),
+    ).toBe(1);
+
+    const remove = await api('DELETE', '/api/auth/avatar', state.adminToken);
+    expect(remove.status).toBe(200);
+    expect(
+      await prisma.fileAttachment.count({
+        where: { entityType: 'user_avatar', entityId: tracked.users[0] },
+      }),
+    ).toBe(0);
+    const gone = await fetch(`${baseUrl}/api/auth/avatar/${tracked.users[0]}`, {
+      headers: { Authorization: `Bearer ${state.adminToken}` },
+    });
+    expect(gone.status).toBe(404);
+  });
+
+  it('avatar: non-image and oversized uploads are refused', async () => {
+    const badType = await uploadAvatar(state.adminToken, Buffer.from('not an image'), 'text/plain');
+    expect([400, 422]).toContain(badType.status); // multer filter / service guard
+
+    const tooBig = await uploadAvatar(
+      state.adminToken,
+      Buffer.alloc(2 * 1024 * 1024 + 1, 7),
+      'image/png',
+    );
+    expect([400, 413]).toContain(tooBig.status); // multer 2MB hard cap
+  });
+
+  it('rate limit: 5 wrong current-password attempts LOCK the account (login included)', async () => {
+    const userId = tracked.users[0];
+    // The password is 'Brand-New-Passw0rd!1' at this point; attack the
+    // re-authentication prompt with wrong current passwords.
+    for (let i = 0; i < 5; i++) {
+      const res = await api('POST', '/api/auth/change-password', state.adminToken, {
+        currentPassword: `wrong-attempt-${i}`,
+        newPassword: 'Whatever-Passw0rd!9',
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.message).toBe('CURRENT_PASSWORD_INCORRECT');
+    }
+    const row = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(row.failedLoginCount).toBe(5);
+    expect(row.lockedUntil).not.toBeNull();
+
+    // The 6th attempt (and LOGIN, even with the CORRECT password) is locked.
+    const sixth = await api('POST', '/api/auth/change-password', state.adminToken, {
+      currentPassword: 'wrong-again',
+      newPassword: 'Whatever-Passw0rd!9',
+    });
+    expect(sixth.status).toBe(403);
+    const loginWhileLocked = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: `core4-admin-${state.marker}`,
+        password: 'Brand-New-Passw0rd!1',
+      }),
+    });
+    expect(loginWhileLocked.status).toBe(403);
+
+    // Cleanup: unlock so afterAll teardown (and any later suite) is clean.
+    await prisma.user.update({
+      where: { id: userId },
+      data: { failedLoginCount: 0, lockedUntil: null },
+    });
   });
 });

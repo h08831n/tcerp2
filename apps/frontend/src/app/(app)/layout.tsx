@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
+import { apiOriginUrl } from "@/lib/api";
 
 interface NavItem {
   label: string;
@@ -168,7 +169,14 @@ function AuthGate({ children }: { children: ReactNode }) {
 function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout, permissions } = useAuth();
+  const { user, logout, permissions, avatarBust } = useAuth();
+
+  // CORE-004: an internal avatar path (/api/auth/avatar/:id) must hit the
+  // API origin; the bust makes an uploaded/replaced image appear in the
+  // header IMMEDIATELY (no re-login, no 60s cache window).
+  const avatarSrc = user?.avatarUrl
+    ? `${String(user.avatarUrl).startsWith("/") ? apiOriginUrl(String(user.avatarUrl)) : String(user.avatarUrl)}${String(user.avatarUrl).startsWith("/") ? `?v=${avatarBust}` : ""}`
+    : null;
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -360,9 +368,9 @@ function AppShell({ children }: { children: ReactNode }) {
                     aria-haspopup="menu"
                     aria-expanded={userMenuOpen}
                   >
-                    {user.avatarUrl ? (
+                    {avatarSrc ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={String(user.avatarUrl)} alt={fullName} className="h-8 w-8 rounded-full object-cover" />
+                      <img src={avatarSrc} alt={fullName} className="h-8 w-8 rounded-full object-cover" />
                     ) : (
                       <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-100 text-sm font-bold text-primary-700">
                         {fullName.slice(0, 1) || "؟"}

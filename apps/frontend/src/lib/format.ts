@@ -7,8 +7,35 @@
 const FA_DIGITS = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"];
 
 /** Converts latin digits in a string/number to Persian digits. */
+// ── CORE-004: the signed-in user's display preferences (profile page) ──
+// Applied globally by auth-context on every /auth/me resolution. REAL
+// consumers: `language` switches Persian→Latin digit rendering app-wide,
+// `timezone` drives the wall-clock (HH:mm) part of jalaliDateTime —
+// deterministic across devices instead of trusting the browser's zone.
+let displayLanguage: "fa" | "en" = "fa";
+let displayTimezone = "Asia/Tehran";
+
+export function setDisplayPreferences(prefs: {
+  language?: string | null;
+  timezone?: string | null;
+}): void {
+  if (prefs.language === "en" || prefs.language === "fa") displayLanguage = prefs.language;
+  if (prefs.timezone && prefs.timezone.trim()) displayTimezone = prefs.timezone.trim();
+}
+
+export function getDisplayLanguage(): "fa" | "en" {
+  return displayLanguage;
+}
+
+export function getDisplayTimezone(): string {
+  return displayTimezone;
+}
+
 export function faDigits(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return "";
+  // CORE-004: language 'en' keeps Latin digits (real consumer of the
+  // profile language preference).
+  if (displayLanguage === "en") return String(value);
   return String(value).replace(/[0-9]/g, (d) => FA_DIGITS[Number(d)]);
 }
 
@@ -123,13 +150,26 @@ export function jalali(iso: string | Date | null | undefined): string {
   return faDigits(`${jy}/${pad2(jm)}/${pad2(jd)}`);
 }
 
-/** Formats an ISO datetime as Jalali date + local HH:mm, e.g. ۱۴۰۳/۰۷/۱۴ ۰۹:۳۰. */
+/** Formats an ISO datetime as Jalali date + wall-clock HH:mm, e.g. ۱۴۰۳/۰۷/۱۴ ۰۹:۳۰. */
 export function jalaliDateTime(iso: string | Date | null | undefined): string {
   if (!iso) return "—";
   const date = iso instanceof Date ? iso : new Date(iso);
   if (Number.isNaN(date.getTime())) return jalali(iso instanceof Date ? undefined : iso);
-  const time = `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-  return `${jalali(date instanceof Date ? date : iso)} ${faDigits(time)}`;
+  return `${jalali(date instanceof Date ? date : iso)} ${faDigits(wallClock(date))}`;
+}
+
+/** HH:mm rendered in the user's profile timezone (fallback: device zone). */
+function wallClock(date: Date): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: displayTimezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(date);
+  } catch {
+    return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  }
 }
 
 /** Latin-digit Jalali date string (yyyy/mm/dd) from an ISO value; for inputs. */
