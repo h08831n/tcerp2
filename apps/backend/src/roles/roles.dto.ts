@@ -23,10 +23,12 @@ export class CreateRoleDto {
   @MaxLength(128)
   nameFa: string;
 
+  // IAM-001: optional — the UI collects it; absent = reuse the Persian name.
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(128)
-  nameEn: string;
+  nameEn?: string;
 
   @IsOptional()
   @IsBoolean()
@@ -45,6 +47,11 @@ export class UpdateRoleDto {
   @MinLength(1)
   @MaxLength(128)
   nameEn?: string;
+
+  /** IAM-001: deactivate a role — an inactive role grants NO permissions. */
+  @IsOptional()
+  @IsBoolean()
+  active?: boolean;
 }
 
 export class SetRolePermissionsDto {

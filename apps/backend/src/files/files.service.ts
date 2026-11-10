@@ -109,6 +109,23 @@ export class FilesService {
       throw new ValidationError('entityType and entityId are required');
     }
 
+    // CORE-003 — company-scoped upload-size setting (registry key
+    // files.max_upload_mb; infra hard cap 50MB stays in the multer layer).
+    const sizeSetting = await this.prisma.setting.findUnique({
+      where: { companyId_key: { companyId, key: 'files.max_upload_mb' } },
+      select: { value: true },
+    });
+    const maxMbRaw = sizeSetting?.value;
+    const maxMb =
+      typeof maxMbRaw === 'number' && maxMbRaw > 0
+        ? maxMbRaw
+        : typeof maxMbRaw === 'string' && /^\d+$/.test(maxMbRaw)
+          ? parseInt(maxMbRaw, 10)
+          : 50;
+    if (file.buffer.byteLength > maxMb * 1024 * 1024) {
+      throw new ValidationError('FILE_TOO_LARGE', { maxMb, actualBytes: file.buffer.byteLength });
+    }
+
     const sha256 = createHash('sha256').update(file.buffer).digest('hex');
     let blob = await this.prisma.fileBlob.findUnique({ where: { sha256 } });
 
@@ -365,6 +382,48 @@ export class FilesService {
       filename: attachment.originalFilename,
       size: Number(blob.size),
     };
+  }
+
+  /**
+   * CORE-004 — stream a user-avatar attachment. Unlike downloadAttachment
+   * this is NOT company-filtered: avatars are global user identity rendered
+   * in the header for every authenticated viewer. The route is still
+   * authenticated (JwtAuthGuard) and the WHERE clause locks the lookup to
+   * entityType='user_avatar' — an arbitrary attachment id can never be
+   * pulled through this method.
+   */
+  async streamUserAvatar(attachmentId: string): Promise<DownloadResult> {
+    const attachment = await this.prisma.fileAttachment.findFirst({
+      where: { id: attachmentId, entityType: 'user_avatar' },
+      include: { fileBlob: true },
+    });
+    if (!attachment) throw new NotFoundError('Avatar not found', { id: attachmentId });
+    const blob = attachment.fileBlob;
+    const result = await this.s3.send(
+      new GetObjectCommand({ Bucket: this.config.S3_BUCKET, Key: blob.storageKey }),
+    );
+    return {
+      stream: result.Body as unknown as Readable,
+      contentType: result.ContentType ?? blob.mimeType,
+      filename: 'avatar',
+      size: Number(blob.size),
+    };
+  }
+
+  /**
+   * CORE-004 — delete the avatar attachments of a user (old replacements and
+   * explicit removal). Only entityType='user_avatar' rows are touched; the
+   * content-addressed blob stays (it may be shared by other attachments).
+   */
+  async deleteAvatarAttachments(userId: string, keepAttachmentId?: string): Promise<number> {
+    const res = await this.prisma.fileAttachment.deleteMany({
+      where: {
+        entityType: 'user_avatar',
+        entityId: userId,
+        ...(keepAttachmentId ? { id: { not: keepAttachmentId } } : {}),
+      },
+    });
+    return res.count;
   }
 
   /** HeadBucket → CreateBucket once, lazily (MinIO may start empty). */

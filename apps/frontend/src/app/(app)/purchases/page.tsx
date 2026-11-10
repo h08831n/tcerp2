@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { fetchParty } from "@/lib/party";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EntitySelector, type EntityOption } from "@/components/ui/entity-selector";
@@ -42,6 +44,8 @@ export default function PurchasesPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<PurchaseStatus | "">("");
   const [supplier, setSupplier] = useState<EntityOption | null>(null);
+  // CR-001 R2 §6: deep-link from the Party Smart Buttons (?supplierPartyId).
+  const supplierPartyParam = useSearchParams().get("supplierPartyId") ?? "";
   const [buyer, setBuyer] = useState<EntityOption | null>(null);
   const [page, setPage] = useState(1);
 
@@ -75,7 +79,20 @@ export default function PurchasesPage() {
     [page, search, status, supplier, buyer],
   );
 
-  const load = useCallback(() => {
+    useEffect(() => {
+    if (!supplierPartyParam) return;
+    let cancelled = false;
+    fetchParty(supplierPartyParam)
+      .then((p) => {
+        if (!cancelled) setSupplier({ id: p.id, label: p.nameFa });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [supplierPartyParam]);
+
+const load = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);

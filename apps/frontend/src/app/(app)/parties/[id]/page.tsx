@@ -19,6 +19,9 @@ import { ScoreTab } from "@/components/parties/score-tab";
 import { FinancialTab } from "@/components/parties/financial-tab";
 import { PartyTimelineSidebar } from "@/components/parties/party-timeline-sidebar";
 import { RoleBadge, ScoreBadge, StatusBadge, TypeBadge } from "@/components/parties/badges";
+import { PartyCrmChips } from "@/components/parties/party-crm-chips";
+import { PartySmartButtons } from "@/components/parties/party-smart-buttons";
+import { CrmActivitiesPanel } from "@/components/crm/crm-activities-panel";
 import { faDigits, jalali } from "@/lib/format";
 import {
   archiveParty,
@@ -31,6 +34,7 @@ import {
 
 const TABS = [
   { key: "general", label: "عمومی" },
+  { key: "activities", label: "فعالیت‌ها" },
   { key: "phones", label: "تلفن‌ها" },
   { key: "roles", label: "نقش‌ها" },
   { key: "contacts", label: "آشنایان" },
@@ -171,6 +175,9 @@ export default function PartyDetailPage() {
                   <RoleBadge key={entry.role} role={entry.role} />
                 ))}
               </div>
+              {/* CR-001 §8 + R2 §6: status chips + Odoo-style Smart Buttons */}
+              <PartyCrmChips partyId={party.id} roles={party.roles} refreshToken={party.version} />
+              <PartySmartButtons partyId={party.id} refreshToken={party.version} />
             </div>
             <div className="flex items-center gap-2">
               <Link href="/parties" tabIndex={-1}>
@@ -239,6 +246,9 @@ export default function PartyDetailPage() {
             {activeTab === "roles" && <RolesTab party={party} onChanged={onChanged} />}
             {activeTab === "contacts" && <ContactsTab party={party} onChanged={onChanged} />}
             {activeTab === "addresses" && <AddressesTab party={party} onChanged={onChanged} />}
+            {activeTab === "activities" && (
+              <CrmActivitiesPanel relatedEntityType="party" relatedEntityId={party.id} refreshToken={party.version} />
+            )}
             {activeTab === "score" && <ScoreTab party={party} onChanged={onChanged} />}
             {activeTab === "financial" && <FinancialTab party={party} />}
             {activeTab === "files" && (

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { faDigits, jalaliDateTime } from "@/lib/format";
 import {
   decideOfferOutcome,
@@ -396,11 +397,11 @@ export default function ReportsPage() {
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-xs text-slate-600">
               از
-              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="ms-1 w-36" />
+              <DatePicker value={from || null} onChange={(iso) => setFrom(iso ?? "")} className="ms-1 w-36" />
             </label>
             <label className="text-xs text-slate-600">
               تا
-              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="ms-1 w-36" />
+              <DatePicker value={to || null} onChange={(iso) => setTo(iso ?? "")} className="ms-1 w-36" />
             </label>
             <Button size="sm" variant="secondary" onClick={() => void loadStock()}>
               اعمال

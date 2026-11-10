@@ -98,6 +98,14 @@ export class PartiesController {
     return this.partiesService.list(companyId, actorScope, query);
   }
 
+  /** CR-001 R2 §6 — Smart Buttons counts (REAL aggregates, company-scoped). */
+  @Get(':id/smart-counts')
+  @RequirePermissions('parties.view')
+  async smartCounts(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.partiesService.smartCounts(companyId, id);
+  }
+
   @Get(':id')
   @RequirePermissions('parties.view')
   async getById(

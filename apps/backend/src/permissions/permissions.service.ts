@@ -63,7 +63,9 @@ export class PermissionsService {
     const [rolePermissions, overrides] = await Promise.all([
       roleIds.length
         ? this.prisma.rolePermission.findMany({
-            where: { roleId: { in: roleIds } },
+            // IAM-001 S11: an INACTIVE role grants NOTHING - its links stay
+            // intact for re-activation but contribute no effective codes.
+            where: { roleId: { in: roleIds }, role: { active: true } },
             select: { permission: { select: { code: true } } },
           })
         : Promise.resolve([]),

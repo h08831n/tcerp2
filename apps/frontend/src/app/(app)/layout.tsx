@@ -4,11 +4,15 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
+import { apiOriginUrl } from "@/lib/api";
 
 interface NavItem {
   label: string;
   href: string;
   icon: ReactNode;
+  /** CR-001: when set, the item renders ONLY for users holding this
+   * permission (the backend stays the enforcement point either way). */
+  permission?: string;
 }
 
 function NavIcon({ d }: { d: string }) {
@@ -31,6 +35,11 @@ function NavIcon({ d }: { d: string }) {
 const NAV_ITEMS: NavItem[] = [
   { label: "داشبورد", href: "/dashboard", icon: <NavIcon d="M3 12h4l2-7 4 14 2-7h6" /> },
   { label: "مشتریان و تامین‌کنندگان", href: "/parties", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM21 21v-2a4 4 0 00-3-3.87M15 3.13a4 4 0 010 7.75" /> },
+  // CR-001: CRM pipeline — سرنخ‌ها + فرصت‌های فروش (gated by crm.view)
+  { label: "سرنخ‌ها (CRM)", href: "/crm/leads", icon: <NavIcon d="M12 19l7-7 3 3-7 7-3-3zM18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5zM2 2l7.586 7.586M11 11a2 2 0 100-4 2 2 0 000 4z" />, permission: "crm.view" },
+  // CR-001 R2 §1: the Opportunity stage was REMOVED from the operational
+  // flow — no menu item, no Kanban, no convert button. Existing opportunity
+  // DATA stays in the database untouched.
   { label: "محصولات", href: "/products", icon: <NavIcon d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16zM3.3 7L12 12l8.7-5M12 22V12" /> },
   { label: "فروش", href: "/sales", icon: <NavIcon d="M12 8c-1.66 0-3 .9-3 2s1.34 2 3 2 3 .9 3 2-1.34 2-3 2m0-8V7m0 10v1m9-6a9 9 0 11-18 0 9 9 0 0118 0z" /> },
   { label: "خرید", href: "/purchases", icon: <NavIcon d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4H6zM3 6h18M16 10a4 4 0 01-8 0" /> },
@@ -50,7 +59,15 @@ const NAV_ITEMS: NavItem[] = [
   { label: "اعلان‌ها", href: "/notifications", icon: <NavIcon d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0" /> },
   { label: "گزارش‌ها", href: "/reports", icon: <NavIcon d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /> },
   { label: "ورود اطلاعات", href: "/imports", icon: <NavIcon d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16" /> },
-  { label: "تنظیمات", href: "/settings", icon: <NavIcon d="M12 15a3 3 0 100-6 3 3 0 000 6zm7.4-3a7.4 7.4 0 00-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 00-2-1.2L14.5 2h-5L9 4.5a7.4 7.4 0 00-2 1.2l-2.5-1-2 3.5L4.6 9.8a7.4 7.4 0 000 2.4L2.5 13.8l2 3.5 2.5-1a7.4 7.4 0 002 1.2L9.5 20h5l.4-2.5a7.4 7.4 0 002-1.2l2.5 1 2-3.5-2.1-1.6c.1-.4.1-.8.1-1.2z" /> },
+  // CORE-003 — مرکز جامع تنظیمات (typed registry; every entry has a real consumer)
+  { label: "مرکز تنظیمات", href: "/settings/center", icon: <NavIcon d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />, permission: "settings.view" },
+  // IAM-001 §17 — کاربران و امنیت (each gated by its own view permission)
+  { label: "مدیریت کاربران", href: "/settings/users", icon: <NavIcon d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />, permission: "users.view" },
+  { label: "نقش‌ها و مجوزها", href: "/settings/roles", icon: <NavIcon d="M12 2l10 5v6c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V7l10-5zM9 12l2 2 4-4" />, permission: "roles.view" },
+  { label: "تاریخچه امنیتی", href: "/settings/security-log", icon: <NavIcon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zM14 2v6h6M16 13H8M16 17H8M10 9H8" />, permission: "audit.view" },
+  // CORE-003 — داده‌های مرجع (each gated by its own view permission)
+  { label: "دلایل باخت", href: "/settings/lost-reasons", icon: <NavIcon d="M6 2l-3 6 3 6v8h18v-8l-3-6 3-6H6zM4 8h16" />, permission: "crm.view" },
+  { label: "شرایط پرداخت", href: "/settings/payment-terms", icon: <NavIcon d="M3 6h18v12H3zM3 10h18M7 15h4" />, permission: "crm.view" },
 ];
 
 const TITLES: Record<string, string> = {
@@ -98,7 +115,13 @@ const TITLES: Record<string, string> = {
   "/notifications": "مرکز اعلان‌ها",
   "/reports": "گزارش‌های مدیریتی",
   "/imports": "ورود اطلاعات",
-  "/settings": "تنظیمات",
+  "/settings/center": "مرکز تنظیمات",
+  "/settings/users": "مدیریت کاربران",
+  "/settings/roles": "نقش‌ها و مجوزها",
+  "/settings/security-log": "تاریخچه امنیتی",
+  "/profile": "پروفایل من",
+  "/settings/lost-reasons": "دلایل باخت",
+  "/settings/payment-terms": "شرایط پرداخت",
   "/treasury": "خزانه",
 };
 
@@ -146,10 +169,25 @@ function AuthGate({ children }: { children: ReactNode }) {
 function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, logout } = useAuth();
+  const { user, logout, permissions, avatarBust } = useAuth();
+
+  // CORE-004: an internal avatar path (/api/auth/avatar/:id) must hit the
+  // API origin; the bust makes an uploaded/replaced image appear in the
+  // header IMMEDIATELY (no re-login, no 60s cache window).
+  const avatarSrc = user?.avatarUrl
+    ? `${String(user.avatarUrl).startsWith("/") ? apiOriginUrl(String(user.avatarUrl)) : String(user.avatarUrl)}${String(user.avatarUrl).startsWith("/") ? `?v=${avatarBust}` : ""}`
+    : null;
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+
+  // CR-001: permission-gated nav — items with a `permission` render only for
+  // users holding it (a crm.view-less user never sees CRM links; the backend
+  // guards stay authoritative).
+  const visibleNavItems = useMemo(
+    () => NAV_ITEMS.filter((item) => !item.permission || permissions.includes(item.permission)),
+    [permissions],
+  );
 
   const pageTitle = useMemo(() => {
     if (pathname && TITLES[pathname]) return TITLES[pathname];
@@ -206,7 +244,7 @@ function AppShell({ children }: { children: ReactNode }) {
 
           <nav className="flex-1 overflow-y-auto px-2 py-3">
             <ul className="space-y-0.5">
-              {NAV_ITEMS.map((item) => {
+              {visibleNavItems.map((item) => {
                 const isActive =
                   item.href !== "#" &&
                   (pathname === item.href || pathname.startsWith(`${item.href}/`));
@@ -330,9 +368,14 @@ function AppShell({ children }: { children: ReactNode }) {
                     aria-haspopup="menu"
                     aria-expanded={userMenuOpen}
                   >
-                    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-100 text-sm font-bold text-primary-700">
-                      {fullName.slice(0, 1) || "؟"}
-                    </span>
+                    {avatarSrc ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={avatarSrc} alt={fullName} className="h-8 w-8 rounded-full object-cover" />
+                    ) : (
+                      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-100 text-sm font-bold text-primary-700">
+                        {fullName.slice(0, 1) || "؟"}
+                      </span>
+                    )}
                     <span className="hidden text-right sm:block">
                       <span className="block max-w-40 truncate text-xs font-semibold text-slate-700">
                         {fullName}
@@ -374,6 +417,22 @@ function AppShell({ children }: { children: ReactNode }) {
                             {user.username}
                           </p>
                         </div>
+                        {/* CORE-004 §5 — account menu: profile, password, logout */}
+                        <Link
+                          href="/profile"
+                          role="menuitem"
+                          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                        >
+                          پروفایل من
+                        </Link>
+                        <Link
+                          href="/profile"
+                          role="menuitem"
+                          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                        >
+                          تنظیمات شخصی
+                        </Link>
+                        <div className="border-t border-slate-100" />
                         <button
                           type="button"
                           role="menuitem"

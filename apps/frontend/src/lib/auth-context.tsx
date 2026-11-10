@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { apiFetch } from "@/lib/api";
+import { setDisplayPreferences } from "@/lib/format";
 
 export interface AuthUser {
   id: string | number;
@@ -23,6 +24,8 @@ export interface AuthContextValue {
   user: AuthUser | null;
   permissions: string[];
   loading: boolean;
+  /** Bumped on every successful /auth/me — cache-buster for the avatar <img>. */
+  avatarBust: number;
   /** Fetches GET /auth/me; returns true when a user is authenticated. */
   refresh: () => Promise<boolean>;
   /** Calls POST /auth/logout and clears local state (errors ignored). */
@@ -35,9 +38,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [avatarBust, setAvatarBust] = useState(0);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    setLoading(true);
+    // BUG (CORE-004): setLoading(true) here UNMOUNTED the entire app through
+    // the AuthGate spinner on EVERY refresh — the profile-save notice was
+    // lost on the remount. Loading gates ONLY the initial resolution; a
+    // re-fetch must update state in place without unmounting children.
     try {
       const response = await apiFetch("/auth/me");
       const data = (await response.json()) as {
@@ -54,6 +61,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPermissions(
           Array.isArray(data.permissions) ? (data.permissions as string[]) : [],
         );
+        // CORE-004: profile preferences drive app-wide display (digits +
+        // wall-clock timezone) — real consumers in lib/format.
+        setDisplayPreferences({
+          language: typeof data.language === "string" ? data.language : null,
+          timezone: typeof data.timezone === "string" ? data.timezone : null,
+        });
+        setAvatarBust((b) => b + 1);
         return true;
       }
       setUser(null);
@@ -83,8 +97,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, permissions, loading, refresh, logout }),
-    [user, permissions, loading, refresh, logout],
+    () => ({ user, permissions, loading, avatarBust, refresh, logout }),
+    [user, permissions, loading, avatarBust, refresh, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

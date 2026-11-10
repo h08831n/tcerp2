@@ -20,23 +20,39 @@ export function Modal({ open, title, onClose, children, footer, small = false }:
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
+  // BUG-001 (root cause): pages pass `onClose={() => setState(false)}` — a NEW
+  // function identity on EVERY render. With `onClose` in the effect deps, the
+  // effect re-ran on every keystroke (form state lives in the page component)
+  // and `panelRef.current?.focus()` stole focus from the input after the
+  // FIRST character — the reported focus-loss bug. Hold the LATEST handler in
+  // a ref so the effect depends ONLY on the `open` transition: it runs once
+  // per open, focuses the panel once, and never re-focuses mid-typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
-    panelRef.current?.focus();
+    // Never steal focus when it is already inside the panel (e.g. the opener
+    // focused an input before the effect ran).
+    if (!panelRef.current?.contains(document.activeElement)) {
+      panelRef.current?.focus();
+    }
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        onClose();
+        onCloseRef.current();
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      // Runs ONLY on the open→false transition now: focus is restored once,
+      // on close — never during typing.
       previousFocusRef.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 

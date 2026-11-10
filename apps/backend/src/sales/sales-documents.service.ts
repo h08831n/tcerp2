@@ -9,7 +9,6 @@ import { TimelineService, buildChanges } from '../parties/timeline.service';
 import { DocumentRelationService } from '../document-flow/document-relation.service';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../common/errors';
 import { assertActiveCompanyMember } from '../common/utils/company-member';
-import { assertCustomer } from '../common/utils/party-roles';
 import { D, calcLineTotals, moneyString, roundMoney, roundQuantity, sumDocumentTotals } from '../common/utils/money';
 import { RequestContext } from '../auth/auth.service';
 import { Paginated } from '../common/dto/pagination.dto';
@@ -338,8 +337,40 @@ export class SalesDocumentsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ) {
-    await assertCustomer(tx, companyId, params.customerPartyId);
+    // CR-001: NO customer-role requirement at document creation. A quotation
+    // (DRAFT/QUOTATION) is a sales PROPOSAL — it must be creatable for a lead
+    // whose party is not (yet) a customer. Customer-hood is granted EXACTLY
+    // once: at the valid CUSTOMER_CONFIRMED -> SALES_ORDER activation below.
+    // (assertCustomer stays in force for operational flows like loading.)
+    // The party MUST still exist INSIDE THIS COMPANY — the former
+    // assertCustomer call was also the cross-company isolation guard here,
+    // so a company-scoped existence check replaces it (uniform 404 for
+    // missing AND foreign parties: no existence leak).
+    const documentParty = await tx.party.findFirst({
+      where: { id: params.customerPartyId, companyId },
+      select: { id: true },
+    });
+    if (!documentParty) {
+      throw new NotFoundError('Party not found', { customerPartyId: params.customerPartyId });
+    }
     await assertActiveCompanyMember(tx, companyId, params.salespersonUserId, 'SALESPERSON_NOT_COMPANY_MEMBER');
+
+    // CR-001: a document linked to an opportunity must belong to the SAME
+    // party as the opportunity (backend-enforced, not a UI-only constraint).
+    if (params.opportunityId) {
+      const opportunity = await tx.opportunity.findFirst({
+        where: { id: params.opportunityId, companyId },
+        select: { id: true, customerPartyId: true },
+      });
+      if (!opportunity) throw new NotFoundError('Opportunity not found', { opportunityId: params.opportunityId });
+      if (opportunity.customerPartyId !== params.customerPartyId) {
+        throw new ValidationError('OPPORTUNITY_PARTY_MISMATCH', {
+          opportunityId: params.opportunityId,
+          opportunityPartyId: opportunity.customerPartyId,
+          documentPartyId: params.customerPartyId,
+        });
+      }
+    }
 
     const documentDate = params.documentDate ?? new Date();
     const expirationDate =
@@ -381,6 +412,48 @@ export class SalesDocumentsService {
       },
       include: { lines: true },
     });
+      // ── CR-001 R2 §5: THE customer-conversion law ──────────────────────
+      // A SUCCESSFUL quotation save (any DRAFT/QUOTATION creation — the ONLY
+      // write path, so the sales-menu flow is covered too) grants the
+      // CUSTOMER role to a party holding the LEAD role. Atomic: the grant
+      // lives in THIS transaction — a failed save rolls everything back.
+      // Idempotent: a party that is already CUSTOMER (or has no LEAD role)
+      // is untouched; SUPPLIER/DRIVER/... roles are never disturbed.
+      const leadRole = await tx.partyRole.findUnique({
+        where: { partyId_role: { partyId: params.customerPartyId, role: 'LEAD' } },
+        select: { id: true },
+      });
+      if (leadRole) {
+        const customerRole = await tx.partyRole.findUnique({
+          where: { partyId_role: { partyId: params.customerPartyId, role: 'CUSTOMER' } },
+          select: { id: true },
+        });
+        if (!customerRole) {
+          await tx.partyRole.create({
+            data: { partyId: params.customerPartyId, role: 'CUSTOMER' },
+          });
+          await this.timeline.record(tx, {
+            companyId,
+            entityType: 'PARTY',
+            entityId: params.customerPartyId,
+            type: 'ROLE_ADDED',
+            title: 'مشتری شد',
+            description: `با ثبت پیش‌فاکتور ${documentNumber}، سرنخ به مشتری تبدیل شد`,
+            data: { salesDocumentId: salesDocumentId, documentNumber: documentNumber, role: 'CUSTOMER', via: 'QUOTATION' },
+            actorUserId: actor.id,
+          });
+          await this.auditService.recordTx(tx, {
+            entityType: 'party',
+            entityId: params.customerPartyId,
+            action: 'ROLE_ADDED',
+            actor,
+            companyId,
+            newValues: { role: 'CUSTOMER', via: 'QUOTATION', salesDocumentId: salesDocumentId },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          });
+        }
+      }
 
     await this.auditService.recordTx(tx, {
       entityType: 'sales_document',

@@ -96,11 +96,16 @@ export function fetchActivities(query: {
   overdueOnly?: boolean;
   dueFrom?: string;
   dueTo?: string;
+  /** CR-001: filter to one attachable entity (backend ActivityListQueryDto). */
+  relatedEntityType?: string;
+  relatedEntityId?: string;
   page?: number;
   pageSize?: number;
 }): Promise<Paginated<ActivityRow>> {
   const params = new URLSearchParams();
   if (query.status) params.set("status", query.status);
+  if (query.relatedEntityType) params.set("relatedEntityType", query.relatedEntityType);
+  if (query.relatedEntityId) params.set("relatedEntityId", query.relatedEntityId);
   if (query.priority) params.set("priority", query.priority);
   if (query.typeCode) params.set("typeCode", query.typeCode);
   if (query.assignedToId) params.set("assignedToId", query.assignedToId);

@@ -3,6 +3,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -22,9 +23,17 @@ export class CreateLeadDto {
   @MaxLength(256)
   name: string;
 
+  // CR-001 R2: a lead IS a Party with the LEAD role. Either link an EXISTING
+  // party (never duplicated) or let the service create a NEW Party identity
+  // in the SAME transaction — partyId/name drive which path runs.
   @IsOptional()
   @IsUUID()
   partyId?: string;
+
+  /** Only for the new-Party path (default COMPANY). */
+  @IsOptional()
+  @IsIn(['PERSON', 'COMPANY'])
+  type?: 'PERSON' | 'COMPANY';
 
   @IsOptional()
   @IsString()
@@ -153,6 +162,11 @@ export class CreateOpportunityDto {
   @IsNumber()
   estimatedTonnage?: number;
 
+  /** CR-001: «تاریخ احتمالی نهایی شدن» — date-only ISO (Kanban card). */
+  @IsOptional()
+  @IsDateString()
+  expectedCloseDate?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(128)
@@ -185,6 +199,11 @@ export class UpdateOpportunityDto {
   @IsOptional()
   @IsNumber()
   estimatedTonnage?: number;
+
+  /** CR-001: «تاریخ احتمالی نهایی شدن» — date-only ISO. */
+  @IsOptional()
+  @IsDateString()
+  expectedCloseDate?: string;
 
   @IsOptional()
   @IsEnum(OpportunityStatus)

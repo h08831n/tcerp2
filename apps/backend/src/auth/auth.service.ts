@@ -9,13 +9,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PermissionsService } from '../permissions/permissions.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.dto';
+import { BCRYPT_ROUNDS } from '../common/constants';
+import { normalizeIranMobile } from '../common/utils/phone';
 import { CompanyContextService } from '../companies/company-context.service';
 import {
   ForbiddenError,
   NotFoundError,
   UnauthorizedError,
+  ValidationError,
 } from '../common/errors';
 import { computeLockout, isLocked } from './lockout';
+import { FilesService, UploadedFilePayload } from '../files/files.service';
+import { Readable } from 'node:stream';
 
 export interface RequestContext {
   ip?: string;
@@ -25,6 +30,7 @@ export interface RequestContext {
 export interface UserProfile {
   id: string;
   username: string;
+  avatarUrl?: string | null;
   email: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -53,6 +59,7 @@ export class AuthService {
     private readonly permissionsService: PermissionsService,
     private readonly auditService: AuditService,
     private readonly companyContext: CompanyContextService,
+    private readonly filesService: FilesService,
     @Inject(CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -309,11 +316,280 @@ export class AuthService {
       firstName: user.firstName,
       lastName: user.lastName,
       mobile: user.mobile,
+      avatarUrl: user.avatarUrl,
       status: user.status,
       language: user.language,
       timezone: user.timezone,
       mustChangePassword: user.mustChangePassword,
       lastLoginAt: user.lastLoginAt,
+    };
+  }
+
+  // ── CORE-004: self-service profile & password ────────────────────────────
+
+  /**
+   * Self-profile update: ONLY the whitelisted self-service fields. Status,
+   * roles, company memberships and permissions are structurally unreachable
+   * here — privilege escalation by shape is impossible (no such columns in
+   * the update payload).
+   */
+  async updateOwnProfile(
+    userId: string,
+    dto: {
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+      mobile?: string;
+      language?: string;
+      timezone?: string;
+      avatarUrl?: string;
+    },
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    const data: Record<string, unknown> = {};
+    if (dto.firstName !== undefined) data.firstName = dto.firstName.trim() || null;
+    if (dto.lastName !== undefined) data.lastName = dto.lastName.trim() || null;
+    if (dto.email !== undefined) {
+      const email = dto.email.trim().toLowerCase() || null;
+      if (email && email !== user.email) {
+        const taken = await this.prisma.user.findFirst({
+          where: { email, id: { not: userId } },
+          select: { id: true },
+        });
+        if (taken) throw new ValidationError('Email already exists');
+      }
+      data.email = email;
+    }
+    if (dto.mobile !== undefined) {
+      data.mobile = dto.mobile === '' ? null : normalizeIranMobile(dto.mobile);
+    }
+    if (dto.language !== undefined) data.language = dto.language;
+    if (dto.timezone !== undefined) data.timezone = dto.timezone;
+    if (dto.avatarUrl !== undefined) data.avatarUrl = dto.avatarUrl.trim() || null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: userId }, data });
+      await this.auditService.recordTx(tx, {
+        entityType: 'user',
+        entityId: userId,
+        action: AuditAction.UPDATE,
+        actor,
+        oldValues: {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          mobile: user.mobile,
+          language: user.language,
+          timezone: user.timezone,
+          avatarUrl: user.avatarUrl,
+        },
+        newValues: data,
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+    });
+  }
+
+  /**
+   * CORE-004 — self-service password change: requires the CURRENT password
+   * (re-authentication), applies the same hash policy as user creation, and
+   * audits WITHOUT ever storing the raw password. The current session stays
+   * alive; other refresh tokens are revoked (other devices must re-login).
+   *
+   * Rate limiting: wrong CURRENT-password attempts share the LOGIN lockout
+   * counter (failedLoginCount/lockedUntil, LOGIN_MAX_ATTEMPTS /
+   * LOGIN_LOCK_MINUTES) — brute-forcing the re-authentication prompt locks
+   * the account for login too, closing both vectors with one policy.
+   */
+  async changeOwnPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+    currentRefreshHash?: string,
+  ): Promise<void> {
+    const now = new Date();
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    if (isLocked(user, now)) {
+      throw new ForbiddenError('Account is temporarily locked', {
+        lockedUntil: user.lockedUntil,
+      });
+    }
+
+    const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!ok) {
+      const failedLoginCount = user.failedLoginCount + 1;
+      const lockedUntil = computeLockout(
+        failedLoginCount,
+        this.config.LOGIN_MAX_ATTEMPTS,
+        this.config.LOGIN_LOCK_MINUTES,
+        now,
+      );
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { failedLoginCount, lockedUntil },
+      });
+      throw new ValidationError('CURRENT_PASSWORD_INCORRECT');
+    }
+    if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      throw new ValidationError('NEW_PASSWORD_SAME_AS_CURRENT');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          passwordHash,
+          mustChangePassword: false,
+          // Successful re-authentication clears the shared attempt counter.
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      });
+      // SECURITY: every OTHER active device is force-logged-out. The CURRENT
+      // browser session survives (the caller's access token + refresh cookie
+      // are untouched here) so the flow completes without re-login.
+      await tx.refreshToken.updateMany({
+        where: {
+          userId,
+          revokedAt: null,
+          ...(currentRefreshHash ? { tokenHash: { not: currentRefreshHash } } : {}),
+        },
+        data: { revokedAt: new Date() },
+      });
+      await this.auditService.recordTx(tx, {
+        entityType: 'user',
+        entityId: userId,
+        action: 'PASSWORD_CHANGED',
+        actor,
+        oldValues: undefined, // NEVER store password hashes in the audit
+        newValues: { passwordChanged: true },
+        ip: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+    });
+  }
+
+  // ── CORE-004: avatar — real upload through the Files/MinIO infrastructure ─
+
+  /** The stable internal URL stored on the user row for an uploaded avatar. */
+  private avatarUrlFor(userId: string): string {
+    return `/api/auth/avatar/${userId}`;
+  }
+
+  /**
+   * Replace the user's avatar with an uploaded image. The bytes go through
+   * the SAME secure file infrastructure as every other upload (FilesService:
+   * sha256-deduped blob in MinIO + company-scoped attachment row); the user
+   * row stores only the stable /api/auth/avatar/:id URL — never a raw
+   * external URL the user could aim at arbitrary content. Image type and
+   * 2MB size are enforced here, on top of the Files module's own controls.
+   */
+  async setOwnAvatar(
+    userId: string,
+    file: UploadedFilePayload,
+    companyId: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<UserProfile> {
+    const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
+    if (!ALLOWED_MIME.includes(file.mimetype)) {
+      throw new ValidationError('AVATAR_INVALID_TYPE', { allowed: ALLOWED_MIME });
+    }
+    const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+    if (file.buffer.byteLength > MAX_AVATAR_BYTES) {
+      throw new ValidationError('AVATAR_TOO_LARGE', { maxBytes: MAX_AVATAR_BYTES });
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    const { attachment } = await this.filesService.upload(
+      file,
+      { entityType: 'user_avatar', entityId: userId, displayName: 'avatar', category: 'avatar' },
+      companyId,
+      actor,
+      ctx,
+    );
+    // A replaced avatar must stop being served immediately: drop older
+    // avatar attachments (the blob itself stays — content-addressed/shared).
+    await this.filesService.deleteAvatarAttachments(userId, attachment.id);
+
+    const oldUrl = user.avatarUrl;
+    const avatarUrl = this.avatarUrlFor(userId);
+    await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl } });
+    await this.auditService.record({
+      entityType: 'user',
+      entityId: userId,
+      action: AuditAction.UPDATE,
+      actor,
+      oldValues: { avatarUrl: oldUrl },
+      newValues: { avatarUrl },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return this.me(userId);
+  }
+
+  /** Remove the avatar entirely (attachment rows deleted; user URL cleared). */
+  async clearOwnAvatar(
+    userId: string,
+    actor: { id: string; username: string },
+    ctx: RequestContext,
+  ): Promise<UserProfile> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundError('User not found');
+
+    await this.filesService.deleteAvatarAttachments(userId);
+    await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl: null } });
+    await this.auditService.record({
+      entityType: 'user',
+      entityId: userId,
+      action: AuditAction.UPDATE,
+      actor,
+      oldValues: { avatarUrl: user.avatarUrl },
+      newValues: { avatarUrl: null },
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    return this.me(userId);
+  }
+
+  /**
+   * Resolve the avatar bytes for the authenticated avatar-serving route.
+   * Returns null when the user has no INTERNAL avatar (external URL or
+   * none) — the route 404s and the FE falls back to the external URL or the
+   * initial-letter block. The lookup is pinned to entityType='user_avatar'.
+   */
+  async resolveAvatar(
+    userId: string,
+  ): Promise<{ stream: Readable; contentType: string; size: number; etag: string } | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { avatarUrl: true },
+    });
+    if (!user || !user.avatarUrl || !user.avatarUrl.startsWith('/api/auth/avatar/')) {
+      return null;
+    }
+    const attachment = await this.prisma.fileAttachment.findFirst({
+      where: { entityType: 'user_avatar', entityId: userId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, fileBlob: { select: { sha256: true } } },
+    });
+    if (!attachment) return null;
+    const res = await this.filesService.streamUserAvatar(attachment.id);
+    return {
+      stream: res.stream,
+      contentType: res.contentType,
+      size: res.size,
+      etag: attachment.fileBlob.sha256,
     };
   }
 }

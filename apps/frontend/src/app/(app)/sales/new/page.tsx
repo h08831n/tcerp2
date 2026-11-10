@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { fetchParty } from "@/lib/party";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { JalaliDateInput } from "@/components/ui/jalali-date-input";
@@ -49,6 +50,11 @@ function todayIso(): string {
 
 export default function NewSalePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // CR-001: deep link from an Opportunity — party is prefilled AND locked to
+  // the opportunity's party (backend enforces OPPORTUNITY_PARTY_MISMATCH).
+  const prefillOpportunityId = searchParams.get("opportunityId") ?? "";
+  const prefillPartyId = searchParams.get("partyId") ?? "";
 
   // ── step 1: header ──
   const [customer, setCustomer] = useState<EntityOption | null>(null);
@@ -72,6 +78,20 @@ export default function NewSalePage() {
   const [quantity, setQuantity] = useState("");
   const [unitPrice, setUnitPrice] = useState("");
   const [discount, setDiscount] = useState("");
+
+  // CR-001 prefill: lock the party to the opportunity's customer.
+  useEffect(() => {
+    if (!prefillPartyId) return;
+    let cancelled = false;
+    fetchParty(prefillPartyId)
+      .then((p) => {
+        if (!cancelled && p) setCustomer({ id: p.id, label: p.nameFa });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [prefillPartyId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +121,7 @@ export default function NewSalePage() {
     try {
       const created = await createSale({
         customerPartyId: customer.id,
+        opportunityId: prefillOpportunityId || undefined,
         salespersonUserId: salesperson?.id,
         documentDate: documentDate ?? undefined,
         expirationDate: expirationDate ?? undefined,
@@ -210,6 +231,11 @@ export default function NewSalePage() {
             <label className="mb-1 block text-xs font-medium text-slate-600">
               مشتری <span className="text-red-500">*</span>
             </label>
+            {prefillOpportunityId && (
+              <p className="mb-1 rounded-md bg-indigo-50 px-2 py-1 text-[11px] text-indigo-700">
+                این پیش‌فاکتور به فرصت فروش متصل می‌شود؛ طرف‌حساب همان فرصت است (قفل‌شده).
+              </p>
+            )}
             <EntitySelector
               endpoint={(q) => `/parties?role=CUSTOMER&search=${encodeURIComponent(q)}&pageSize=10`}
               mapItem={partyMapItem}
@@ -217,7 +243,7 @@ export default function NewSalePage() {
               onChange={setCustomer}
               placeholder="جستجوی مشتری…"
               ariaLabel="انتخاب مشتری"
-              disabled={Boolean(doc)}
+              disabled={Boolean(doc) || Boolean(prefillOpportunityId)}
             />
           </div>
           <div>

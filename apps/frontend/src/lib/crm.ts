@@ -6,28 +6,33 @@
 
 import { ApiError, apiJson } from "@/lib/api";
 import type { PaginatedResponse } from "@/lib/product";
+import type { TimelineItemDto } from "@/lib/party";
 
 // ---------------------------------------------------------------------------
 // Enums + Persian label maps
 // ---------------------------------------------------------------------------
 
-export type LeadStatus = "NEW" | "CONTACTED" | "QUALIFIED" | "LOST";
+// CR-001: CONVERTED is a TERMINAL state set only by the explicit
+// «تبدیل به فرصت فروش» operation — never by a plain status PATCH.
+export type LeadStatus = "NEW" | "CONTACTED" | "QUALIFIED" | "LOST" | "CONVERTED";
 
-export const LEAD_STATUSES: LeadStatus[] = ["NEW", "CONTACTED", "QUALIFIED", "LOST"];
+export const LEAD_STATUSES: LeadStatus[] = ["NEW", "CONTACTED", "QUALIFIED", "LOST", "CONVERTED"];
 
 export const LEAD_STATUS_LABELS: Record<LeadStatus, string> = {
   NEW: "جدید",
   CONTACTED: "تماس گرفته‌شده",
   QUALIFIED: "واجد شرایط",
   LOST: "باخته",
+  CONVERTED: "تبدیل‌شده",
 };
 
-/** Backend-enforced transitions: NEW → CONTACTED → QUALIFIED|LOST. */
+/** Backend-enforced transitions: NEW → CONTACTED → QUALIFIED|LOST; CONVERTED terminal. */
 export const LEAD_TRANSITIONS: Record<LeadStatus, LeadStatus[]> = {
   NEW: ["CONTACTED"],
   CONTACTED: ["QUALIFIED", "LOST"],
   QUALIFIED: [],
   LOST: [],
+  CONVERTED: [],
 };
 
 export type OpportunityStatus = "OPEN" | "QUALIFIED" | "QUOTED" | "WON" | "LOST";
@@ -60,7 +65,13 @@ export const OPPORTUNITY_TRANSITIONS: Record<OpportunityStatus, OpportunityStatu
 export function crmErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     const message = error.message;
-    if (message === "NOT_A_CUSTOMER") return "شخص انتخاب‌شده نقش مشتری ندارد.";
+    if (message === "LEAD_PARTY_REQUIRED") return "هر سرنخ باید به یک طرف‌حساب متصل باشد.";
+    if (message === "LEAD_NAME_REQUIRED") return "برای ساخت طرف‌حساب جدید، نام الزامی است.";
+    if (message === "LEAD_LOST_CANNOT_CONVERT") return "سرنخ باخته را نمی‌توان به فرصت فروش تبدیل کرد.";
+    if (message === "LEAD_CONVERT_REQUIRES_CONVERT_OPERATION")
+      return "تبدیل سرنخ فقط از طریق عملیات «تبدیل به فرصت فروش» انجام می‌شود.";
+    if (message === "OPPORTUNITY_PARTY_MISMATCH")
+      return "فرصت انتخاب‌شده به طرف‌حساب دیگری تعلق دارد.";
     if (message === "LOST_REASON_REQUIRED") return "برای باخت، انتخاب دلیل الزامی است.";
     if (message === "VERSION_CONFLICT")
       return "رکورد توسط کاربر دیگری تغییر کرده است. لطفاً صفحه را بازخوانی کنید.";
@@ -99,6 +110,14 @@ export function userDisplayName(
 // Leads
 // ---------------------------------------------------------------------------
 
+/** CR-001 — next-activity chip (same machinery as party activities). */
+export interface CrmActivitySummaryDto {
+  nextActivityAt: string | null;
+  nextActivityTitle: string | null;
+  overdueCount: number;
+  openCount: number;
+}
+
 export interface LeadDto {
   id: string;
   partyId: string | null;
@@ -114,8 +133,10 @@ export interface LeadDto {
   version: number;
   createdAt: string;
   updatedAt: string;
-  party: { id: string; nameFa: string } | null;
+  party: { id: string; nameFa: string; type?: string } | null;
   salesperson: { id: string; username: string } | null;
+  /** CR-001 — computed next/overdue activity chip. */
+  activity?: CrmActivitySummaryDto;
 }
 
 export interface LeadQuery {
@@ -144,7 +165,11 @@ export function fetchLead(id: string): Promise<LeadDto> {
 
 export interface CreateLeadBody {
   name: string;
+  /** Link an EXISTING party (never duplicated) — omit to create a NEW Party
+   * identity with the LEAD role in the same transaction. */
   partyId?: string;
+  /** Only for the new-Party path. */
+  type?: "PERSON" | "COMPANY";
   phone?: string;
   source?: string;
   campaign?: string;
@@ -177,85 +202,11 @@ export function deleteLead(id: string): Promise<{ success: boolean }> {
 }
 
 // ---------------------------------------------------------------------------
-// Opportunities
+// CR-001 — convert lead → opportunity + CRM timeline (chatter)
 // ---------------------------------------------------------------------------
 
-export interface OpportunityDto {
-  id: string;
-  customerPartyId: string;
-  salespersonUserId: string;
-  title: string;
-  description: string | null;
-  /** Decimal — arrives as string. */
-  estimatedAmount: string | null;
-  /** Decimal — arrives as string. */
-  estimatedTonnage: string | null;
-  status: OpportunityStatus;
-  source: string | null;
-  lostReasonId: string | null;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-  customer: { id: string; nameFa: string };
-  salesperson: UserRef;
-  lostReason?: { id: string; nameFa: string; code: string } | null;
-}
-
-export interface OpportunityQuery {
-  page?: number;
-  pageSize?: number;
-  search?: string;
-  status?: OpportunityStatus;
-  customerPartyId?: string;
-  salespersonUserId?: string;
-}
-
-export function fetchOpportunities(
-  query: OpportunityQuery = {},
-): Promise<PaginatedResponse<OpportunityDto>> {
-  const params = new URLSearchParams();
-  params.set("page", String(query.page ?? 1));
-  params.set("pageSize", String(query.pageSize ?? 20));
-  if (query.search) params.set("search", query.search);
-  if (query.status) params.set("status", query.status);
-  if (query.customerPartyId) params.set("customerPartyId", query.customerPartyId);
-  if (query.salespersonUserId) params.set("salespersonUserId", query.salespersonUserId);
-  return apiJson<PaginatedResponse<OpportunityDto>>(`/opportunities?${params.toString()}`);
-}
-
-export function fetchOpportunity(id: string): Promise<OpportunityDto> {
-  return apiJson<OpportunityDto>(`/opportunities/${id}`);
-}
-
-export interface CreateOpportunityBody {
-  customerPartyId: string;
-  salespersonUserId: string;
-  title: string;
-  description?: string;
-  estimatedAmount?: number;
-  estimatedTonnage?: number;
-  source?: string;
-}
-
-export function createOpportunity(body: CreateOpportunityBody): Promise<OpportunityDto> {
-  return apiJson<OpportunityDto>("/opportunities", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-export interface UpdateOpportunityBody extends Partial<CreateOpportunityBody> {
-  status?: OpportunityStatus;
-  lostReasonId?: string;
-  version: number;
-}
-
-export function updateOpportunity(id: string, body: UpdateOpportunityBody): Promise<OpportunityDto> {
-  return apiJson<OpportunityDto>(`/opportunities/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(body),
-  });
-}
+// CR-001 R2 §5: conversion to CUSTOMER happens server-side on the FIRST
+// successful quotation save — there is NO client convert operation anymore.
 
 // ---------------------------------------------------------------------------
 // Lost reasons (configurable; required for LOST transitions)
@@ -302,4 +253,9 @@ export async function fetchPaymentTerms(active = true): Promise<PaymentTermDto[]
   if (active !== undefined) params.set("active", String(active));
   const data = await apiJson<PaginatedResponse<PaymentTermDto>>(`/payment-terms?${params.toString()}`);
   return data.items;
+}
+
+/** CORE-003 — lead-source options from company settings. */
+export function fetchLeadSourceOptions(): Promise<{ options: string[] }> {
+  return apiJson<{ options: string[] }>("/leads/source-options");
 }

@@ -217,6 +217,79 @@ const ROLE_DEFS: {
   permissions: string[] | 'ALL';
 }[] = [
   { code: 'admin', nameFa: 'مدیر سیستم', nameEn: 'Administrator', permissions: 'ALL' },
+  // IAM-001 §8 — the owner's default role list (additive; the admin can
+  // create/edit any role from the UI afterwards — these are NOT limiting).
+  { code: 'super_admin', nameFa: 'Super Admin', nameEn: 'Super Admin', permissions: 'ALL' },
+  {
+    code: 'ceo',
+    nameFa: 'مدیرعامل',
+    nameEn: 'CEO',
+    permissions: [
+      'reports.view', 'files.view', 'files.download',
+      'parties.view', 'sales.view', 'purchase.view', 'loading.view',
+      'inventory.view', 'accounting.posting.manage', 'accounting.fiscal.manage',
+      'treasury.view', 'price_request.view', 'crm.view', 'timeline.view',
+      'activities.view', 'workflow.view', 'notifications.view',
+    ],
+  },
+  {
+    code: 'warehouse_manager',
+    nameFa: 'مدیر انبار',
+    nameEn: 'Warehouse Manager',
+    permissions: [
+      'inventory.view', 'inventory.warehouses.manage', 'files.view', 'files.upload', 'files.download',
+      'products.view', 'loading.view', 'loading.create', 'loading.edit', 'loading.confirm', 'loading.cancel',
+      'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit', 'goods_receipt.confirm',
+      'purchase.view', 'sales.view', 'claims.view', 'claims.create', 'allocations.manage',
+    ],
+  },
+  {
+    code: 'warehouse_keeper',
+    nameFa: 'انباردار',
+    nameEn: 'Warehouse Keeper',
+    permissions: [
+      'inventory.view', 'files.view', 'files.upload',
+      'products.view', 'loading.view', 'loading.create', 'loading.edit',
+      'goods_receipt.view', 'goods_receipt.create', 'goods_receipt.edit',
+    ],
+  },
+  {
+    code: 'treasury_manager',
+    nameFa: 'مسئول خزانه',
+    nameEn: 'Treasury Manager',
+    permissions: [
+      'treasury.view', 'treasury.create', 'treasury.edit', 'treasury.delete',
+      'files.view', 'files.upload', 'files.download', 'reports.view',
+    ],
+  },
+  {
+    code: 'hr_manager',
+    nameFa: 'مدیر منابع انسانی',
+    nameEn: 'HR Manager',
+    permissions: ['activities.view', 'activities.view_all', 'activities.create', 'activities.edit', 'files.view', 'files.download'],
+  },
+  {
+    code: 'hr_specialist',
+    nameFa: 'کارشناس منابع انسانی',
+    nameEn: 'HR Specialist',
+    permissions: ['activities.view', 'activities.create', 'activities.edit', 'files.view'],
+  },
+  {
+    code: 'regular_user',
+    nameFa: 'کاربر عادی',
+    nameEn: 'Regular User',
+    permissions: ['files.view', 'files.download', 'notifications.view', 'activities.view'],
+  },
+  {
+    code: 'read_only',
+    nameFa: 'فقط مشاهده',
+    nameEn: 'Read Only',
+    permissions: [
+      'parties.view', 'sales.view', 'purchase.view', 'loading.view', 'inventory.view',
+      'treasury.view', 'crm.view', 'reports.view', 'files.view', 'products.view',
+      'price_request.view', 'activities.view', 'notifications.view',
+    ],
+  },
   {
     code: 'salesperson',
     nameFa: 'کارمند فروش',

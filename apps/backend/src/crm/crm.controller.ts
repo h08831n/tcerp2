@@ -12,7 +12,6 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { LeadsService } from './leads.service';
-import { OpportunitiesService } from './opportunities.service';
 import { LostReasonsService } from './lost-reasons.service';
 import { PaymentTermsService } from './payment-terms.service';
 import {
@@ -69,6 +68,14 @@ export class LeadsController {
     return this.leads.list(companyId, query);
   }
 
+  /** CORE-003 — lead-source options from company settings. */
+  @Get('source-options')
+  @RequirePermissions('crm.view')
+  async sourceOptions(@CurrentUser() user: { id: string }, @Req() request: Request) {
+    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
+    return this.leads.sourceOptions(companyId);
+  }
+
   @Get(':id')
   @RequirePermissions('crm.view')
   async getById(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {
@@ -98,51 +105,6 @@ export class LeadsController {
     const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
     await this.leads.archive(companyId, id, actor, ctxOf(request));
     return { success: true };
-  }
-}
-
-@Controller('opportunities')
-export class OpportunitiesController {
-  constructor(
-    private readonly opportunities: OpportunitiesService,
-    private readonly companyContext: CompanyContextService,
-  ) {}
-
-  @Post()
-  @RequirePermissions('crm.manage')
-  async create(
-    @Body() dto: CreateOpportunityDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.opportunities.create(companyId, dto, actor, ctxOf(request));
-  }
-
-  @Get()
-  @RequirePermissions('crm.view')
-  async list(@Query() query: OpportunityQueryDto, @CurrentUser() user: { id: string }, @Req() request: Request) {
-    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.opportunities.list(companyId, query);
-  }
-
-  @Get(':id')
-  @RequirePermissions('crm.view')
-  async getById(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: { id: string }, @Req() request: Request) {
-    const companyId = await this.companyContext.requireCompanyId(user, request.headers);
-    return this.opportunities.getById(companyId, id);
-  }
-
-  @Patch(':id')
-  @RequirePermissions('crm.manage')
-  async update(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateOpportunityDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.opportunities.update(companyId, id, dto, actor, ctxOf(request));
   }
 }
 

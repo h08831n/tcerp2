@@ -473,11 +473,12 @@ describeIntegration('gate-c HTTP (real AppModule + guards)', () => {
     });
     expect([400, 403, 404, 422]).toContain(bad.status);
     const body = (await bad.json()) as { message?: string };
-    // EXACT error recorded for the report.
-    // EXACT error recorded: NOT_A_CUSTOMER — assertCustomer does not
-    // distinguish "not in this company" from "lacks the CUSTOMER role"
-    // (no cross-company existence leak; uniform message).
-    expect(body.message).toBe('NOT_A_CUSTOMER');
+    // CR-001: quotations no longer require the CUSTOMER role, so the
+    // cross-company guard here is a company-scoped PARTY EXISTENCE check.
+    // Uniform 404 "Party not found" for missing AND foreign parties —
+    // still no cross-company existence leak (the original intent).
+    expect(bad.status).toBe(404);
+    expect(body.message).toBe('Party not found');
     // Controlled success: the SAME request with an OWN-company customer → 201.
     const ok = await req('all', A, 'POST', '/api/sales', {
       customerPartyId: partyAllA,
