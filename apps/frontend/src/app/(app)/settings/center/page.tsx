@@ -18,6 +18,7 @@ import {
   saveSetting,
   type SettingCatalogEntry,
 } from "@/lib/admin";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { jalaliDateTime } from "@/lib/format";
 
@@ -38,6 +39,17 @@ export default function SettingsCenterPage() {
   const canEdit = permissions.includes("settings.edit");
 
   const [entries, setEntries] = useState<SettingCatalogEntry[] | null>(null);
+  // CORE-003 §2 — real reference-data management pages (no "به‌زودی" links).
+  const referenceLinks = [
+    { label: "دسته‌بندی کالا", href: "/products/categories", perm: "products.view" },
+    { label: "برندها", href: "/products/brands", perm: "products.view" },
+    { label: "واحدهای اندازه‌گیری", href: "/products/uom", perm: "products.view" },
+    { label: "ویژگی‌های محصول", href: "/products/attributes", perm: "products.view" },
+    { label: "نگاشت تامین‌کنندگان", href: "/products/supplier-mappings", perm: "products.view" },
+    { label: "دلایل باخت", href: "/settings/lost-reasons", perm: "crm.view" },
+    { label: "شرایط پرداخت", href: "/settings/payment-terms", perm: "crm.view" },
+    { label: "انواع فعالیت", href: "/activities", perm: "activities.view" },
+  ];
   const [error, setError] = useState<string | null>(null);
   const [category, setCategory] = useState<string>("");
   const [search, setSearch] = useState("");
@@ -254,6 +266,24 @@ export default function SettingsCenterPage() {
             {error}
           </div>
         )}
+
+        {/* CORE-003 §2 — داده‌های مرجع: لینک به صفحات CRUD واقعی موجود */}
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="mb-2 text-xs font-bold text-slate-600">داده‌های مرجع (صفحات مدیریت)</p>
+          <div className="flex flex-wrap gap-2">
+            {referenceLinks
+              .filter((l) => permissions.includes(l.perm))
+              .map((l) => (
+                <Link
+                  key={l.href}
+                  href={l.href}
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:border-primary-300 hover:bg-primary-50"
+                >
+                  {l.label} ↗
+                </Link>
+              ))}
+          </div>
+        </div>
 
         {entries === null ? (
           <p className="text-sm text-slate-400">در حال بارگذاری…</p>

@@ -133,6 +133,12 @@ export function validateSettingValue(
       const n = typeof raw === 'number' ? raw : Number(raw);
       if (!Number.isFinite(n)) return { ok: false, error: 'مقدار باید عدد باشد' };
       if (n < 0) return { ok: false, error: 'مقدار نمی‌تواند منفی باشد' };
+      // CORE-003 §6: files.max_upload_mb must stay within the Multer infra
+      // cap (50MB) — the UI must never offer a value the upload layer
+      // cannot enforce.
+      if (def.key === 'files.max_upload_mb' && n > 50) {
+        return { ok: false, error: 'حداکثر مجاز ۵۰ مگابایت است (سقف زیرساختی آپلود)' };
+      }
       return { ok: true, value: n };
     }
     case 'boolean': {

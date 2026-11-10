@@ -1,8 +1,7 @@
-import { Body, Controller, Get, Put, Query, Req } from '@nestjs/common';
-import { Delete, Param } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Put, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { SettingsService } from './settings.service';
-import { SettingQueryDto, UpsertSettingDto } from './settings.dto';
+import { SettingQueryDto } from './settings.dto';
 import { RequirePermissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequestContext } from '../auth/auth.service';
@@ -30,17 +29,10 @@ export class SettingsController {
     return this.settingsService.list(companyId, query);
   }
 
-  /** Upsert one setting ({key, value, category}) in the active company. */
-  @Put()
-  @RequirePermissions('settings.edit')
-  async upsert(
-    @Body() dto: UpsertSettingDto,
-    @CurrentUser() actor: { id: string; username: string },
-    @Req() request: Request,
-  ) {
-    const companyId = await this.companyContext.requireCompanyId(actor, request.headers);
-    return this.settingsService.upsert(companyId, dto, actor, this.ctx(request));
-  }
+  // CORE-003 §4: the LEGACY raw-key PUT /settings endpoint was REMOVED —
+  // it accepted arbitrary keys/values with no registry validation (a bypass
+  // of the typed settings center). All writes now flow through
+  // PUT /settings/catalog/:key with registry-typed validation.
 
   /** CORE-003 — the settings-center feed: registry + current values. */
   @Get('catalog')

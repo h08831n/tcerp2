@@ -59,6 +59,19 @@ export class SettingsService {
     actor: { id: string; username: string },
     ctx: RequestContext,
   ): Promise<Setting> {
+    // CORE-003 §4 — the LEGACY raw-key route is hardened: only registry keys
+    // may be written, and ONLY through the typed validation. Arbitrary keys
+    // and values outside the catalog are refused (no uncontrolled writes).
+    const legacyDef = SETTING_DEFINITIONS_BY_KEY.get(dto.key);
+    if (!legacyDef) {
+      throw new ValidationError(
+        'SETTING_KEY_NOT_IN_REGISTRY — از مرکز تنظیمات استفاده کنید',
+        { key: dto.key },
+      );
+    }
+    const legacyCheck = validateSettingValue(legacyDef, dto.value);
+    if (!legacyCheck.ok) throw new ValidationError(legacyCheck.error, { key: dto.key });
+
     const existing = await this.prisma.setting.findUnique({
       where: { companyId_key: { companyId, key: dto.key } },
     });

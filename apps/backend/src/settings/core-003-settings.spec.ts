@@ -257,6 +257,49 @@ describeIntegration('core-003 settings center (real AppModule over HTTP)', () =>
     expect(row).toBeNull(); // the override row is gone — consumer uses the default
   });
 
+  it('CORE-003 §4: the LEGACY raw-key PUT /settings is REMOVED (no bypass)', async () => {
+    // The old endpoint accepted arbitrary keys/values with no registry
+    // validation — a bypass of the typed center. It is REMOVED: 404 now,
+    // for admins and non-admins alike.
+    const asAdmin = await api('PUT', '/api/settings', state.adminToken, {
+      key: 'some.hack.key',
+      value: { v: 123 },
+    });
+    expect(asAdmin.status).toBe(404);
+    const wrongValue = await api('PUT', '/api/settings', state.adminToken, {
+      key: 'inventory.negative_stock_policy',
+      value: 'MAYBE',
+    });
+    expect(wrongValue.status).toBe(404);
+  });
+  it('CORE-003 §6: files.max_upload_mb clamped to the 50MB Multer infra cap', async () => {
+    const over = await api('PUT', '/api/settings/catalog/files.max_upload_mb', state.adminToken, {
+      value: 500,
+    });
+    expect(over.status).toBe(422);
+  });
+
+  it('CORE-003 §12 company scope: the catalog is company-scoped', async () => {
+    // Save an override in the seeded company…
+    const save = await api('PUT', '/api/settings/catalog/sales.quotation_expiration_days', state.adminToken, {
+      value: 21,
+    });
+    expect(save.status).toBe(200);
+    // …then verify the DB row carries THIS companyId (never cross-company).
+    const row = await prisma.setting.findUnique({
+      where: {
+        companyId_key: {
+          companyId: state.companyId,
+          key: 'sales.quotation_expiration_days',
+        },
+      },
+    });
+    expect(row).not.toBeNull();
+    await prisma.setting.delete({
+      where: { companyId_key: { companyId: state.companyId, key: 'sales.quotation_expiration_days' } },
+    }).catch(() => undefined);
+  });
+
   it('permissions: settings.view is required to read; edit to write', async () => {
     // A user with NO settings permissions → 403.
     const noPermRole = await prisma.role.create({

@@ -15,7 +15,7 @@ export default defineConfig({
   retries: 0,
   use: {
     channel: "msedge",
-    baseURL: "http://localhost:3000",
+    baseURL: process.env.FE_BASE ?? "http://localhost:3000",
     viewport: { width: 1440, height: 900 },
   },
   webServer: undefined, // the stack must already be running (run-local.bat)
