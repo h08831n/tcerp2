@@ -69,13 +69,22 @@ export default function PaymentTermsPage() {
     setSaving(true);
     setFormError(null);
     try {
-      const body = {
-        code: form.code.trim(),
-        nameFa: form.nameFa.trim(),
-        nameEn: form.nameEn.trim() || undefined,
-        description: form.description.trim() || undefined,
-        daysOffset: form.daysOffset.trim() === "" ? null : Number(form.daysOffset),
-      };
+      // Body rules: CREATE requires `code` (CreatePaymentTermDto); PATCH must
+      // NOT include it (UpdatePaymentTermDto excludes code — forbidNonWhitelisted).
+      const body: Record<string, unknown> = editing
+        ? {
+            nameFa: form.nameFa.trim(),
+            nameEn: form.nameEn.trim() || undefined,
+            description: form.description.trim() || undefined,
+            daysOffset: form.daysOffset.trim() === "" ? null : Number(form.daysOffset),
+          }
+        : {
+            code: form.code.trim(),
+            nameFa: form.nameFa.trim(),
+            nameEn: form.nameEn.trim() || undefined,
+            description: form.description.trim() || undefined,
+            daysOffset: form.daysOffset.trim() === "" ? null : Number(form.daysOffset),
+          };
       if (editing) {
         await apiJson(`/payment-terms/${editing.id}`, { method: "PATCH", body: JSON.stringify(body) });
       } else {

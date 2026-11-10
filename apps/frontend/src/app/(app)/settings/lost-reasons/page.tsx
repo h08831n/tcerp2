@@ -69,12 +69,21 @@ export default function LostReasonsPage() {
     setSaving(true);
     setFormError(null);
     try {
-      const body = {
-        code: form.code.trim(),
-        nameFa: form.nameFa.trim(),
-        nameEn: form.nameEn.trim() || undefined,
-        sortOrder: Number(form.sortOrder) || 0,
-      };
+      // Body rules: CREATE requires `code` (CreateLostReasonDto); PATCH must
+      // NOT include it (UpdateLostReasonDto has no code field and
+      // forbidNonWhitelisted rejects unknown fields — found by E2E).
+      const body: Record<string, unknown> = editing
+        ? {
+            nameFa: form.nameFa.trim(),
+            nameEn: form.nameEn.trim() || undefined,
+            sortOrder: Number(form.sortOrder) || 0,
+          }
+        : {
+            code: form.code.trim(),
+            nameFa: form.nameFa.trim(),
+            nameEn: form.nameEn.trim() || undefined,
+            sortOrder: Number(form.sortOrder) || 0,
+          };
       if (editing) {
         await apiJson(`/lost-reasons/${editing.id}`, { method: "PATCH", body: JSON.stringify(body) });
       } else {

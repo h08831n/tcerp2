@@ -272,11 +272,22 @@ describeIntegration('core-003 settings center (real AppModule over HTTP)', () =>
     });
     expect(wrongValue.status).toBe(404);
   });
-  it('CORE-003 §6: files.max_upload_mb clamped to the 50MB Multer infra cap', async () => {
-    const over = await api('PUT', '/api/settings/catalog/files.max_upload_mb', state.adminToken, {
-      value: 500,
-    });
-    expect(over.status).toBe(422);
+  it('CORE-003 §6: files.max_upload_mb accepts ONLY integers 1..50', async () => {
+    // Zero, negative, decimal, above-cap and non-numeric → all refused.
+    for (const bad of [0, -5, 7.5, 51, 500, 'abc']) {
+      const res = await api('PUT', '/api/settings/catalog/files.max_upload_mb', state.adminToken, {
+        value: bad,
+      });
+      expect(res.status).toBe(422);
+    }
+    // Boundary values accepted.
+    const one = await api('PUT', '/api/settings/catalog/files.max_upload_mb', state.adminToken, { value: 1 });
+    expect(one.status).toBe(200);
+    const fifty = await api('PUT', '/api/settings/catalog/files.max_upload_mb', state.adminToken, { value: 50 });
+    expect(fifty.status).toBe(200);
+    // Restore default (50).
+    const restore = await api('DELETE', '/api/settings/catalog/files.max_upload_mb', state.adminToken);
+    expect(restore.status).toBe(200);
   });
 
   it('CORE-003 §12 company scope: the catalog is company-scoped', async () => {

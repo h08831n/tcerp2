@@ -137,6 +137,20 @@ export default function SettingsCenterPage() {
     }
   }
 
+  /** BUG (found by E2E): Save was disabled for non-overridden entries — the
+   *  FIRST override was impossible. Enable when the draft differs from the
+   *  server value (dirty state), not from the isOverridden flag. */
+  function isDirty(entry: SettingCatalogEntry): boolean {
+    const draft = drafts[entry.key];
+    const current = entry.value;
+    if (entry.type === 'number') return Number(draft) !== Number(current);
+    if (entry.type === 'boolean') return Boolean(draft) !== Boolean(current);
+    if (Array.isArray(current) || Array.isArray(draft)) {
+      return JSON.stringify(draft ?? []) !== JSON.stringify(current ?? []);
+    }
+    return String(draft ?? '') !== String(current ?? '');
+  }
+
   function renderEditor(entry: SettingCatalogEntry) {
     const disabled = !canEdit || savingKey === entry.key;
     const value = drafts[entry.key];
@@ -334,7 +348,7 @@ export default function SettingsCenterPage() {
                     {canEdit && (
                       <Button
                         size="sm"
-                        disabled={savingKey === entry.key || !entry.isOverridden}
+                        disabled={savingKey === entry.key || !isDirty(entry)}
                         onClick={() => void handleSave(entry)}
                       >
                         {savingKey === entry.key ? "…" : "ذخیره"}

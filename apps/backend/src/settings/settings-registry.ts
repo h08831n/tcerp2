@@ -29,6 +29,11 @@ export interface SettingDefinition {
   defaultValue: unknown;
   /** For type=select — the allowed values. */
   options?: string[];
+  /** For type=number — inclusive bounds enforced on upsert. */
+  min?: number;
+  max?: number;
+  /** Reject non-integer numbers (default: integers allowed). */
+  integerOnly?: boolean;
   /** Secret values are masked in list/read endpoints. */
   isSecret?: boolean;
   /** The backend consumer that enforces this setting (documentation/traceability). */
@@ -93,8 +98,11 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     category: 'files',
     type: 'number',
     labelFa: 'حداکثر حجم هر فایل (مگابایت)',
-    descriptionFa: 'سقف حجم هر فایل آپلودی (کمتر از سقف زیرساختی ۵۰ مگابایت).',
+    descriptionFa: 'سقف حجم هر فایل آپلودی — عدد صحیح ۱ تا ۵۰ (سقف زیرساختی Multer).',
     defaultValue: 50,
+    min: 1,
+    max: 50,
+    integerOnly: true,
     consumer: 'files.service.upload — اعتبارسنجی حجم فایل',
   },
   // ── Integrations (public API) ───────────────────────────────────────────
@@ -132,13 +140,16 @@ export function validateSettingValue(
     case 'number': {
       const n = typeof raw === 'number' ? raw : Number(raw);
       if (!Number.isFinite(n)) return { ok: false, error: 'مقدار باید عدد باشد' };
-      if (n < 0) return { ok: false, error: 'مقدار نمی‌تواند منفی باشد' };
-      // CORE-003 §6: files.max_upload_mb must stay within the Multer infra
-      // cap (50MB) — the UI must never offer a value the upload layer
-      // cannot enforce.
-      if (def.key === 'files.max_upload_mb' && n > 50) {
-        return { ok: false, error: 'حداکثر مجاز ۵۰ مگابایت است (سقف زیرساختی آپلود)' };
+      if (def.integerOnly && !Number.isInteger(n)) {
+        return { ok: false, error: 'مقدار باید عدد صحیح باشد' };
       }
+      if (def.min !== undefined && n < def.min) {
+        return { ok: false, error: `حداقل مجاز ${def.min} است` };
+      }
+      if (def.max !== undefined && n > def.max) {
+        return { ok: false, error: `حداکثر مجاز ${def.max} است` };
+      }
+      if (n < 0) return { ok: false, error: 'مقدار نمی‌تواند منفی باشد' };
       return { ok: true, value: n };
     }
     case 'boolean': {
